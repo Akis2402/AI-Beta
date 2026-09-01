@@ -4,12 +4,15 @@
   "private": true,
   "description": "Trợ Giải — AI học tập (full-stack): frontend tĩnh + backend Node/Express proxy bảo mật cho Anthropic API",
   "main": "server/index.js",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js"
   },
   "dependencies": {
+    "@vercel/analytics": "^2.0.1",
     "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
