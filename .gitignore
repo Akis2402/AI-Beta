@@ -1,0 +1,33 @@
+# ---------- Secrets — KHÔNG BAO GIỜ commit ----------
+.env
+.env.*
+!.env.example
+
+# ---------- Dependencies ----------
+node_modules/
+
+# ---------- Vercel ----------
+.vercel
+
+# ---------- Logs ----------
+logs/
+*.log
+npm-debug.log*
+
+# ---------- Test/coverage ----------
+coverage/
+.nyc_output/
+
+# ---------- Build/temp ----------
+dist/
+build/
+tmp/
+*.tmp
+.cache/
+
+# ---------- OS/editor ----------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
