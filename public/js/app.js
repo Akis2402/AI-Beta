@@ -1,6 +1,20 @@
 'use strict';
 
+<<<<<<< HEAD
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+=======
+// FIX ROOT CAUSE (desktop hoạt động sai trong khi mobile bình thường): dòng này TRƯỚC ĐÂY chạy
+// KHÔNG có guard, ngay đầu file — nếu pdf.js CDN tải chậm/bị chặn (ad-block, tường lửa mạng
+// công ty/trường học, antivirus web-filter... phổ biến trên desktop hơn di động dùng mạng 4G/5G),
+// `pdfjsLib` sẽ là `undefined` và dòng này ném ReferenceError NGAY LẬP TỨC, làm dừng thực thi
+// TOÀN BỘ app.js phía sau (mọi định nghĩa hàm, mọi addEventListener gắn nút bấm...) — kết quả:
+// HTML/CSS vẫn hiển thị bình thường (nên "trông giống app") nhưng KHÔNG nút nào phản hồi. Đã đưa
+// vào guard: nếu pdf.js chưa sẵn sàng, bỏ qua dòng này — parsePDF() bên dưới sẽ tự phát hiện
+// `pdfjsLib` thiếu và báo lỗi rõ ràng riêng cho tính năng đọc PDF, không còn làm chết cả ứng dụng.
+if (window.pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+>>>>>>> f9f96e2 (Fourth Commit)
 
 const state = {
   docs: [],              // {id, name, ext, chunks:[{id,text,garbled}]} — mọi nguồn đã tải lên đều tự động được dùng khi trả lời, không cần bật/tắt thủ công
@@ -469,6 +483,10 @@ function chunkText(text, size = 900) {
   return chunks.map((t, idx) => ({ id: idx + 1, text: t, garbled: garbledRatio(t) > 0.3 }));
 }
 async function parsePDF(file) {
+<<<<<<< HEAD
+=======
+  if (!window.pdfjsLib) throw new Error('Không tải được thư viện đọc PDF (pdf.js) — kiểm tra kết nối mạng hoặc trình chặn quảng cáo rồi thử lại.');
+>>>>>>> f9f96e2 (Fourth Commit)
   const buf = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
   let full = '';
@@ -479,7 +497,16 @@ async function parsePDF(file) {
   }
   return full;
 }
+<<<<<<< HEAD
 async function parseDocx(file) { const buf = await file.arrayBuffer(); const res = await mammoth.extractRawText({ arrayBuffer: buf }); return res.value; }
+=======
+async function parseDocx(file) {
+  if (!window.mammoth) throw new Error('Không tải được thư viện đọc DOCX (mammoth.js) — kiểm tra kết nối mạng hoặc trình chặn quảng cáo rồi thử lại.');
+  const buf = await file.arrayBuffer();
+  const res = await mammoth.extractRawText({ arrayBuffer: buf });
+  return res.value;
+}
+>>>>>>> f9f96e2 (Fourth Commit)
 async function parseTxt(file) { return await file.text(); }
 function iconFor(ext) { return ext === 'pdf' ? ICONS.outline : ext === 'docx' ? ICONS.note : ICONS.outline; }
 
@@ -2213,6 +2240,10 @@ function renderOutlineAnswer(contentEl, spec, msgObj, aiRow) {
 // (hành vi cũ) — mọi nơi gọi hàm này giờ gói kết quả thành 1 tin nhắn trong khung chat qua
 // appendFileMessage(), xem chi tiết lý do ở comment của appendFileMessage().
 async function buildOutlineDocxBlob(spec) {
+<<<<<<< HEAD
+=======
+  if (!window.docx) throw new Error('Không tải được thư viện tạo file .docx (docx.js) — kiểm tra kết nối mạng hoặc trình chặn quảng cáo rồi thử lại.');
+>>>>>>> f9f96e2 (Fourth Commit)
   const {
     Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle
   } = docx;
@@ -3531,3 +3562,9 @@ async function scheduleRecommend(query) {
 }
 
 loadAll();
+<<<<<<< HEAD
+=======
+// Đánh dấu app.js đã chạy hết tới đây (không bị ReferenceError chết giữa chừng) — cho phép
+// handler window.onerror trong index.html biết KHÔNG cần hiện màn hình lỗi khởi động nữa.
+window.__appBooted = true;
+>>>>>>> f9f96e2 (Fourth Commit)

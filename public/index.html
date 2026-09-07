@@ -4,6 +4,48 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Trợ Giải — AI học tập</title>
+<<<<<<< HEAD
+=======
+<!-- FIX ROOT CAUSE (desktop crash): bắt lỗi khởi động NGAY từ đầu <head>, TRƯỚC mọi script CDN.
+     Lý do đặt ở đây: nếu 1 thư viện CDN (pdf.js/mammoth/katex/mathjs/three/docx) tải chậm/bị chặn
+     (tường lửa, ad-block, mạng công ty/trường học — phổ biến trên desktop hơn di động), app.js sẽ
+     ném ReferenceError ngay dòng đầu tiên và dừng thực thi TOÀN BỘ file, khiến mọi nút bấm/sự kiện
+     không bao giờ được gắn — trang "trông có vẻ load" nhưng không hoạt động được. Handler này chỉ
+     hiển thị màn hình lỗi thân thiện + nút Tải lại NẾU app.js chưa khởi động xong (window.__appBooted
+     vẫn false, được set true ở dòng cuối app.js) — lỗi runtime bình thường sau khi app đã chạy sẽ
+     KHÔNG bị handler này can thiệp. -->
+<script>
+(function () {
+  window.__appBooted = false;
+  function showBootError() {
+    if (window.__appBooted || document.getElementById('bootErrorScreen')) return;
+    var isDev = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+    var box = document.createElement('div');
+    box.id = 'bootErrorScreen';
+    box.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#faf7f2;color:#1a1a1a;'
+      + 'display:flex;align-items:center;justify-content:center;padding:24px;'
+      + 'font-family:system-ui,-apple-system,sans-serif;text-align:center;';
+    box.innerHTML =
+      '<div style="max-width:420px;">'
+      + '<div style="font-size:40px;margin-bottom:12px;">⚠️</div>'
+      + '<h2 style="margin:0 0 8px;font-size:18px;">Không thể khởi động ứng dụng</h2>'
+      + '<p style="margin:0 0 16px;color:#555;font-size:14px;line-height:1.5;">Một thư viện cần '
+      + 'thiết chưa tải được (mạng chậm, trình chặn quảng cáo, hoặc tường lửa mạng đang chặn tài '
+      + 'nguyên bên ngoài). Hãy tắt trình chặn quảng cáo hoặc thử mạng khác rồi tải lại trang.</p>'
+      + (isDev ? '<p style="font-size:12px;color:#999;margin:0 0 16px;">Chế độ dev: mở Console (F12) để xem lỗi chi tiết.</p>' : '')
+      + '<button id="bootReloadBtn" style="background:#2955FF;color:#fff;border:none;border-radius:8px;'
+      + 'padding:10px 20px;font-size:14px;cursor:pointer;">Tải lại trang</button>'
+      + '</div>';
+    if (document.body) document.body.appendChild(box);
+    else window.addEventListener('DOMContentLoaded', function () { document.body.appendChild(box); });
+    var btn = box.querySelector('#bootReloadBtn');
+    if (btn) btn.onclick = function () { location.reload(); };
+  }
+  window.addEventListener('error', function () { showBootError(); });
+  window.addEventListener('unhandledrejection', function () { showBootError(); });
+})();
+</script>
+>>>>>>> f9f96e2 (Fourth Commit)
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="alternate icon" href="/favicon.svg">
 <link rel="apple-touch-icon" href="/favicon.svg">
