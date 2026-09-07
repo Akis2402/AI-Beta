@@ -1,0 +1,32 @@
+{
+  "name": "tro-giai-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Trợ Giải — AI học tập (full-stack): frontend tĩnh + backend Node/Express proxy bảo mật cho Anthropic API",
+  "main": "server/index.js",
+<<<<<<< HEAD
+  "engines": {
+    "node": ">=18"
+  },
+=======
+  "engines": { "node": ">=18" },
+>>>>>>> f9f96e2 (Fourth Commit)
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node test/run-all.js",
+    "smoke-test": "node scripts/smoke-test.js"
+  },
+  "dependencies": {
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+<<<<<<< HEAD
+    "dotenv": "^16.6.1",
+=======
+    "dotenv": "^16.4.5",
+>>>>>>> f9f96e2 (Fourth Commit)
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.2.0",
+    "helmet": "^7.1.0"
+  }
+}
