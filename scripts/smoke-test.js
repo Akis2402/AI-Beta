@@ -45,7 +45,18 @@ async function main() {
   try {
     const res = await req('GET', '/mot-duong-dan-khong-ton-tai');
     const text = await res.text();
-    record('GET path lạ (không phải /api) -> serve index.html (SPA fallback)', res.status === 200 && /<html/i.test(text), `status=${res.status}`);
+    // SỬA ASSERTION (assertion CŨ SAI so với thiết kế thật, và đã FAIL từ trước bản refactor này):
+    // app này KHÔNG có client-side router (0 lần pushState/replaceState trong public/js/app.js) và
+    // fallback `app.get('*') -> index.html` đã bị XOÁ CÓ CHỦ Ý — xem giải thích dài ở server/app.js:
+    // fallback đó từng trả HTML cho request đang xin *.js, gây "Uncaught SyntaxError: Unexpected
+    // token '<'" trên thiết bị thật. Hành vi ĐÚNG cho deployment này là 404 thật cho path lạ.
+    // Kiểm tra điều quan trọng THẬT SỰ: path lạ KHÔNG được trả HTML (chống lặp lại đúng bug cũ).
+    const servedHtml = /<html/i.test(text);
+    record(
+      'GET path lạ (không phải /api) -> 404 thật, KHÔNG trả HTML (không có SPA fallback — chủ ý, xem server/app.js)',
+      res.status === 404 && !servedHtml,
+      `status=${res.status}, trảHTML=${servedHtml}`
+    );
   } catch (e) { record('SPA fallback', false, e.message); }
 
   // 3. Security headers có mặt (Helmet + CSP tự cấu hình trong vercel.json/server/middleware/security.js).

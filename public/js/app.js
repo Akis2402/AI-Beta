@@ -176,7 +176,12 @@ async function apiPostStream(path, body, { onDelta, onStatus, signal } = {}) {
       // được coi 1 lượt là hoàn tất khi nhận đúng sự kiện "done" (xử lý bên dưới) — không được suy ra
       // completion chỉ từ việc có status/delta.
       else if (currentEvent === 'status' && typeof onStatus === 'function') onStatus(payload.message || '', payload.state || 'GENERATING');
-      else if (currentEvent === 'done') doneData = payload; // server chỉ gửi "done" khi state === COMPLETED (xem chat.js/runtimeState.js) — không cần kiểm tra lại ở đây
+      // Server gửi "done" cho CẢ 2 trạng thái giao được: COMPLETED (đủ) và PARTIAL (chưa đủ nhưng
+      // phần đã sinh vẫn dùng được — xem runtimeState.classifyFinalOutcome). PARTIAL vẫn được lưu và
+      // hiển thị, kèm cảnh báo rõ ràng; TRƯỚC ĐÂY trường hợp này bị server trả về sự kiện "error" và
+      // client XOÁ SẠCH toàn bộ phần đã stream (có thể là 90% một lời giải dài đúng) — hành vi tệ
+      // nhất có thể, và chính là thứ người dùng nhìn thấy khi câu trả lời dài bị ngắt giữa chừng.
+      else if (currentEvent === 'done') doneData = payload;
       else if (currentEvent === 'error') { errorMsg = payload.message || 'Có lỗi khi kết nối tới máy chủ AI.'; errorState = payload.state || 'FAILED'; }
     }
   }
@@ -2092,6 +2097,23 @@ function startStreamingPreview(container) {
   };
 }
 
+/**
+ * renderPartialWarning() — banner cảnh báo cho câu trả lời ở trạng thái PARTIAL (server đã dùng hết
+ * mọi đường recovery mà nội dung vẫn chưa đầy đủ). Trước đây trường hợp này bị coi là lỗi và toàn bộ
+ * phần đã sinh bị xoá; giờ phần đó được giữ lại + hiển thị rõ là chưa đầy đủ, để người học không mất
+ * công đọc lại từ đầu và biết chính xác cần bấm gì để tiếp tục.
+ */
+function renderPartialWarning(container, data) {
+  if (!container || !data || !data.partial) return;
+  const box = document.createElement('div');
+  box.className = 'partial-warning';
+  const reasons = Array.isArray(data.incompleteReasons) ? data.incompleteReasons : [];
+  const reasonText = reasons.length ? ' (' + reasons.join(', ') + ')' : '';
+  box.textContent = 'Câu trả lời này CHƯA ĐẦY ĐỦ' + reasonText +
+    '. Phần đã hiển thị vẫn chính xác và được giữ lại; bạn có thể yêu cầu AI viết tiếp phần còn thiếu.';
+  container.appendChild(box);
+}
+
 function renderAnswerBlock(container, rawText) {
   const { thinking, answer, truncated } = extractThinking(rawText);
   if (thinking) {
@@ -2466,6 +2488,7 @@ async function sendMessage() {
     approachWrap.className = 'stage-block stage-approach';
     contentEl.appendChild(approachWrap);
     renderAnswerBlock(approachWrap, raw);
+    renderPartialWarning(approachWrap, data);
     renderCitations(approachWrap, contexts, query, raw, approachWebNote);
     // Luôn hiển thị đủ các nút chức năng (Ghi chú/Flashcard/Mindmap) ngay từ giai đoạn
     // Hướng giải — xem giải thích đầy đủ ở đầu buildStudyActions().
@@ -2558,6 +2581,8 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
     msgObj.providers = Array.isArray(data.providers) ? data.providers : null;
     msgObj.reconciledBy = data.reconciledBy || null;
     msgObj.provider = data.provider || null;
+    msgObj.detailPartial = !!data.partial;
+    msgObj.detailIncompleteReasons = Array.isArray(data.incompleteReasons) ? data.incompleteReasons : [];
     // Cập nhật lại subject sau bước "giải chi tiết" (có thể chính xác hơn approach, đặc biệt khi
     // approach chỉ có ảnh chưa detect được — xem resolveSubject() phía server).
     msgObj.subjectId = data.subjectId || msgObj.subjectId || 'general';
@@ -2572,6 +2597,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
     const approachNoteBlock = contentEl.querySelector('.approach-note-block');
     if (approachNoteBlock) approachNoteBlock.remove();
     appendDetailSection(contentEl, msgObj, aiRow);
+    renderPartialWarning(contentEl, data);
 
     state.history.push({ role: 'user', content: msgObj.query || '[Người dùng đã gửi ảnh đề bài để giải]' });
     state.history.push({ role: 'assistant', content: raw });
