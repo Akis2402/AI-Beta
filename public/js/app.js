@@ -1,4 +1,5 @@
 <<<<<<< HEAD
+<<<<<<< HEAD
 'use strict';
 
 // FIX ROOT CAUSE (Cannot access 'el' before initialization): `el` PHẢI được khai báo TRƯỚC bất kỳ
@@ -3746,6 +3747,8 @@ loadAll();
 // handler window.onerror trong index.html biết KHÔNG cần hiện màn hình lỗi khởi động nữa.
 window.__appBooted = true;
 =======
+=======
+>>>>>>> 2826a54 (Next Commit)
 'use strict';
 
 // FIX ROOT CAUSE (Cannot access 'el' before initialization): `el` PHẢI được khai báo TRƯỚC bất kỳ
@@ -7622,4 +7625,7 @@ loadAll();
 // Đánh dấu app.js đã chạy hết tới đây (không bị ReferenceError chết giữa chừng) — cho phép
 // handler window.onerror trong index.html biết KHÔNG cần hiện màn hình lỗi khởi động nữa.
 window.__appBooted = true;
+<<<<<<< HEAD
 >>>>>>> 2f3f660 (Commit)
+=======
+>>>>>>> 2826a54 (Next Commit)
