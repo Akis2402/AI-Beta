@@ -54,8 +54,31 @@ app.use('/api/study', generateLimiter, studyRoutes);
 // (xem vercel.json - outputDirectory), request tĩnh sẽ KHÔNG đi qua function này.
 // Đoạn dưới đây chủ yếu phục vụ khi chạy `npm run dev` / `npm start` ở local.
 const publicDir = path.join(__dirname, '..', 'public');
+<<<<<<< HEAD
 app.use(express.static(publicDir, { maxAge: '1h' }));
 app.get('*', (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+=======
+// FIX (bootErrorScreen "<<" + duplicate ACTIVE_3D): maxAge:'1h' áp cho MỌI file tĩnh, kể cả
+// index.html. Khi deploy bản fix mới, trình duyệt vẫn phục vụ index.html CŨ từ cache tới 1h,
+// trỏ tới /js/storage.js và /js/app.js KHÔNG có ?v=... -> nạp lại bản JS cũ (đã bị cache riêng),
+// chồng lên bản mới -> vừa lỗi cú pháp bản cũ vừa "Identifier ... already been declared".
+// -> index.html (và mọi *.html) PHẢI luôn revalidate; chỉ asset tĩnh có filename cố định
+// (js/css/vendor) mới nên cache dài hạn.
+app.use(
+  express.static(publicDir, {
+    maxAge: '1h',
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      }
+    },
+  })
+);
+app.get('*', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.sendFile(path.join(publicDir, 'index.html'));
+});
+>>>>>>> d5e845a (Another)
 
 // ---------- Xử lý lỗi ----------
 app.use(notFoundHandler);
