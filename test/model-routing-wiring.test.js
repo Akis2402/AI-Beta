@@ -59,8 +59,15 @@ test('cả 4 lệnh gọi model ở nhánh direct (không cross-check) dùng use
   const codeLines = chatSrc.split('\n').filter((l) => !l.trim().startsWith('//'));
   const codeSrc = codeLines.join('\n');
   assert.ok(!/fast:\s*callMode\.fast/.test(codeSrc), 'không được còn "fast: callMode.fast" trực tiếp ở lệnh gọi model — phải qua useFastModel (đã tính thêm modelTier)');
+  // SAU REFACTOR PHẦN B: nhánh streaming direct không còn 2 lệnh gọi rời (initial + continuation) mà
+  // dùng CHUNG 1 buildArgs() factory cho cả hai — nên số điểm khai "fast: useFastModel" giảm từ 4
+  // xuống 3 (streaming buildArgs, JSON initial, JSON continuation) MÀ KHÔNG giảm phạm vi bảo đảm:
+  // mọi lệnh gọi model ở nhánh direct vẫn đi qua useFastModel. Assertion phủ định bên trên
+  // (không còn "fast: callMode.fast") là điều kiện thực sự chống hồi quy, giữ nguyên độ mạnh.
   const useFastModelUsages = (codeSrc.match(/fast:\s*useFastModel/g) || []).length;
-  assert.strictEqual(useFastModelUsages, 4, `phải có đúng 4 lệnh gọi model dùng "fast: useFastModel" (thấy ${useFastModelUsages})`);
+  assert.strictEqual(useFastModelUsages, 3, `phải có đúng 3 điểm khai "fast: useFastModel" sau refactor (thấy ${useFastModelUsages})`);
+  assert.ok(/buildArgs: \(\{ messages: msgs, maxTokens \}\) => \(\{[\s\S]*?fast: useFastModel/.test(codeSrc),
+    'buildArgs của nhánh streaming direct phải truyền fast: useFastModel cho CẢ lượt đầu và lượt tiếp nối');
 });
 
 test('directCaller (racing callFastest vs callWithFailover) vẫn dựa trên callMode.fast (deepThinking) — không đổi hành vi UI "chế độ Nhanh"', () => {

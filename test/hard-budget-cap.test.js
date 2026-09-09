@@ -40,22 +40,43 @@ test('chat.js không còn fallback "Math.max(300, reserve * 0.3)" ngoài reserve
 });
 
 // ---------- 2. Static: mọi điểm continuation phải dừng khi !allow, không có đường nào bỏ qua ----------
-test('cả 4 điểm continuation streaming đều "break" ngay khi !reserveDecision.allow (không gọi AI thêm)', () => {
-  const breakGuards = (codeSrc.match(/if \(!reserveDecision\.allow\) break;/g) || []).length;
-  assert.strictEqual(breakGuards, 2, `phải có đúng 2 guard "if (!reserveDecision.allow) break;" ở 2 nhánh streaming (thấy ${breakGuards})`);
+// ---------- CẬP NHẬT SAU REFACTOR PHẦN B (resumable failover) ----------
+// 4 điểm continuation viết tay trong chat.js (2 streaming + 2 JSON) đã được GỘP vào đúng 1 nơi:
+// server/utils/resumableStream.js (runResumableStream + runResumableNonStream). Chính sự trùng lặp
+// 4 bản logic gần-giống-nhau đó là môi trường sinh ra bug hard-cap ban đầu, nên các assertion dưới
+// đây kiểm tra CÙNG MỘT ĐẢM BẢO ở vị trí mới, và kiểm tra thêm rằng chat.js KHÔNG còn vòng lặp
+// continuation viết tay nào (mạnh hơn bản cũ: bản cũ chỉ đếm số guard, không cấm phát sinh bản thứ 5).
+const resumableSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'utils', 'resumableStream.js'), 'utf8');
+const resumableCode = resumableSrc.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+
+test('mọi điểm continuation dừng ngay khi !decision.allow (không gọi AI thêm) — cả 2 runner', () => {
+  const guards = (resumableCode.match(/if \(!decision \|\| !decision\.allow\)/g) || []).length;
+  assert.strictEqual(guards, 2, `phải có đúng 2 guard !allow (runResumableStream + runResumableNonStream), thấy ${guards}`);
+  // Guard phải nằm TRƯỚC mọi lệnh gọi provider trong cùng vòng lặp.
+  const firstGuard = resumableCode.indexOf('if (!decision || !decision.allow)');
+  const firstStreamCall = resumableCode.indexOf('await streamFn(', firstGuard);
+  assert.ok(firstStreamCall > firstGuard, 'guard !allow phải nằm trước lệnh gọi provider');
 });
 
-test('cả 2 điểm continuation JSON (ensureCompleteNonStream) trả sentinel thay vì gọi AI khi !decision.allow', () => {
-  const sentinelGuards = (codeSrc.match(/if \(!decision\.allow\) return Promise\.resolve\(\{ reserveExhausted: true \}\);/g) || []).length;
-  assert.strictEqual(sentinelGuards, 2, `phải có đúng 2 guard sentinel ở nhánh JSON (thấy ${sentinelGuards})`);
+test('chat.js KHÔNG còn vòng lặp continuation viết tay nào (chỉ delegate sang resumableStream)', () => {
+  const handRolled = (codeSrc.match(/while \(\s*\n?\s*completeness\.status === 'INCOMPLETE'/g) || []).length;
+  assert.strictEqual(handRolled, 0, `chat.js không được tự viết vòng continuation nữa (thấy ${handRolled})`);
+  assert.ok(codeSrc.includes('runResumableStream'), 'chat.js phải dùng runResumableStream cho nhánh streaming');
+  assert.ok(codeSrc.includes('runResumableNonStream'), 'chat.js phải dùng runResumableNonStream cho nhánh JSON');
 });
 
-test('ensureCompleteNonStream() dừng vòng lặp ngay khi nhận sentinel reserveExhausted, không tính là continuation đã dùng', () => {
-  assert.ok(chatSrc.includes('if (contResult && contResult.reserveExhausted) break;'), 'phải kiểm tra sentinel và break trước khi cộng continuations/nối text');
-  // continuations chỉ += 1 SAU dòng check sentinel -> vòng lặp reserveExhausted không tính là 1 lượt gọi AI
-  const idxSentinel = chatSrc.indexOf('if (contResult && contResult.reserveExhausted) break;');
-  const idxIncrement = chatSrc.indexOf('continuations += 1;', idxSentinel);
-  assert.ok(idxSentinel > 0 && idxIncrement > idxSentinel, 'check sentinel phải nằm TRƯỚC dòng continuations += 1');
+test('sentinel reserveExhausted vẫn được tôn trọng và break TRƯỚC khi ghi nhận chi phí', () => {
+  assert.ok(resumableCode.includes("step.reserveExhausted"), 'phải vẫn kiểm tra sentinel reserveExhausted của callOnce cũ');
+  const idxSentinel = resumableCode.indexOf('step.reserveExhausted');
+  const idxSpend = resumableCode.indexOf('session.noteRecoverySpend(decision.amount)', idxSentinel);
+  assert.ok(idxSentinel > 0 && idxSpend > idxSentinel, 'check sentinel phải nằm TRƯỚC khi trừ ngân sách/nối text');
+});
+
+test('reserve ĐƯỢC TRỪ ngay khi cấp (nếu không, reserve không bao giờ cạn và vòng recovery chạy tới safety cap)', () => {
+  assert.ok(
+    /reserveState\.used \+= decision\.amount/.test(codeSrc),
+    'makeRecoveryResolver() phải cộng dồn reserveState.used khi cấp lô token'
+  );
 });
 
 // ---------- 3. Unit: shouldUseReserve tự nó không bao giờ cấp vượt phần còn lại ----------
