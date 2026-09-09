@@ -1,6 +1,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 'use strict';
 
 // FIX ROOT CAUSE (Cannot access 'el' before initialization): `el` PHẢI được khai báo TRƯỚC bất kỳ
@@ -3752,6 +3753,8 @@ window.__appBooted = true;
 >>>>>>> 2826a54 (Next Commit)
 =======
 >>>>>>> d5e845a (Another)
+=======
+>>>>>>> 82d1200 (Anotherther)
 'use strict';
 
 // FIX ROOT CAUSE (Cannot access 'el' before initialization): `el` PHẢI được khai báo TRƯỚC bất kỳ
@@ -7630,8 +7633,11 @@ loadAll();
 window.__appBooted = true;
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> 2f3f660 (Commit)
 =======
 >>>>>>> 2826a54 (Next Commit)
 =======
 >>>>>>> d5e845a (Another)
+=======
+>>>>>>> 82d1200 (Anotherther)

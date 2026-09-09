@@ -1,5 +1,11 @@
 {
+<<<<<<< HEAD
   "outputDirectory": "public",
+=======
+  "version": 2,
+  "outputDirectory": "public",
+  "buildCommand": "npm run build",
+>>>>>>> 82d1200 (Anotherther)
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api" }
   ],
@@ -22,6 +28,39 @@
           "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
         }
       ]
+<<<<<<< HEAD
+=======
+    },
+    {
+      "source": "/",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/index.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/js/(.*)\\.[0-9a-f]{10}\\.js",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    },
+    {
+      "source": "/css/(.*)\\.[0-9a-f]{10}\\.css",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    },
+    {
+      "source": "/vendor/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=86400, must-revalidate" }
+      ]
+>>>>>>> 82d1200 (Anotherther)
     }
   ]
 }

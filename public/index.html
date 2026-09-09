@@ -12,6 +12,7 @@
      script CDN để bắt được cả lỗi xảy ra khi các CDN đó tải/parse thất bại. -->
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 <script src="/js/boot.js"></script>
 =======
 <script src="/js/boot.js?v=1788932562"></script>
@@ -19,6 +20,9 @@
 =======
 <script src="/js/boot.js?v=1788932562"></script>
 >>>>>>> d5e845a (Another)
+=======
+<script src="/js/boot.js"></script>
+>>>>>>> 82d1200 (Anotherther)
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="alternate icon" href="/favicon.svg">
 <link rel="apple-touch-icon" href="/favicon.svg">
@@ -335,17 +339,34 @@
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 <script src="/js/storage.js"></script>
 <<<<<<< HEAD
 =======
 <script src="/js/imageStorage.js"></script>
 >>>>>>> 2f3f660 (Commit)
+=======
+<!-- FIX ROOT CAUSE (cache/versioning — PHẦN 4 + duplicate "ACTIVE_3D already declared"): các thẻ
+     <script> dưới đây KHÔNG còn hard-code số version (?v=...) — số đó dễ bị QUÊN bump ở 1 lần
+     deploy, khiến 2 deployment liên tiếp cùng dùng CHUNG 1 URL cho 2 NỘI DUNG JS khác nhau -> CDN/
+     trình duyệt có thể phục vụ lẫn lộn bản cũ/mới dưới cùng URL đó (đúng nguyên nhân gây "Identifier
+     'ACTIVE_3D' has already been declared" quan sát được). scripts/build.js (chạy TỰ ĐỘNG mỗi lần
+     `npm run build`, tức MỖI LẦN Vercel deploy — xem vercel.json "buildCommand") gắn content-hash
+     10 ký tự vào tên từng file NGAY TRƯỚC KHI ghi lại đúng các <script src> này (vd
+     "app.7f3a9c1e02.js"): nội dung đổi -> hash đổi -> URL đổi hẳn, không bao giờ trùng URL giữa 2
+     nội dung khác nhau -> an toàn cache "immutable" vĩnh viễn (xem vercel.json). File nguồn ở đây
+     CỐ Ý giữ tên KHÔNG hash (đây là template — build step ghi đè bản có hash vào output deploy,
+     KHÔNG commit ngược lại repo). -->
+<script src="/js/storage.js"></script>
+<script src="/js/imageStorage.js"></script>
+>>>>>>> 82d1200 (Anotherther)
 <script src="/js/config.js"></script>
 <script src="/js/formulas.js"></script>
 <script src="/js/subjects.js"></script>
 <script src="/js/solid3d.js"></script>
 <script src="/js/geo2d-engine.js"></script>
 <script src="/js/app.js"></script>
+<<<<<<< HEAD
 =======
 =======
 >>>>>>> d5e845a (Another)
@@ -361,5 +382,7 @@
 >>>>>>> 2826a54 (Next Commit)
 =======
 >>>>>>> d5e845a (Another)
+=======
+>>>>>>> 82d1200 (Anotherther)
 </body>
 </html>

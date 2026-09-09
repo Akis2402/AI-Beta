@@ -55,6 +55,7 @@ app.use('/api/study', generateLimiter, studyRoutes);
 // Đoạn dưới đây chủ yếu phục vụ khi chạy `npm run dev` / `npm start` ở local.
 const publicDir = path.join(__dirname, '..', 'public');
 <<<<<<< HEAD
+<<<<<<< HEAD
 app.use(express.static(publicDir, { maxAge: '1h' }));
 app.get('*', (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
 =======
@@ -70,15 +71,61 @@ app.use(
     setHeaders: (res, filePath) => {
       if (filePath.endsWith('.html')) {
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+=======
+
+// ROOT CAUSE FIX (P0 — "Unexpected token '<'" / bootErrorScreen giả trên iPhone):
+// TRƯỚC ĐÂY có `app.get('*', (req,res) => res.sendFile(index.html))` ở CUỐI stack — một fallback
+// kiểu "SPA" nhận MỌI request không khớp route nào khác (kể cả 1 URL /js/*.js bị gõ sai, bị 404,
+// hoặc lọt qua static middleware vì lý do bất kỳ) và trả về... index.html — TỨC LÀ TRẢ HTML CHO 1
+// REQUEST ĐANG XIN JAVASCRIPT. Trình duyệt nhận `<!DOCTYPE html>...` tại nơi nó mong đợi
+// `const ACTIVE_3D = [...]` và ném thẳng "Uncaught SyntaxError: Unexpected token '<'" — ĐÚNG Y HỆT
+// lỗi console đang gặp. App này KHÔNG có client-side router (không có nhiều "trang" ảo cần fallback
+// về index.html) — chỉ có DUY NHẤT 1 trang thật ở "/". Vì vậy fallback này không có lý do tồn tại
+// và bị XOÁ HẲN (không che bằng try/catch, không đổi Content-Type thủ công): mọi request tĩnh
+// không khớp file thật sẽ rơi xuống notFoundHandler bên dưới, trả về đúng 404 thật — KHÔNG BAO GIỜ
+// còn trả HTML nơi trình duyệt đang mong đợi JS. GET "/" vẫn phục vụ index.html bình thường qua
+// hành vi mặc định của express.static (index: 'index.html').
+//
+// FIX cache/versioning (mục PHẦN 4): trước đây maxAge:'1h' áp CHUNG cho mọi asset tĩnh, kể cả các
+// file *.js/*.css KHÔNG được đặt tên theo content-hash → sau khi bumping code, trình duyệt vẫn có
+// thể phục vụ bản JS CŨ từ cache tới 1h dưới CÙNG URL /js/storage.js, chồng lên bản mới nếu tab cũ
+// vẫn còn mở → "Identifier ... already been declared". Nay pipeline build (scripts/build.js, chạy
+// tự động mỗi lần `npm run build`/deploy) gắn content-hash vào tên các asset core (vd
+// app.<hash>.js) TRƯỚC khi thư mục public được deploy, nên:
+//   - asset ĐÃ fingerprint (tên chứa hash 10 ký tự hex) → an toàn cache "immutable" dài hạn, vì nội
+//     dung đổi = tên file đổi = URL khác hẳn, không bao giờ có xung đột cũ/mới dưới cùng 1 URL.
+//   - index.html (và asset CHƯA fingerprint) → luôn no-store, không được cache, để trình duyệt
+//     LUÔN lấy bản index.html mới nhất (trỏ đúng tên file đã hash của lần deploy đó).
+// Vercel phục vụ static trực tiếp qua CDN edge nên header thật sự áp dụng cho production là ở
+// vercel.json; các dòng dưới đây chỉ đảm bảo `npm start`/`npm run dev` (local, không qua Vercel)
+// có cùng hành vi cache, không lệch giữa 2 môi trường.
+const HASHED_ASSET_RE = /\.[0-9a-f]{10}\.(js|css)$/i;
+app.use(
+  express.static(publicDir, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-store, must-revalidate');
+      } else if (HASHED_ASSET_RE.test(filePath)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      } else if (filePath.includes(`${path.sep}vendor${path.sep}`)) {
+        // Thư viện self-host bên thứ 3, KHÔNG fingerprint theo nội dung (version pin qua đường dẫn
+        // package, hiếm khi đổi) — cache vừa phải, luôn revalidate, không "immutable".
+        res.setHeader('Cache-Control', 'public, max-age=86400, must-revalidate');
+      } else {
+        res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+>>>>>>> 82d1200 (Anotherther)
       }
     },
   })
 );
+<<<<<<< HEAD
 app.get('*', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(publicDir, 'index.html'));
 });
 >>>>>>> d5e845a (Another)
+=======
+>>>>>>> 82d1200 (Anotherther)
 
 // ---------- Xử lý lỗi ----------
 app.use(notFoundHandler);
