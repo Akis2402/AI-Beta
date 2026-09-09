@@ -25,7 +25,14 @@ function createDocStore(opts) {
   var storage = opts.localStorage; // localStorage-like: getItem/setItem/removeItem
   var dbName = opts.dbName || 'tro-giai-db';
   var storeName = opts.storeName || 'docs';
+<<<<<<< HEAD
   var dbVersion = opts.dbVersion || 1;
+=======
+  // FIX (imageStorage.js): bumped 1 -> 2 để cùng version với chatImageStore (2 module dùng
+  // chung 1 IndexedDB 'tro-giai-db') — 2 kết nối mở cùng DB với version KHÁC NHAU sẽ khiến
+  // kết nối version thấp hơn bị 'blocked' khi kết nối kia cần upgrade, nên bắt buộc đồng bộ.
+  var dbVersion = opts.dbVersion || 2;
+>>>>>>> 2f3f660 (Commit)
   var legacyKey = opts.legacyKey || 'tro-giai:docs';
   var fallbackKey = opts.fallbackKey || 'tro-giai:docs:fallback';
   var migratedFlagKey = opts.migratedFlagKey || 'tro-giai:docs:migrated-v1';
@@ -49,6 +56,15 @@ function createDocStore(opts) {
         if (!db.objectStoreNames.contains(storeName)) {
           db.createObjectStore(storeName, { keyPath: 'id' });
         }
+<<<<<<< HEAD
+=======
+        // Tạo sẵn luôn store 'chatImages' ở đây (dù docStore không dùng tới) — vì upgrade chỉ
+        // chạy được 1 lần khi version tăng; nếu để module imageStorage.js tự tạo riêng sẽ có
+        // rủi ro race giữa 2 kết nối mở cùng DB đồng thời lúc khởi động app.
+        if (!db.objectStoreNames.contains('chatImages')) {
+          db.createObjectStore('chatImages', { keyPath: 'id' });
+        }
+>>>>>>> 2f3f660 (Commit)
       };
       req.onsuccess = function (ev) { resolve(ev.target.result); };
       req.onerror = function () {

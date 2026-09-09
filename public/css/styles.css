@@ -458,6 +458,10 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .msg-user{display:flex;justify-content:flex-end;}
 .msg-user .bubble{background:var(--user-bubble);color:#fff;padding:12px 16px;border-radius:16px 16px 3px 16px;max-width:80%;font-size:14.5px;line-height:1.6;box-shadow:var(--shadow-sm);}
 .msg-user .bubble img{display:block;max-width:100%;border-radius:10px;margin-bottom:8px;border:1px solid rgba(255,255,255,.15);}
+<<<<<<< HEAD
+=======
+.msg-user .bubble .img-restore-warn{display:block;font-style:italic;opacity:.85;margin-bottom:4px;}
+>>>>>>> 2f3f660 (Commit)
 .msg-ai{display:block;}
 .msg-ai .label{font-family:var(--font-mono);font-size:10.5px;color:var(--primary);margin-bottom:9px;display:flex;align-items:center;gap:7px;font-weight:500;}
 .msg-ai .label::before{content:'✦';font-size:10px;}
