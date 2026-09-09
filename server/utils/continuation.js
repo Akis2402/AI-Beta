@@ -120,4 +120,301 @@ function appendContinuationTurn(messages, priorText, completeness) {
   ];
 }
 
-module.exports = { MAX_CONTINUATIONS, computeRecoveryBudget, buildContinuationPrompt, appendContinuationTurn };
+// ============================================================================================
+// PHẦN G — COMPACT CONTINUATION CONTEXT
+// ============================================================================================
+// NGUYÊN NHÂN GỐC (bản trước): appendContinuationTurn() nối NGUYÊN VĂN toàn bộ `priorText` vào
+// messages ở MỌI lượt continuation. Với 1 bài dài cần 3 lượt, phần text đã sinh (đang lớn dần) bị
+// gửi lại 3 lần — input token của các lượt sau tăng gần như tuyến tính theo độ dài câu trả lời, đúng
+// loại "token lãng phí" mà PHẦN D nhắm tới. Tệ hơn: đó cũng là lý do các lượt continuation dễ chạm
+// giới hạn context/độ trễ và bị cắt tiếp.
+//
+// buildMinimalContinuationContext() gửi ĐỦ mà không gửi THỪA:
+//   LUÔN GIỮ  : đề bài gốc + yêu cầu (nằm trong `messages` — không đụng tới), sườn đánh số/heading,
+//               MỌI dòng chứa dữ liệu (số/công thức/biến/đơn vị/citation), MỌI khối vẽ (canonical
+//               drawing state) nguyên vẹn, và TAIL nguyên văn quanh điểm cắt.
+//   CHỈ GỬI KHI CẦN: kết quả trung gian (đi kèm dòng dữ liệu), citation state.
+//   KHÔNG GỬI LẠI  : prose diễn giải đã hoàn thành, metadata trùng lặp.
+// Không bao giờ cắt GIỮA: LaTeX, code fence, JSON, bảng, drawing state (xem findSafeCutIndex()).
+
+// Số ký tự nguyên văn quanh điểm cắt luôn được gửi lại — model cần đọc chính xác chỗ đang dở để
+// viết tiếp liền mạch (không phải "đoán" nó đã viết gì).
+const CONTINUATION_TAIL_CHARS = Number(process.env.CONTINUATION_TAIL_CHARS) || 1200;
+// Dưới ngưỡng này thì nén không đáng: gửi nguyên văn còn rẻ hơn cả phần marker chèn thêm.
+const CONTINUATION_COMPACT_MIN_CHARS = 1600;
+
+const DATA_LINE_RE = [
+  /\d/, /[=<>≤≥≠±∈∩∪→⇒⇔]/, /\$/, /\\\(|\\\[|\\frac|\\sqrt|\\int|\\sum/, /```/, /\[\d+\]/,
+  /^\s*(#{1,6}\s|[-*+]\s|\d+[).]\s|[a-jA-J][).]\s|\*\*)/,
+  // "bước" bị CỐ Ý loại khỏi danh sách này: nó xuất hiện rất thường xuyên trong prose bình thường
+  // ("ta thực hiện các bước sau…") nên giữ nó lại làm mọi dòng diễn giải bị coi là dòng dữ liệu và
+  // compaction không có hiệu lực. Tiêu đề "Bước 5" luôn chứa CHỮ SỐ nên đã được /\d/ ở trên giữ lại.
+  // ĐO THẬT (scripts/measure-tokens.js) phát hiện: dùng /\b(vậy|...)\b/ khớp NHẦM prose tiếng Việt
+  // thông thường — "như vậy", "vì vậy", "vậy nên" xuất hiện dày đặc trong văn diễn giải, khiến GẦN
+  // NHƯ MỌI dòng prose bị coi là dòng dữ liệu và compaction không tiết kiệm được gì (đo được 0%).
+  // Các từ này chỉ mang nghĩa "dòng kết luận/đáp số" khi đứng ĐẦU DÒNG; còn "Vậy S = 6" thì đã có
+  // chữ số + dấu "=" nên luôn được giữ bởi các mẫu phía trên rồi.
+  /^\s*(vậy|kết luận|đáp số|đáp án|điều kiện|giả thiết|yêu cầu)\b/i,
+  /(điều kiện|giả thiết|ràng buộc)\s*:/i
+];
+function isStructuralOrDataLine(line) {
+  return DATA_LINE_RE.some((re) => re.test(line));
+}
+
+/**
+ * findSafeCutIndex(): tìm vị trí bắt đầu TAIL sao cho KHÔNG rơi vào giữa 1 khối ```...```, giữa 1
+ * công thức LaTeX khối ($$...$$ / \[...\]), hay giữa 1 hàng bảng markdown. Luôn lùi về ĐẦU DÒNG.
+ * @param {string} text
+ * @param {number} desiredTailChars
+ * @returns {number} index an toàn để slice tail.
+ */
+function findSafeCutIndex(text, desiredTailChars) {
+  if (text.length <= desiredTailChars) return 0;
+  let idx = text.length - desiredTailChars;
+  // Lùi về đầu dòng gần nhất.
+  const nl = text.lastIndexOf('\n', idx);
+  if (nl >= 0) {
+    idx = nl + 1;
+  } else {
+    // KHÔNG có dòng mới nào phía trước (model trả về 1 khối văn bản dài liền mạch — hiếm nhưng có
+    // thật). Trước đây trường hợp này rơi về idx=0, tức KHÔNG nén được gì cả và toàn bộ answer cũ
+    // vẫn bị gửi lại. Lùi về ranh giới CÂU gần nhất thay vì đầu văn bản; nếu vẫn không có, lùi về
+    // khoảng trắng gần nhất để không bao giờ cắt giữa 1 từ/1 con số.
+    const sentence = Math.max(
+      text.lastIndexOf('. ', idx), text.lastIndexOf('? ', idx), text.lastIndexOf('! ', idx)
+    );
+    if (sentence > 0) idx = sentence + 2;
+    else {
+      const space = text.lastIndexOf(' ', idx);
+      idx = space > 0 ? space + 1 : 0;
+    }
+  }
+
+  // Nếu phần TRƯỚC idx có số dấu ``` LẺ, nghĩa là idx đang nằm BÊN TRONG 1 khối code/vẽ -> lùi tiếp
+  // về đúng dòng mở khối đó, để tail chứa cả khối (drawing canonical state không bao giờ bị xẻ đôi).
+  const before = text.slice(0, idx);
+  const fenceCount = (before.match(/```/g) || []).length;
+  if (fenceCount % 2 !== 0) {
+    const openIdx = before.lastIndexOf('```');
+    const lineStart = text.lastIndexOf('\n', openIdx);
+    return lineStart >= 0 ? lineStart + 1 : 0;
+  }
+  // Tương tự với $$ (LaTeX khối) — số $$ lẻ ở phần trước = đang ở giữa 1 công thức khối.
+  const dollarCount = (before.match(/\$\$/g) || []).length;
+  if (dollarCount % 2 !== 0) {
+    const openIdx = before.lastIndexOf('$$');
+    const lineStart = text.lastIndexOf('\n', openIdx);
+    return lineStart >= 0 ? lineStart + 1 : 0;
+  }
+  return idx;
+}
+
+/**
+ * compactPriorText(): tạo bản GỌN của phần đã sinh để làm ngữ cảnh cho lượt tiếp theo.
+ * @param {string} priorText
+ * @param {{tailChars?:number}} [opts]
+ * @returns {{text:string, rawChars:number, compactChars:number, compacted:boolean}}
+ */
+function compactPriorText(priorText, opts = {}) {
+  const raw = String(priorText || '');
+  const tailChars = opts.tailChars || CONTINUATION_TAIL_CHARS;
+  if (raw.length <= Math.max(CONTINUATION_COMPACT_MIN_CHARS, tailChars)) {
+    return { text: raw, rawChars: raw.length, compactChars: raw.length, compacted: false };
+  }
+
+  const cut = findSafeCutIndex(raw, tailChars);
+  const head = raw.slice(0, cut);
+  const tail = raw.slice(cut); // NGUYÊN VĂN, không bao giờ bị nén — đây là mốc để viết tiếp
+
+  // Từ phần HEAD: giữ sườn + mọi dòng dữ liệu; bỏ prose đã hoàn thành. Khối ```...``` giữ nguyên vẹn.
+  const lines = head.split('\n');
+  const kept = [];
+  let insideFence = false;
+  let droppedRun = 0;
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) { insideFence = !insideFence; kept.push(line); droppedRun = 0; continue; }
+    if (insideFence) { kept.push(line); continue; }
+    const t = line.trim();
+    if (!t) continue;
+    if (isStructuralOrDataLine(line) || t.length < 60) {
+      droppedRun = 0;
+      kept.push(line);
+      continue;
+    }
+    droppedRun += 1;
+    if (droppedRun === 1) kept.push('[…đoạn diễn giải đã viết xong, không cần lặp lại…]');
+  }
+
+  const text = `${kept.join('\n')}\n${tail}`;
+  return { text, rawChars: raw.length, compactChars: text.length, compacted: true };
+}
+
+/**
+ * PHẦN H — SMART RESUME PROMPT.
+ * Khác buildContinuationPrompt() (dành cho lỗi CẤU TRÚC) ở chỗ: nói rõ đây là phần TIẾP NỐI của 1
+ * câu trả lời bị NGẮT giữa dòng do sự cố kỹ thuật ở phía nhà cung cấp trước — model mới không hề
+ * "biết" nó đã viết gì, nên phải được chỉ dẫn tuyệt đối rõ ràng là KHÔNG viết lại từ đầu.
+ *
+ * @param {{priorTail:string, reasons?:string[], missingCoverage?:string[], interrupted?:boolean,
+ *   coverageList?:string[], citationValidation?:object, drawingCanonicalErrors?:string[]}} args
+ * @returns {string}
+ */
+function buildResumePrompt({
+  priorTail = '', reasons = [], missingCoverage = [], interrupted = false,
+  citationValidation = null, drawingCanonicalErrors = []
+} = {}) {
+  const lastChars = String(priorTail).slice(-160).replace(/\s+/g, ' ').trim();
+
+  // ĐO THẬT rồi mới chốt độ dài (scripts/measure-tokens.js): bản nháp đầu tiên của prompt này dài
+  // ~200 token, khiến 1 lượt continuation của câu trả lời NGẮN tốn NHIỀU input token hơn cả bản cũ
+  // (-25%, tức tăng 25%) — phần tiết kiệm từ nén priorText không bù được chi phí prompt cố định.
+  // Bản dưới đây giữ ĐỦ 6 chỉ thị bắt buộc của PHẦN H nhưng viết cô đặc, mỗi chỉ thị 1 dòng ngắn.
+  const lines = [
+    interrupted
+      ? 'Phần trả lời trên BỊ NGẮT giữa chừng do lỗi kết nối, KHÔNG phải đã xong. Bạn đang VIẾT TIẾP chính câu trả lời đó.'
+      : 'Câu trả lời trên CHƯA HOÀN CHỈNH. Bạn đang VIẾT TIẾP chính câu trả lời đó.',
+    lastChars ? `Ký tự cuối đã hiển thị: "…${lastChars}"` : '',
+    'KHÔNG viết lại từ đầu. KHÔNG lặp lại nội dung đã có (kể cả tiêu đề/lời dẫn).',
+    'Viết tiếp ĐÚNG từ chỗ đang thiếu; nếu đang dở giữa câu/bước thì hoàn tất chính câu/bước đó trước, không thêm lời dẫn.',
+    'GIỮ NGUYÊN ký hiệu/ẩn số/tên điểm, mọi kết quả trung gian và số liệu đã có; không tính lại theo cách khác.',
+    'GIỮ NGUYÊN cách đánh số đang dùng và tiếp tục đúng số kế tiếp.',
+    'Đóng đúng cú pháp mọi khối LaTeX/code/hình vẽ còn mở, không đổi toạ độ/tên điểm đã có.',
+    'Chỉ kết thúc khi đã trình bày đủ mọi yêu cầu của đề. Không thêm nội dung ngoài yêu cầu, không ghi chú về việc bị ngắt.'
+  ];
+
+  if (missingCoverage.length) {
+    lines.push(`7. Các ý CÒN THIẾU cần trình bày (chỉ những ý này): ${missingCoverage.join(', ')}.`);
+  }
+  if (reasons.includes('unclosed_code_fence')) lines.push('- Lưu ý: có khối mã (```) chưa đóng — đóng lại.');
+  if (reasons.includes('unclosed_draw_block')) lines.push('- Lưu ý: có khối hình vẽ chưa đóng — đóng lại đúng JSON đã dùng.');
+  if (reasons.includes('unclosed_latex')) lines.push('- Lưu ý: có công thức LaTeX chưa đóng — đóng lại đúng cặp $$/\\]/\\).');
+  if (reasons.includes('missing_conclusion')) lines.push('- Lưu ý: chưa có kết luận/đáp số cuối cùng — bổ sung.');
+  if (citationValidation && !citationValidation.valid) {
+    lines.push(`- Lưu ý: trích dẫn [${citationValidation.invalidCitations.join('], [')}] không hợp lệ — sửa đúng số nguồn hoặc bỏ, KHÔNG bịa nguồn mới.`);
+  }
+  if (drawingCanonicalErrors.length) {
+    lines.push('- Lưu ý hình vẽ phải khớp canonical state: ' + drawingCanonicalErrors.join('; '));
+  }
+
+  return lines.filter(Boolean).join('\n');
+}
+
+/**
+ * buildMinimalContinuationContext() — điểm vào chính của PHẦN G.
+ * @param {{messages:Array, priorText:string, completeness:object, interrupted?:boolean,
+ *   tailChars?:number, compact?:boolean}} args `compact=false` để tắt nén (giữ hành vi cũ khi cần).
+ * @returns {{messages:Array, priorTokensBefore:number, priorTokensAfter:number, ratio:number,
+ *   compacted:boolean}}
+ */
+function buildMinimalContinuationContext({
+  messages, priorText, completeness = {}, interrupted = false, tailChars, compact = true
+}) {
+  const raw = String(priorText || '');
+  const packed = compact
+    ? compactPriorText(raw, { tailChars })
+    : { text: raw, rawChars: raw.length, compactChars: raw.length, compacted: false };
+
+  const prompt = buildResumePrompt({
+    priorTail: raw.slice(-400),
+    reasons: completeness.reasons || [],
+    missingCoverage: completeness.missingCoverage || [],
+    interrupted,
+    citationValidation: completeness.citationValidation || null,
+    drawingCanonicalErrors: completeness.drawingCanonicalErrors || []
+  });
+
+  const before = Math.ceil(raw.length / 3.2);
+  const after = Math.ceil(packed.text.length / 3.2);
+  return {
+    messages: [
+      ...messages,
+      { role: 'assistant', content: packed.text },
+      { role: 'user', content: prompt }
+    ],
+    priorTokensBefore: before,
+    priorTokensAfter: after,
+    ratio: before > 0 ? 1 - after / before : 0,
+    compacted: packed.compacted
+  };
+}
+
+// ============================================================================================
+// CHỐNG LẶP TEXT Ở ĐIỂM NỐI (PHẦN B: "Không duplicate text")
+// ============================================================================================
+// Dù prompt đã yêu cầu rõ, model tiếp nối vẫn thường lặp lại vài từ/1 câu cuối của phần trước
+// ("…nửa tích hai cạnh" -> lượt sau mở đầu bằng "hai cạnh góc vuông, do đó…"). Với streaming, phần
+// lặp đó ĐÃ BAY tới người dùng trước khi ta kịp biết -> câu trả lời có đoạn trùng ngay giữa màn hình.
+// createSeamDedupe() giữ lại 1 lượng nhỏ ký tự đầu của lượt tiếp nối (invisible delay ~vài chục ms),
+// đối chiếu với đuôi phần đã có, cắt đúng phần chồng lặp rồi mới phát ra.
+
+const SEAM_BUFFER_CHARS = 240;
+
+/**
+ * @param {string} priorText Toàn bộ text đã sinh trước lượt tiếp nối.
+ * @param {Function} emit Hàm phát ra text đã được làm sạch (thường là sseWrite delta).
+ * @returns {{feed:Function, flush:Function, removedChars:number}}
+ */
+function createSeamDedupe(priorText, emit) {
+  const tail = String(priorText || '').slice(-600);
+  let buffer = '';
+  let done = false;
+  const state = { removedChars: 0 };
+
+  function resolve() {
+    let text = buffer;
+    if (tail && text) {
+      // Tìm k LỚN NHẤT sao cho đuôi của `tail` trùng khớp với k ký tự đầu của `text`.
+      const max = Math.min(tail.length, text.length);
+      let overlap = 0;
+      for (let k = max; k >= 8; k--) {
+        if (tail.endsWith(text.slice(0, k))) { overlap = k; break; }
+      }
+      if (overlap) { text = text.slice(overlap); state.removedChars += overlap; }
+      else {
+        // Không chồng ở mức ký tự: thử mức DÒNG — model lặp lại nguyên 1 dòng đã có.
+        const firstLine = text.split('\n')[0].trim();
+        if (firstLine.length >= 16 && tail.includes(firstLine)) {
+          const cutAt = text.indexOf('\n');
+          const removed = cutAt >= 0 ? cutAt + 1 : text.length;
+          state.removedChars += removed;
+          text = cutAt >= 0 ? text.slice(cutAt + 1) : '';
+        }
+      }
+    }
+    done = true;
+    buffer = '';
+    if (text) emit(text);
+  }
+
+  return {
+    feed(piece) {
+      if (done) { if (piece) emit(piece); return; }
+      buffer += piece || '';
+      if (buffer.length >= SEAM_BUFFER_CHARS) resolve();
+    },
+    flush() { if (!done) resolve(); },
+    get removedChars() { return state.removedChars; }
+  };
+}
+
+/**
+ * joinContinuation(): nối 2 đoạn mà KHÔNG chèn '\n' bừa. Bản trước luôn dùng `text + '\n' + next`,
+ * làm đứt đôi từ/công thức khi điểm cắt nằm giữa từ ("nửa tích hai cạ" + "\n" + "nh góc vuông").
+ */
+function joinContinuation(prior, next) {
+  const a = String(prior || '');
+  const b = String(next || '');
+  if (!a) return b;
+  if (!b) return a;
+  if (/\s$/.test(a) || /^\s/.test(b)) return a + b;
+  // Cắt giữa từ/số/công thức -> nối liền, không thêm ký tự nào.
+  if (/[\p{L}\p{N}\\$]$/u.test(a) && /^[\p{L}\p{N}\\$]/u.test(b)) return a + b;
+  return `${a}\n${b}`;
+}
+
+module.exports = {
+  MAX_CONTINUATIONS, computeRecoveryBudget, buildContinuationPrompt, appendContinuationTurn,
+  buildMinimalContinuationContext, buildResumePrompt, compactPriorText, findSafeCutIndex,
+  createSeamDedupe, joinContinuation, isStructuralOrDataLine,
+  CONTINUATION_TAIL_CHARS
+};

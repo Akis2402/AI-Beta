@@ -22,9 +22,15 @@ const { calculateAdaptiveBudget } = require('../utils/adaptiveBudget');
 const { compressHistoryForBudget } = require('../utils/semanticCompression');
 const { validateSolutionCompleteness, extractCoverageList } = require('../utils/completenessCheck');
 const { computeRecoveryBudget, appendContinuationTurn } = require('../utils/continuation');
+// PHẦN B/L: vòng RESUME/CONTINUATION dùng chung (checkpoint + resumable failover A->B->C->D).
+const { runResumableStream, runResumableNonStream } = require('../utils/resumableStream');
+// PHẦN D/E/F: nén ngữ cảnh loss-aware (chỉ INPUT side — không bao giờ giảm output budget).
+const contextCompressor = require('../utils/contextCompressor');
+// PHẦN J: throughput đo thật theo provider/model, thay hằng số 60 tok/s.
+const throughputStats = require('../utils/throughputStats');
 const { validateAllDrawingBlocks, checkCanonicalDrawingConsistency } = require('../utils/drawingValidator');
 const { createRequestDeadline } = require('../utils/requestDeadline');
-const { STATES, isFinalSuccess, assertFinalResponseComplete } = require('../utils/runtimeState');
+const { STATES, isFinalSuccess, assertFinalResponseComplete, classifyFinalOutcome } = require('../utils/runtimeState');
 const { analyzeSourceCoverage } = require('../utils/sourceCoverage');
 const { createRequestLogger } = require('../utils/logger');
 const { extractFinalAnswer, normalizeAnswerString } = require('../utils/studyTasks');
@@ -112,44 +118,47 @@ const GLOBAL_REQUEST_DEADLINE_MS = Number(process.env.GLOBAL_REQUEST_DEADLINE_MS
  * @returns {Promise<{text:string, completeness:object, continuations:number, provider:object}>}
  */
 async function ensureCompleteNonStream(callOnce, initialResult, ctx) {
+  // REFACTOR PHẦN B: thân hàm này (vòng while continuation viết tay) đã được chuyển vào
+  // resumableStream.runResumableNonStream() để dùng CHUNG checkpoint/minimal-context/seam-dedupe với
+  // nhánh streaming — trước đây 2 nhánh có 2 bản logic gần trùng nhau và chỉ nhánh nào được sửa mới
+  // có fix (đúng lý do lỗi tồn tại dai dẳng). Chữ ký hàm giữ NGUYÊN để mọi nơi gọi cũ không phải sửa.
   const coverageList = extractCoverageList(ctx.problemText);
-  let text = initialResult.text;
-  let provider = initialResult.provider;
-  let finishReason = initialResult.finishReason || null;
-  let completeness = checkCompletenessWithDrawings(text, { stage: ctx.stage, coverageList, approachText: ctx.approachText, contexts: ctx.contexts, finishReason });
-  let continuations = 0;
+  const evaluate = (text, sig) => checkCompletenessWithDrawings(text, {
+    stage: ctx.stage, coverageList, approachText: ctx.approachText, contexts: ctx.contexts,
+    finishReason: sig.finishReason, interrupted: sig.interrupted
+  });
 
-  while (
-    completeness.status === 'INCOMPLETE' &&
-    completeness.severity === 'HARD' && // mục 2/9: SOFT không bao giờ kích hoạt continuation
-    computeRecoveryBudget({ remainingMs: ctx.deadline.remaining(), continuationsSoFar: continuations }).allowed &&
-    !(ctx.signal && ctx.signal.aborted) // mục 4: client đã hủy — dừng continuation ngay, không gọi thêm provider
-  ) {
-    const contMessages = appendContinuationTurn(ctx.messages, text, completeness);
-    let contResult;
-    try {
-      contResult = await callOnce(contMessages, completeness);
-    } catch (e) {
-      break; // provider lỗi ở continuation — dừng, rơi xuống assertFinalResponseComplete() bên dưới (mục 1/2)
-    }
-    // PHẦN 2 FIX: reserve hết (callOnce trả sentinel thay vì gọi AI) — dừng ngay, KHÔNG tính là 1 lượt
-    // gọi AI thành công, KHÔNG cố nối thêm. Rơi xuống assertFinalResponseComplete() như hết ngân sách.
-    if (contResult && contResult.reserveExhausted) break;
-    text = text + '\n' + contResult.text;
-    provider = contResult.provider;
-    finishReason = contResult.finishReason || null;
-    continuations += 1;
-    completeness = checkCompletenessWithDrawings(text, { stage: ctx.stage, coverageList, approachText: ctx.approachText, contexts: ctx.contexts, finishReason });
-  }
+  const run = await runResumableNonStream({
+    callFn: (args) => callOnce(args.messages, args.__completeness, args.maxTokens),
+    buildArgs: ({ messages: msgs, maxTokens }) => ({ messages: msgs, maxTokens }),
+    messages: ctx.messages,
+    initialResult,
+    evaluate,
+    // ctx.resolveRecovery do caller (route) cung cấp — chính sách reserve nằm ở chat.js (xem
+    // makeRecoveryResolver). Fallback: cho phép 1 lô mặc định nếu caller không truyền (test cũ).
+    resolveRecovery: ctx.resolveRecovery || (() => ({ allow: true, amount: 800 })),
+    deadline: ctx.deadline,
+    signal: ctx.signal,
+    isDisconnected: ctx.isDisconnected || (() => false),
+    sessionInit: { requestStage: ctx.stage, requestId: ctx.requestId }
+  });
 
-  // ---------- Cổng bắt buộc (mục 1/2/14): KHÔNG BAO GIỜ coi response này là thành công nếu chưa ----------
-  // thực sự COMPLETE (hoặc SOFT_INCOMPLETE, xem runtimeState.js) — kể cả khi đã hết safety cap hoặc
-  // continuation bị lỗi provider giữa chừng. assertFinalResponseComplete() ném lỗi
-  // (code=FINAL_RESPONSE_INCOMPLETE) để router bắt và trả về lỗi/FAILED thay vì trả 200 kèm 1 kết
-  // quả vẫn còn HARD_INCOMPLETE/INVALID.
-  assertFinalResponseComplete(completeness);
+  // ---------- Cổng bắt buộc: KHÔNG BAO GIỜ gắn nhãn thành công cho response còn HARD ----------
+  // Khác bản trước ở đúng 1 điểm: nếu KHÔNG còn đường recovery nào mà nội dung vẫn dùng được, ta
+  // KHÔNG xoá nó — trả về kèm cờ `partial` để route gắn state PARTIAL (xem classifyFinalOutcome).
+  // Chỉ khi thực sự không có gì dùng được mới ném FINAL_RESPONSE_INCOMPLETE như cũ.
+  const outcome = classifyFinalOutcome(run.completeness, { textLength: run.text.length });
+  if (outcome.state === STATES.FAILED) assertFinalResponseComplete(run.completeness);
 
-  return { text, completeness, continuations, provider };
+  return {
+    text: run.text,
+    completeness: run.completeness,
+    continuations: run.continuations,
+    resumes: run.resumes,
+    provider: run.provider || initialResult.provider,
+    partial: outcome.partial,
+    session: run.session
+  };
 }
 
 /**
@@ -166,8 +175,12 @@ async function ensureCompleteNonStream(callOnce, initialResult, ctx) {
  *   với remainingMs mới nhất — do caller cung cấp vì nó biết chính xác opts nào cần cho stage đó).
  * @returns {{allow:boolean, amount:number}}
  */
-function resolveReserveDecision({ completeness, reserveState, recalcBudget, deadline }) {
-  let decision = tokenEconomy.shouldUseReserve(completeness, reserveState.used, reserveState.budget);
+function resolveReserveDecision({ completeness, reserveState, recalcBudget, deadline, deficitTokens }) {
+  // PHẦN I FIX: truyền `deficitTokens` (ước lượng phần CÒN THIẾU, xem tokenEconomy.estimateRemainingWork)
+  // để lô reserve được cấp ĐÚNG mức cần hoàn thành thay vì luôn là 50% reserve một cách mù quáng —
+  // nguyên nhân trực tiếp khiến câu trả lời dài bị cắt lặp lại rồi cạn reserve dù deadline còn dư.
+  const opts = Number.isFinite(deficitTokens) ? { deficitTokens } : {};
+  let decision = tokenEconomy.shouldUseReserve(completeness, reserveState.used, reserveState.budget, opts);
   if (decision.allow) return decision;
   // Reserve báo KHÔNG cho phép — chỉ đáng thử MỞ RỘNG khi lý do là "đã dùng hết reserve hiện có" (chứ
   // không phải vì completeness là SOFT/COMPLETE, những trường hợp đó KHÔNG được đụng reserve dù còn
@@ -181,7 +194,40 @@ function resolveReserveDecision({ completeness, reserveState, recalcBudget, dead
   });
   if (extraGranted <= 0) return decision;
   reserveState.budget = extendedReserveBudget; // cập nhật để lần gọi sau (nếu có) thấy đúng phần đã mở rộng
-  return tokenEconomy.shouldUseReserve(completeness, reserveState.used, reserveState.budget);
+  return tokenEconomy.shouldUseReserve(completeness, reserveState.used, reserveState.budget, opts);
+}
+
+/**
+ * makeRecoveryResolver() — CHÍNH SÁCH ngân sách recovery cho 1 stage, dùng cho cả nhánh streaming và
+ * nhánh JSON. chat.js giữ quyền quyết định này (không đẩy xuống resumableStream.js) vì chỉ nó biết
+ * budget/stage/deadline của request; resumableStream.js chỉ gọi lại qua callback.
+ *
+ * Điểm khác cốt lõi so với bản trước: `deficitTokens` được tính từ ngân sách kỳ vọng của CHÍNH stage
+ * đó trừ phần đã sinh thật (tokenEconomy.estimateRemainingWork) — nên lượt tiếp nối của 1 câu trả lời
+ * bị ngắt ở 40% được cấp đủ token để đi tới hết, thay vì 1 lô nhỏ cố định rồi lại bị cắt.
+ *
+ * @param {{reserveState:{budget:number,used:number}, recalcTarget:Function, deadline:object}} cfg
+ * @returns {Function} (completeness, session) => {allow:boolean, amount:number}
+ */
+function makeRecoveryResolver({ reserveState, recalcTarget, deadline }) {
+  return (completeness, session) => {
+    const expectedTotal = recalcTarget();
+    const deficitTokens = tokenEconomy.estimateRemainingWork({
+      expectedTotal,
+      producedTokens: session ? session.outputTokens : 0,
+      missingSections: (completeness && completeness.missingCoverage) ? completeness.missingCoverage.length : 0,
+      interrupted: !!(session && session.interrupted)
+    });
+    const decision = resolveReserveDecision({
+      completeness, reserveState, deadline, deficitTokens,
+      recalcBudget: recalcTarget
+    });
+    // QUAN TRỌNG: ghi nhận phần reserve ĐÃ CẤP ngay tại đây. resolveReserveDecision() chỉ QUYẾT
+    // ĐỊNH, không trừ ngân sách — nếu nơi gọi quên trừ (lỗi rất dễ mắc khi vòng lặp nằm ở module
+    // khác), reserve sẽ không bao giờ cạn và vòng recovery chạy tới safety cap ở MỌI request lỗi.
+    if (decision && decision.allow) reserveState.used += decision.amount;
+    return decision;
+  };
 }
 
 // ---------- Tiện ích SSE (Server-Sent Events) dùng cho phản hồi streaming ----------
@@ -316,10 +362,51 @@ router.post('/', async (req, res, next) => {
       problemTokenLoad: problemText.length / 3.2,
       currentProblemText: problemText
     });
-    const historyText = compressedHistory.map((h) => h.content).join('\n');
+
+    // ---------- PHẦN D/E/F: LOSS-AWARE SEMANTIC COMPRESSION (lớp thứ 2, sau khi đã bỏ lượt cũ) ----------
+    // compressHistoryForBudget() ở trên chỉ LOẠI BỎ NGUYÊN LƯỢT khi ngân sách history bị vượt. Lớp
+    // này làm việc khác hẳn: với các lượt CÒN LẠI, nó nén theo TẦNG (TIER 0-4) và theo IMPORTANCE,
+    // chỉ bỏ prose diễn giải đã hoàn thành/boilerplate lặp, GIỮ NGUYÊN mọi số liệu/công thức/biến/
+    // đơn vị/nhãn ý/citation/drawing state (quality gate + rollback — xem contextCompressor.js).
+    //
+    // Quyết định CÓ NÉN hay không dựa trên TỔNG tải input của request (system prompt + nguồn + đề
+    // bài + history), không dựa riêng phần history — request nhẹ thì KHÔNG nén (PHẦN D.2).
+    const preSystemPrompt = buildChatSystemPrompt({ ...input, problemText });
+    const systemPack = contextCompressor.compressSystemPrompt(preSystemPrompt);
+    const historyItems = contextCompressor.assignTiers(compressedHistory);
+    const estimatedRawInput =
+      systemPack.rawTokens
+      + Math.ceil(contextsText.length / 3.2)
+      + Math.ceil(problemText.length / 3.2)
+      + Math.ceil(input.approachText.length / 3.2)
+      + historyItems.reduce((acc, it) => acc + Math.ceil(String(it.text).length / 3.2), 0);
+    const compressedResult = contextCompressor.semanticCompressContext({
+      items: historyItems,
+      problemText,
+      totalInputTokens: estimatedRawInput
+    });
+    const finalHistory = compressedResult.items.map((it) => ({ role: it.role, content: it.text }));
+    const historyText = finalHistory.map((h) => h.content).join('\n');
+
+    // PHẦN E: compression CHỈ tối ưu phía INPUT. Các con số dưới đây đi vào TELEMETRY và KHÔNG BAO
+    // GIỜ được dùng để suy ra maxTokens/output budget — budget output vẫn tính hoàn toàn theo độ
+    // phức tạp bài + deadline (budgetOf/calculateAdaptiveBudget), xem PHẦN E trong báo cáo.
+    const systemPromptSaving = systemPack.rawTokens - systemPack.compressedTokens;
+    const compressionTelemetry = {
+      rawInputTokens: estimatedRawInput,
+      compressedInputTokens: Math.max(1, estimatedRawInput - compressedResult.stats.achievedSavingTokens - systemPromptSaving),
+      compressionRatio: estimatedRawInput > 0
+        ? Number((((compressedResult.stats.achievedSavingTokens + systemPromptSaving) / estimatedRawInput)).toFixed(4))
+        : 0,
+      compressionTargetRatio: compressedResult.stats.targetRatio,
+      compressionRollbacks: compressedResult.stats.rolledBack.length,
+      compressionDroppedItems: compressedResult.stats.droppedItems,
+      systemPromptSaving
+    };
+    reqLogger.log({ stage: 'context_compression', ...compressionTelemetry });
 
     const messages = [
-      ...compressedHistory.map((h) => ({ role: h.role, content: h.content })),
+      ...finalHistory.map((h) => ({ role: h.role, content: h.content })),
       { role: 'user', content: userContent }
     ];
 
@@ -334,7 +421,11 @@ router.post('/', async (req, res, next) => {
       const base = calculateAdaptiveBudget({
         stage, problemText, historyText, contextsText, approachText: input.approachText,
         hasImage: !!input.image, deepThinking: input.deepThinking, crossCheck: input.crossCheck,
-        remainingMs: globalDeadline.remaining()
+        remainingMs: globalDeadline.remaining(),
+        // PHẦN J: throughput ĐO THẬT của các target đang khả dụng thay cho hằng số 60 tok/s — quyết
+        // định "trong thời gian còn lại model kịp sinh bao nhiêu token" phải khác nhau giữa 1
+        // provider 110 tok/s và 1 provider 30 tok/s, nếu không sẽ hoặc cắt sớm hoặc timeout giữa stream.
+        throughputTokensPerSec: throughputStats.getRepresentativeThroughput(activeProviders)
       });
       const { coreBudget, reserveBudget, totalBudget } = tokenEconomy.allocateCoreReserve(base.target);
       return { ...base, coreBudget, reserveBudget, totalBudget };
@@ -408,7 +499,9 @@ router.post('/', async (req, res, next) => {
 
       try {
         if (input.crossCheck && input.stage === 'detail') {
-          const system = buildChatSystemPrompt({ ...input, problemText });
+          // PHẦN D (TIER 4): dùng system prompt ĐÃ nén boilerplate (systemPack) thay vì dựng lại —
+          // vừa hiện thực hoá phần token tiết kiệm được, vừa bỏ 1 lần build prompt trùng lặp.
+          const system = systemPack.text;
           const variantSystem = system + buildVariantAddendum();
 
           // PHẦN 10 FIX: crossCheckPolicy() nay THỰC SỰ điều khiển số candidate thu thập — trước đây
@@ -475,69 +568,66 @@ router.post('/', async (req, res, next) => {
 
           sseWrite(res, 'status', { state: STATES.GENERATING, message: 'Đang tổng hợp lời giải cuối cùng…' });
 
-          let full = '';
-          const { provider: reconciler, finishReason: initialFinishReason } = await streamWithFailover(
-            activeProviders,
-            { system: reconcileSystem, messages, maxTokens: budgetOf(reconcileStage).coreBudget, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
-            (piece) => { full += piece; sseWrite(res, 'delta', { text: piece }); },
-            { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image } // mục 4/6: cùng đồng hồ toàn request
-          );
-          let finishReason = initialFinishReason || null;
-
-          // ---------- Completeness check + continuation (mục V/VI, refactor mục 1-4/9) trên response
-          // THẬT SỰ hiển thị ----------
+          // ---------- PHẦN B/L: RESUMABLE STREAM (checkpoint + failover A->B->C->D) ----------
+          // Toàn bộ vòng continuation trước đây (viết tay tại đây, không đọc partialError, không
+          // biết interrupted, có thể gọi lại đúng target vừa chết) được thay bằng runResumableStream:
+          // giữ nguyên phần đã stream, đánh dấu interrupted, chuyển sang target KHÁC, gửi ngữ cảnh
+          // TỐI THIỂU, chống lặp text ở điểm nối. Người dùng vẫn chỉ thấy MỘT câu trả lời liên tục.
           const coverageList = extractCoverageList(problemText);
-          let completeness = checkCompletenessWithDrawings(full, { stage: 'detail', coverageList, approachText: input.approachText, contexts: input.contexts, finishReason });
-          let continuations = 0;
-          // ---------- FIX PHẦN 3/6 + mục 4 audit continuation: continuation dùng RESERVE (lô nhỏ),
-          // có thể MỞ RỘNG động khi thực sự cần (xem resolveReserveDecision) ----------
           const reconcileReserveState = { budget: budgetOf(reconcileStage).reserveBudget, used: 0 };
-          while (
-            completeness.status === 'INCOMPLETE' &&
-            completeness.severity === 'HARD' && // mục 2/9: SOFT không kích hoạt continuation
-            computeRecoveryBudget({ remainingMs: globalDeadline.remaining(), continuationsSoFar: continuations }).allowed &&
-            !disconnected
-          ) {
-            const reserveDecision = resolveReserveDecision({
-              completeness, reserveState: reconcileReserveState, deadline: globalDeadline,
-              recalcBudget: () => budgetOf(reconcileStage).target
-            });
-            // PHẦN 2 FIX: reserve hết (kể cả sau khi đã thử mở rộng) = KHÔNG ĐƯỢC gọi thêm AI.
-            if (!reserveDecision.allow) break;
-            sseWrite(res, 'status', { state: STATES.RECOVERING, message: 'Câu trả lời chưa đầy đủ, đang khôi phục phần còn thiếu…' });
-            const contMessages = appendContinuationTurn(messages, full, completeness);
-            const contMaxTokens = reserveDecision.amount;
-            let piece2 = '';
-            try {
-              const contRes = await streamWithFailover(
-                activeProviders,
-                { system: reconcileSystem, messages: contMessages, maxTokens: contMaxTokens, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
-                (piece) => { piece2 += piece; full += piece; sseWrite(res, 'delta', { text: piece }); },
-                { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image }
-              );
-              finishReason = contRes.finishReason || null;
-            } catch (e) { break; }
-            reconcileReserveState.used += contMaxTokens;
-            continuations += 1;
-            completeness = checkCompletenessWithDrawings(full, { stage: 'detail', coverageList, approachText: input.approachText, contexts: input.contexts, finishReason });
-          }
+          const reconcileRun = await runResumableStream({
+            providers: activeProviders,
+            streamFn: streamWithFailover,
+            messages,
+            sessionInit: {
+              requestStage: 'detail', requestId: reqLogger.requestId,
+              coreBudget: budgetOf(reconcileStage).coreBudget,
+              totalBudget: budgetOf(reconcileStage).totalBudget,
+              recoveryBudget: reconcileReserveState.budget,
+              inputTokens: compressionTelemetry.rawInputTokens,
+              compressedInputTokens: compressionTelemetry.compressedInputTokens
+            },
+            buildArgs: ({ messages: msgs, maxTokens }) => ({
+              system: reconcileSystem, messages: msgs, maxTokens,
+              webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS,
+              requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal
+            }),
+            streamOpts: { preferWebSearch: hasWebSearch, requireVision: !!input.image },
+            onDelta: (piece) => sseWrite(res, 'delta', { text: piece }),
+            onStatus: (st) => sseWrite(res, 'status', { state: STATES.RECOVERING, message: st.message }),
+            evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
+              stage: 'detail', coverageList, approachText: input.approachText,
+              contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted
+            }),
+            resolveRecovery: makeRecoveryResolver({
+              reserveState: reconcileReserveState, deadline: globalDeadline,
+              recalcTarget: () => budgetOf(reconcileStage).target
+            }),
+            deadline: globalDeadline,
+            signal,
+            isDisconnected: () => disconnected
+          });
 
-          // ---------- Cổng bắt buộc (mục 1/2): KHÔNG BAO GIỜ gửi "done" nếu chưa thực sự COMPLETE ----------
-          // (hoặc SOFT_INCOMPLETE, xem runtimeState.js). RECOVERING không thành công (vẫn
-          // HARD_INCOMPLETE) hoặc INVALID → gửi "error" (state FAILED), KHÔNG gửi "done".
-          // mục 4: client đã ngắt kết nối — KHÔNG gửi thêm event nào (socket đã đóng), KHÔNG ghi
-          // cache kết quả CHƯA CHẮC hoàn chỉnh, KHÔNG báo COMPLETED cho 1 request người dùng đã hủy.
+          const full = reconcileRun.text;
+          const completeness = reconcileRun.completeness;
+          const continuations = reconcileRun.continuations;
+          const reconciler = reconcileRun.provider || { label: 'unknown' };
+
           if (disconnected) return;
 
-          // FIX mục 9 (audit continuation): CHỈ hiển thị "Câu trả lời chưa đầy đủ..." khi đã xác
-          // định CHẮC CHẮN (severity HARD/INVALID) — không hiển thị message này chỉ vì heuristic hình
-          // thức yếu (SOFT), vì isFinalSuccess() ở đây đã trả true cho trường hợp đó.
-          if (!isFinalSuccess(completeness.status, completeness.severity)) {
+          // ---------- Trạng thái cuối: COMPLETED / PARTIAL / FAILED (PHẦN C + runtimeState.js) ----------
+          // KHÔNG BAO GIỜ gắn COMPLETED cho response còn HARD. Nhưng cũng KHÔNG xoá phần đã sinh:
+          // nếu đã hết đường recovery mà nội dung vẫn dùng được -> giao ra ở trạng thái PARTIAL kèm
+          // nhãn/lý do rõ ràng (xem classifyFinalOutcome + public/js/app.js).
+          const outcome = classifyFinalOutcome(completeness, { textLength: full.length });
+          reqLogger.log({ stage: 'resumable_stream_done', ...reconcileRun.session.snapshot(), finalStatus: outcome.state, duplicateCharsRemoved: reconcileRun.duplicateCharsRemoved });
+
+          if (outcome.state === STATES.FAILED) {
             sseWrite(res, 'error', {
               message: 'Câu trả lời chưa đầy đủ sau khi đã thử khôi phục — không thể coi là hoàn thành.',
               state: STATES.FAILED,
               completeness: completeness.status,
-            citationValidation: completeness.citationValidation || null,
+              citationValidation: completeness.citationValidation || null,
               text: full,
               continuations
             });
@@ -546,28 +636,33 @@ router.post('/', async (req, res, next) => {
 
           const donePayload = {
             ...subjectPayload,
-            state: STATES.COMPLETED,
+            state: outcome.state,
+            partial: outcome.partial,
             text: full,
             crossChecked: true,
             providers: candidates.map((c) => c.label),
             reconciledBy: reconciler.label,
             completeness: completeness.status,
+            incompleteReasons: outcome.partial ? (completeness.hardReasons || []) : [],
             citationValidation: completeness.citationValidation || null,
-            continuations
+            continuations,
+            resumes: reconcileRun.resumes
           };
-          if (!tePlan.cacheBypassed) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, donePayload);
-          tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, full.length / 3.2);
+          // PHẦN P: KHÔNG BAO GIỜ cache response PARTIAL/interrupted/chưa validate — chỉ cache khi
+          // thực sự COMPLETED (partial=false), nếu không lần sau sẽ trả lại đúng câu trả lời bị cắt.
+          if (!tePlan.cacheBypassed && !outcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, donePayload);
+          if (!outcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, full.length / 3.2);
+          teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
           teTelemetry.record('outputTokens', full.length / 3.2);
-          teTelemetry.record('continuationTokens', continuations > 0 ? full.length / 3.2 * 0.2 : 0);
-          reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot() });
+          teTelemetry.record('continuationTokens', reconcileRun.session.continuationTokens);
+          reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry });
           sseWrite(res, 'done', donePayload);
           return res.end();
         }
 
         // ---------- Giai đoạn "hướng giải" hoặc chế độ "Nhanh": stream trực tiếp 1 lượt duy nhất ----------
-        const system = buildChatSystemPrompt({ ...input, problemText });
-        let full = '';
-        // LỖI GỐC (ảnh mới nhất người dùng gửi): giai đoạn "hướng giải" (approach) bị cắt ngang giữa
+        const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
+        // LỖI GỐC (ảnh người dùng gửi): giai đoạn "hướng giải" (approach) bị cắt ngang giữa
         // câu ("- Khai thác tính") vì maxTokens cố định 700 bất kể độ dài đề bài/deepThinking. FIX:
         // dùng ADAPTIVE TOKEN BUDGET (mục III, xem adaptiveBudget.js) thay vì hằng số cố định.
         const directBudget = budgetOf(input.stage === 'approach' ? 'approach' : 'detail');
@@ -576,54 +671,55 @@ router.post('/', async (req, res, next) => {
         // 'strong_reasoning' -> model đầy đủ dù deepThinking chưa bật (không ép fast cho bài phức tạp).
         const useFastModel = callMode.fast && tokenEconomy.tierUsesFastModel(tePlan.modelTier);
         sseWrite(res, 'status', { state: STATES.GENERATING, message: 'Đang tạo câu trả lời…' });
-        const { provider, finishReason: initialDirectFinishReason } = await streamWithFailover(
-          activeProviders,
-          { system, messages, maxTokens: directBudget.coreBudget, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
-          (piece) => { full += piece; sseWrite(res, 'delta', { text: piece }); },
-          { deadline: globalDeadline, requireVision: !!input.image } // mục 4/6
-        );
-        let directFinishReason = initialDirectFinishReason || null;
 
-        // ---------- Completeness check + continuation (mục V/VI, refactor mục 1-4/9) ----------
+        // ---------- PHẦN B/L: RESUMABLE STREAM cho nhánh 1 lượt (approach / Nhanh) ----------
         const coverageList = extractCoverageList(problemText);
-        let completeness = checkCompletenessWithDrawings(full, { stage: input.stage, coverageList, approachText: input.approachText, contexts: input.contexts, finishReason: directFinishReason });
-        let continuations = 0;
         const directReserveState = { budget: directBudget.reserveBudget, used: 0 };
-        while (
-          completeness.status === 'INCOMPLETE' &&
-          completeness.severity === 'HARD' && // mục 2/9: SOFT không kích hoạt continuation
-          computeRecoveryBudget({ remainingMs: globalDeadline.remaining(), continuationsSoFar: continuations }).allowed &&
-          !disconnected
-        ) {
-          // FIX PHẦN 3/6 + mục 4: dùng RESERVE (lô nhỏ), có thể MỞ RỘNG động (resolveReserveDecision).
-          const reserveDecision = resolveReserveDecision({
-            completeness, reserveState: directReserveState, deadline: globalDeadline,
-            recalcBudget: () => budgetOf(input.stage === 'approach' ? 'approach' : 'detail').target
-          });
-          if (!reserveDecision.allow) break;
-          sseWrite(res, 'status', { state: STATES.RECOVERING, message: 'Câu trả lời chưa đầy đủ, đang khôi phục phần còn thiếu…' });
-          const contMessages = appendContinuationTurn(messages, full, completeness);
-          const contMaxTokens = reserveDecision.amount;
-          try {
-            const contRes = await streamWithFailover(
-              activeProviders,
-              { system, messages: contMessages, maxTokens: contMaxTokens, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
-              (piece) => { full += piece; sseWrite(res, 'delta', { text: piece }); },
-              { deadline: globalDeadline, requireVision: !!input.image }
-            );
-            directFinishReason = contRes.finishReason || null;
-          } catch (e) { break; }
-          directReserveState.used += contMaxTokens;
-          continuations += 1;
-          completeness = checkCompletenessWithDrawings(full, { stage: input.stage, coverageList, approachText: input.approachText, contexts: input.contexts, finishReason: directFinishReason });
-        }
+        const directStageName = input.stage === 'approach' ? 'approach' : 'detail';
+        const directRun = await runResumableStream({
+          providers: activeProviders,
+          streamFn: streamWithFailover,
+          messages,
+          sessionInit: {
+            requestStage: directStageName, requestId: reqLogger.requestId,
+            coreBudget: directBudget.coreBudget,
+            totalBudget: directBudget.totalBudget,
+            recoveryBudget: directReserveState.budget,
+            inputTokens: compressionTelemetry.rawInputTokens,
+            compressedInputTokens: compressionTelemetry.compressedInputTokens
+          },
+          buildArgs: ({ messages: msgs, maxTokens }) => ({
+            system, messages: msgs, maxTokens, fast: useFastModel,
+            deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal
+          }),
+          streamOpts: { requireVision: !!input.image },
+          onDelta: (piece) => sseWrite(res, 'delta', { text: piece }),
+          onStatus: (st) => sseWrite(res, 'status', { state: STATES.RECOVERING, message: st.message }),
+          evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
+            stage: input.stage, coverageList, approachText: input.approachText,
+            contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted
+          }),
+          resolveRecovery: makeRecoveryResolver({
+            reserveState: directReserveState, deadline: globalDeadline,
+            recalcTarget: () => budgetOf(directStageName).target
+          }),
+          deadline: globalDeadline,
+          signal,
+          isDisconnected: () => disconnected
+        });
+
+        const full = directRun.text;
+        const completeness = directRun.completeness;
+        const continuations = directRun.continuations;
+        const provider = directRun.provider || { label: 'unknown' };
 
         // mục 4: client đã ngắt kết nối — KHÔNG gửi thêm event nào, KHÔNG ghi cache, KHÔNG báo COMPLETED.
         if (disconnected) return;
 
-        // ---------- Cổng bắt buộc (mục 1/2): KHÔNG BAO GIỜ gửi "done" nếu chưa thực sự COMPLETE ----------
-        // FIX mục 9: chỉ FAILED khi severity thực sự HARD/INVALID — SOFT đã coi là thành công.
-        if (!isFinalSuccess(completeness.status, completeness.severity)) {
+        const directOutcome = classifyFinalOutcome(completeness, { textLength: full.length });
+        reqLogger.log({ stage: 'resumable_stream_done', ...directRun.session.snapshot(), finalStatus: directOutcome.state, duplicateCharsRemoved: directRun.duplicateCharsRemoved });
+
+        if (directOutcome.state === STATES.FAILED) {
           sseWrite(res, 'error', {
             message: 'Câu trả lời chưa đầy đủ sau khi đã thử khôi phục — không thể coi là hoàn thành.',
             state: STATES.FAILED,
@@ -635,18 +731,24 @@ router.post('/', async (req, res, next) => {
           return res.end();
         }
 
-
         const directDonePayload = {
           ...subjectPayload,
-          state: STATES.COMPLETED,
+          state: directOutcome.state,
+          partial: directOutcome.partial,
           text: full, crossChecked: false, provider: provider.label,
-          completeness: completeness.status, citationValidation: completeness.citationValidation || null, continuations
+          completeness: completeness.status,
+          incompleteReasons: directOutcome.partial ? (completeness.hardReasons || []) : [],
+          citationValidation: completeness.citationValidation || null,
+          continuations,
+          resumes: directRun.resumes
         };
-        if (!tePlan.cacheBypassed) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, directDonePayload);
-        tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', full.length / 3.2);
+        // PHẦN P: chỉ cache khi COMPLETED thật (không cache partial/interrupted).
+        if (!tePlan.cacheBypassed && !directOutcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, directDonePayload);
+        if (!directOutcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, directStageName, full.length / 3.2);
+        teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
         teTelemetry.record('outputTokens', full.length / 3.2);
-        teTelemetry.record('continuationTokens', continuations > 0 ? full.length / 3.2 * 0.2 : 0);
-        reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot() });
+        teTelemetry.record('continuationTokens', directRun.session.continuationTokens);
+        reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry });
         sseWrite(res, 'done', directDonePayload);
         return res.end();
       } catch (streamErr) {
@@ -683,7 +785,7 @@ router.post('/', async (req, res, next) => {
     // ngân sách thời gian tổng + thử lại provider lỗi SONG SONG) để tránh lặp logic và tránh cộng
     // dồn thời gian chờ tuần tự — xem giải thích chi tiết ở đầu server/utils/aiProviders.js.
     if (input.crossCheck && input.stage === 'detail') {
-      const system = buildChatSystemPrompt({ ...input, problemText });
+      const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
       const variantSystem = system + buildVariantAddendum();
 
       // PHẦN 10 FIX: xem giải thích đầy đủ ở nhánh streaming phía trên — cùng logic, cùng lý do.
@@ -734,24 +836,24 @@ router.post('/', async (req, res, next) => {
       // FIX PHẦN 3/6 + mục 4 audit continuation: continuation dùng RESERVE (lô nhỏ dần), có thể MỞ
       // RỘNG động khi thực sự cần (xem resolveReserveDecision) thay vì hard-cap 30% cố định.
       const jsonReconcileReserveState = { budget: budgetOf(reconcileStage).reserveBudget, used: 0 };
-      const { text: finalText, completeness, continuations, provider: reconciler } = await ensureCompleteNonStream(
-        (msgs, currentCompleteness) => {
-          const decision = resolveReserveDecision({
-            completeness: currentCompleteness, reserveState: jsonReconcileReserveState, deadline: globalDeadline,
-            recalcBudget: () => budgetOf(reconcileStage).target
-          });
-          // PHẦN 2 FIX: reserve hết (kể cả sau khi thử mở rộng) = KHÔNG gọi AI thêm (hard cap).
-          if (!decision.allow) return Promise.resolve({ reserveExhausted: true });
-          const amt = decision.amount;
-          jsonReconcileReserveState.used += amt;
-          return callWithFailover(
-            activeProviders,
-            { system: reconcileSystem, messages: msgs, maxTokens: amt, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
-            { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image }
-          );
-        },
+      const jsonReconcileRecovery = makeRecoveryResolver({
+        reserveState: jsonReconcileReserveState, deadline: globalDeadline,
+        recalcTarget: () => budgetOf(reconcileStage).target
+      });
+      const { text: finalText, completeness, continuations, provider: reconciler, partial: reconcilePartial } = await ensureCompleteNonStream(
+        (msgs, _currentCompleteness, grantedMaxTokens) => callWithFailover(
+          activeProviders,
+          { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
+          { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image }
+        ),
         initial,
-        { messages, problemText, stage: 'detail', deadline: globalDeadline, approachText: input.approachText, contexts: input.contexts, signal }
+        {
+          messages, problemText, stage: 'detail', deadline: globalDeadline,
+          approachText: input.approachText, contexts: input.contexts, signal,
+          requestId: reqLogger.requestId,
+          resolveRecovery: jsonReconcileRecovery,
+          isDisconnected: () => disconnected
+        }
       );
 
       // mục 4: client đã ngắt kết nối trong lúc chờ — không còn ai để nhận response, không ghi cache
@@ -762,7 +864,8 @@ router.post('/', async (req, res, next) => {
       // completeness.status chắc chắn === 'COMPLETE' (mục 1/2/14).
       const jsonDonePayload = {
         ...subjectPayload,
-        state: STATES.COMPLETED,
+        state: reconcilePartial ? STATES.PARTIAL : STATES.COMPLETED,
+        partial: !!reconcilePartial,
         text: finalText,
         crossChecked: true,
         providers: candidates.map((c) => c.label),
@@ -771,8 +874,8 @@ router.post('/', async (req, res, next) => {
             citationValidation: completeness.citationValidation || null,
         continuations
       };
-      if (!tePlan.cacheBypassed) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
-      tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, finalText.length / 3.2);
+      if (!tePlan.cacheBypassed && !reconcilePartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
+      if (!reconcilePartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, finalText.length / 3.2);
       teTelemetry.record('outputTokens', finalText.length / 3.2);
       reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot() });
       return res.json(jsonDonePayload);
@@ -788,7 +891,7 @@ router.post('/', async (req, res, next) => {
     // nhưng SAI tinh thần "Suy nghĩ sâu" (ưu tiên capability, không phải tốc độ). deepThinking=true
     // chuyển sang callWithFailover() — vẫn tự động failover khi lỗi, nhưng thử TUẦN TỰ theo rotation
     // công bằng với model ĐẦY ĐỦ (fast:false) thay vì đua nhiều target bằng model nhẹ.
-    const system = buildChatSystemPrompt({ ...input, problemText });
+    const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
     const directBudget = budgetOf(input.stage === 'approach' ? 'approach' : 'detail');
     const directCaller = callMode.fast ? callFastest : callWithFailover;
     // PHẦN 8 FIX: modelTier THỰC SỰ ảnh hưởng lựa chọn model (trước đây chỉ log — dead optimization).
@@ -802,33 +905,34 @@ router.post('/', async (req, res, next) => {
     // FIX PHẦN 3/6 + mục 4 audit continuation: continuation dùng RESERVE (lô nhỏ dần), có thể MỞ
     // RỘNG động khi thực sự cần (xem resolveReserveDecision) thay vì hard-cap 30% cố định.
     const jsonDirectReserveState = { budget: directBudget.reserveBudget, used: 0 };
-    const { text, completeness, continuations, provider } = await ensureCompleteNonStream(
-      (msgs, currentCompleteness) => {
-        const decision = resolveReserveDecision({
-          completeness: currentCompleteness, reserveState: jsonDirectReserveState, deadline: globalDeadline,
-          recalcBudget: () => budgetOf(input.stage === 'approach' ? 'approach' : 'detail').target
-        });
-        // PHẦN 2 FIX: reserve hết (kể cả sau khi thử mở rộng) = KHÔNG gọi AI thêm (hard cap).
-        if (!decision.allow) return Promise.resolve({ reserveExhausted: true });
-        const amt = decision.amount;
-        jsonDirectReserveState.used += amt;
-        return directCaller(
-          activeProviders,
-          { system, messages: msgs, maxTokens: amt, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
-          { deadline: globalDeadline, requireVision: !!input.image }
-        );
-      },
+    const jsonDirectRecovery = makeRecoveryResolver({
+      reserveState: jsonDirectReserveState, deadline: globalDeadline,
+      recalcTarget: () => budgetOf(input.stage === 'approach' ? 'approach' : 'detail').target
+    });
+    const { text, completeness, continuations, provider, partial: directJsonPartial } = await ensureCompleteNonStream(
+      (msgs, _currentCompleteness, grantedMaxTokens) => directCaller(
+        activeProviders,
+        { system, messages: msgs, maxTokens: grantedMaxTokens, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
+        { deadline: globalDeadline, requireVision: !!input.image }
+      ),
       initialDirect,
-      { messages, problemText, stage: input.stage, deadline: globalDeadline, approachText: input.approachText, contexts: input.contexts, signal }
+      {
+        messages, problemText, stage: input.stage, deadline: globalDeadline,
+        approachText: input.approachText, contexts: input.contexts, signal,
+        requestId: reqLogger.requestId,
+        resolveRecovery: jsonDirectRecovery,
+        isDisconnected: () => disconnected
+      }
     );
 
     // mục 4: xem giải thích ở nhánh cross-check JSON phía trên — cùng lý do.
     if (disconnected) return;
 
     // ensureCompleteNonStream() đã assertFinalResponseComplete() — chắc chắn COMPLETE tới đây.
-    const finalJsonPayload = { ...subjectPayload, state: STATES.COMPLETED, text, crossChecked: false, provider: provider.label, completeness: completeness.status, citationValidation: completeness.citationValidation || null, continuations };
-    if (!tePlan.cacheBypassed) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
-    tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', text.length / 3.2);
+    const finalJsonPayload = { ...subjectPayload, state: directJsonPartial ? STATES.PARTIAL : STATES.COMPLETED, partial: !!directJsonPartial, text, crossChecked: false, provider: provider.label, completeness: completeness.status, incompleteReasons: directJsonPartial ? (completeness.hardReasons || []) : [], citationValidation: completeness.citationValidation || null, continuations };
+    if (!tePlan.cacheBypassed && !directJsonPartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
+    if (!directJsonPartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', text.length / 3.2);
+    teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
     teTelemetry.record('outputTokens', text.length / 3.2);
     reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot() });
     res.json(finalJsonPayload);

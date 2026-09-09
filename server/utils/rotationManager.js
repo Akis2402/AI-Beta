@@ -21,13 +21,55 @@ const keyHealth = new Map(); // keyId -> {cooldownUntil, invalid, requests, fail
 const modelHealth = new Map(); // modelId -> {cooldownUntil, requests, failures}
 const targetHealth = new Map(); // targetId -> {cooldownUntil, requests, failures, lastUsedAt}
 
-// ---------- Round-robin cursor ----------
-// Đảm bảo rotation xoay CÔNG BẰNG qua từng target theo đúng ví dụ mục 4 (Request1→T1, Request2→T2,
-// ...), thay vì random thuần (random có thể lặp lại cùng 1 target nhiều lần liên tiếp). Cursor được
-// giữ theo "chữ ký" của tập target hiện tại (danh sách id nối lại) — nếu tập target đổi (thêm/bớt
-// key/model qua .env), cursor tự reset về 0 một cách tự nhiên vì signature khác đi.
-let rotationCursor = 0;
-let lastSignature = '';
+// ---------- FAIR ROTATION: least-recently-used trên "số thứ tự chọn" toàn cục (PHẦN K) ----------
+// NGUYÊN NHÂN GỐC của bất công bằng rotation (đã sửa ở bản này): TRƯỚC ĐÂY rotation dùng 1 con trỏ
+// số nguyên `rotationCursor` + `lastSignature` = chữ ký của TẬP TARGET ELIGIBLE hiện tại. Tập
+// eligible thay đổi MỖI KHI có target vào/ra cooldown (chuyện xảy ra liên tục trong vận hành thật:
+// 429, timeout, model overload...). Signature khác đi => `rotationCursor = 0` => vòng xoay bị RESET
+// về đầu danh sách, tức T1 lại được ưu tiên thử trước. Với 4 target T1..T4, chỉ cần T2 chớp nhoáng
+// vào cooldown rồi ra là T1 được ưu tiên 2 lần liên tiếp; nếu cooldown xảy ra thường xuyên, T1 gần
+// như luôn đi đầu và T3/T4 bị "đói" — đúng kịch bản mục K cấm ("Khi T2 quay lại: KHÔNG reset cursor
+// về T1").
+//
+// NAY: mỗi target có 1 mốc `lastSelectedSeq` lấy từ 1 bộ đếm TĂNG ĐƠN ĐIỆU toàn cục. Thứ tự thử =
+// sắp tăng dần theo mốc đó (target chưa từng được chọn đi trước nhất). Trạng thái này gắn theo
+// TARGET ID, KHÔNG gắn theo tập eligible — nên:
+//   - tập eligible đổi (cooldown vào/ra) KHÔNG làm mất/reset thứ tự công bằng đã tích luỹ;
+//   - target vừa hết cooldown có mốc CŨ NHẤT nên được ưu tiên trở lại (bù đúng phần bị bỏ lỡ),
+//     thay vì phải chờ hết 1 vòng mới tới lượt;
+//   - khi mọi target đều khoẻ, hành vi trùng khớp round-robin thuần: R1→T1, R2→T2, ... R5→T1.
+// Không dùng random thuần ở đường failover (shuffle() chỉ còn dùng cho callFastest — đua tốc độ).
+let selectionSeq = 0;
+const selectionState = new Map(); // targetId -> lastSelectedSeq (số càng nhỏ = càng lâu chưa dùng)
+
+/**
+ * noteSelection(): ghi nhận 1 target VỪA THỰC SỰ được dùng cho 1 lượt gọi (thành công hay thất bại
+ * đều tính — đã "tiêu" 1 lượt ưu tiên của nó). Được gọi từ orderByRotation() cho phần tử đứng đầu
+ * (target sẽ được thử trước) VÀ từ markSuccess/markFailure cho target thực sự được gọi (có thể khác
+ * phần tử đầu khi failover phải đi sâu hơn trong danh sách) — nhờ vậy LRU phản ánh đúng thực tế.
+ */
+function noteSelection(target) {
+  if (!target || !target.id) return;
+  selectionSeq += 1;
+  selectionState.set(target.id, selectionSeq);
+}
+
+/** Chỉ dùng cho test — xoá sạch trạng thái rotation/health giữa các kịch bản độc lập. */
+function _resetRotationStateForTest() {
+  selectionSeq = 0;
+  selectionState.clear();
+  keyHealth.clear();
+  modelHealth.clear();
+  targetHealth.clear();
+}
+
+/** Ảnh chụp thứ tự ưu tiên hiện tại (debug/telemetry PHẦN Q) — không chứa khóa API. */
+function getRotationPositions(targets) {
+  return (targets || []).map((t) => ({
+    targetId: t.id,
+    lastSelectedSeq: selectionState.has(t.id) ? selectionState.get(t.id) : null
+  }));
+}
 
 function ensureHealth(map, id) {
   if (!map.has(id)) map.set(id, { cooldownUntil: 0, invalid: false, requests: 0, failures: 0 });
@@ -73,15 +115,18 @@ function getEligibleTargets(targets, requirements = {}) {
  * @returns {Array} Cùng các phần tử, thứ tự đã xoay theo cursor.
  */
 function orderByRotation(eligibleTargets) {
-  if (!eligibleTargets.length) return eligibleTargets;
-  const signature = eligibleTargets.map((t) => t.id).sort().join('|');
-  if (signature !== lastSignature) {
-    rotationCursor = 0;
-    lastSignature = signature;
-  }
-  const start = rotationCursor % eligibleTargets.length;
-  rotationCursor = (rotationCursor + 1) % eligibleTargets.length;
-  return [...eligibleTargets.slice(start), ...eligibleTargets.slice(0, start)];
+  if (!eligibleTargets || eligibleTargets.length <= 1) return eligibleTargets || [];
+  // Sắp theo mốc chọn gần nhất TĂNG DẦN (chưa từng chọn = -1 -> đi đầu). Tie-break bằng vị trí gốc
+  // trong danh sách để thứ tự luôn TIỀN ĐỊNH (deterministic) khi nhiều target cùng mốc — nhờ vậy với
+  // 4 target mới toanh, lượt đầu tiên ra đúng [T1,T2,T3,T4] chứ không phụ thuộc thứ tự Map.
+  const ordered = eligibleTargets
+    .map((t, idx) => ({ t, idx, seq: selectionState.has(t.id) ? selectionState.get(t.id) : -1 }))
+    .sort((a, b) => (a.seq - b.seq) || (a.idx - b.idx))
+    .map((e) => e.t);
+  // Chỉ phần tử ĐẦU được ghi nhận ở đây (đó là target sẽ được thử trước). Nếu failover phải đi sâu
+  // hơn, markSuccess/markFailure của target thực sự được gọi sẽ tự ghi nhận thêm (xem noteSelection).
+  noteSelection(ordered[0]);
+  return ordered;
 }
 
 /** Xáo trộn ngẫu nhiên (Fisher–Yates) — dùng cho callFastest() (đua tốc độ, không cần round-robin). */
@@ -104,6 +149,7 @@ const LATENCY_EMA_ALPHA = 0.3;
  * 1 target hay không (isTargetSlow()). Gọi không kèm latencyMs vẫn hợp lệ (backward compatible).
  */
 function markSuccess(target, latencyMs) {
+  noteSelection(target); // LRU: target này vừa tiêu 1 lượt ưu tiên thật (PHẦN K)
   const t = ensureHealth(targetHealth, target.id);
   t.requests += 1;
   t.cooldownUntil = 0;
@@ -139,6 +185,9 @@ function isTargetSlow(target, thresholdMs) {
 function markFailure(target, err) {
   const result = classify(err);
   const now = Date.now();
+  // LRU: 1 lượt gọi THẤT BẠI vẫn là 1 lượt đã tiêu — nếu không ghi nhận, target lỗi sẽ mãi mãi có
+  // mốc "cũ nhất" và luôn được thử đầu tiên ngay khi hết cooldown, lặp lại lỗi trước mọi target khác.
+  noteSelection(target);
 
   if (result.scope === 'key') {
     const k = ensureHealth(keyHealth, target.keyId);
@@ -182,5 +231,6 @@ function getHealthSnapshot(targets) {
 }
 
 module.exports = {
-  getEligibleTargets, orderByRotation, shuffle, markSuccess, markFailure, getHealthSnapshot, isTargetSlow
+  getEligibleTargets, orderByRotation, shuffle, markSuccess, markFailure, getHealthSnapshot, isTargetSlow,
+  noteSelection, getRotationPositions, _resetRotationStateForTest
 };

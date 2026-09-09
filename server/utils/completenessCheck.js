@@ -38,6 +38,16 @@ const MIN_MEANINGFUL_LENGTH = 8;
 // thành" dù văn bản trông gọn gàng. SOFT: chỉ là nghi ngờ HÌNH THỨC (thiếu từ khoá kết luận quen
 // thuộc, thiếu 1 vài label a/b/c) — nội dung RẤT CÓ THỂ đã đầy đủ, không được tự ý FAILED.
 const HARD_REASONS = new Set([
+  // PHẦN B/C FIX: provider chết/mất kết nối SAU KHI đã stream một phần (interrupted) là tín hiệu
+  // truncation MẠNH NHẤT — mạnh hơn cả finish_reason, vì khi bị ngắt giữa stream provider KHÔNG kịp
+  // gửi message_delta/stop_reason nào cả (xem anthropicClient.callClaudeStream: stop_reason chỉ tới
+  // ở sự kiện cuối). TRƯỚC ĐÂY tín hiệu này KHÔNG TỒN TẠI trong hệ thống: streamWithFailover trả về
+  // partialError rồi caller bỏ qua, finishReason=null, nên completeness phải ĐOÁN bằng heuristic
+  // hình thức. Nếu chỗ cắt tình cờ rơi đúng sau 1 dấu chấm/1 con số (rất dễ xảy ra giữa lời giải
+  // toán), ensClosedProperly() trả true => status COMPLETE => người dùng nhận câu trả lời BỊ CẮT mà
+  // hệ thống tưởng đã xong. Nay 'stream_interrupted' là HARD tuyệt đối và KHÔNG bị finish_reason
+  // 'stop' ghi đè (xem validateSolutionCompleteness bên dưới).
+  'stream_interrupted',
   'unclosed_code_fence',
   'unclosed_draw_block',
   'unclosed_latex',
@@ -207,7 +217,9 @@ function looksTruncated(text) {
 /**
  * @param {string} text Toàn bộ văn bản response (đã strip <thinking>).
  * @param {{stage?:'approach'|'detail', problemText?:string, coverageList?:string[], contexts?:Array,
- *   finishReason?:'stop'|'length'|'other'|null}} [opts]
+ *   finishReason?:'stop'|'length'|'other'|null, interrupted?:boolean}} [opts]
+ *   interrupted (PHẦN B/C): true khi lượt gọi provider bị chết/mất kết nối SAU khi đã phát delta —
+ *   luôn là HARD, không bao giờ bị finishReason ghi đè.
  *   contexts (mục 7/15): nếu có, đối chiếu MỌI citation [n] trong response với contexts.length —
  *   citation ngoài phạm vi -> reason 'invalid_citation' -> HARD INCOMPLETE (không được coi là
  *   COMPLETE chỉ vì response "đẹp"/kết thúc đúng câu — mục 15).
@@ -231,6 +243,10 @@ function validateSolutionCompleteness(text, opts = {}) {
       citationValidation: null, finishReason
     };
   }
+
+  // PHẦN B/C: interrupted được đánh giá TRƯỚC mọi heuristic và KHÔNG thể bị vô hiệu hoá bởi bất kỳ
+  // dấu hiệu "trông đã đóng" nào — nguồn tín hiệu là tầng vận chuyển (stream chết), không phải nội dung.
+  if (opts.interrupted) reasons.push('stream_interrupted');
 
   if (hasUnclosedCodeFence(clean)) reasons.push('unclosed_code_fence');
   if (hasUnclosedDrawBlock(clean)) reasons.push('unclosed_draw_block');
@@ -269,6 +285,9 @@ function validateSolutionCompleteness(text, opts = {}) {
   // mục 1 (completion-first): model CHỦ ĐỘNG kết thúc (finishReason==='stop') VÀ không có HARD reason
   // nào -> ép COMPLETE ngay dù còn bao nhiêu SOFT reason (thiếu coverage/kết luận theo đúng từ khoá
   // quen thuộc) — đây là điểm khác biệt cốt lõi so với logic cũ (mọi reason đều chặn completion).
+  // mục 1 (completion-first) — CÓ 1 NGOẠI LỆ DUY NHẤT (PHẦN C): nếu stream bị NGẮT, tuyệt đối không
+  // được "giả finishReason=stop". Điều kiện `hard.length === 0` bên dưới đã tự loại trường hợp này vì
+  // 'stream_interrupted' luôn nằm trong HARD_REASONS — ghi rõ ở đây để không ai vô tình nới lỏng lại.
   if (finishReason === 'stop' && hard.length === 0) {
     return {
       status: 'COMPLETE', severity: undefined, reasons: soft, hardReasons: [], softReasons: soft,

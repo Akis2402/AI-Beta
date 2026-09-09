@@ -73,6 +73,9 @@ const CROSS_CHECK_BUDGET_MS = Number(process.env.CROSS_CHECK_BUDGET_MS) || 45000
 // với tổng số execution target đã cấu hình (xem test/cross-check-limit.test.js).
 const CROSS_CHECK_MAX_CANDIDATES = Number(process.env.CROSS_CHECK_MAX_CANDIDATES) || 3;
 const { createRequestDeadline, safeCallTimeout, MIN_CALL_TIMEOUT_MS } = require('./requestDeadline');
+// PHẦN J: throughput đo thật theo từng model/provider — thay hằng số 60 tok/s dùng chung.
+const { recordThroughput } = require('./throughputStats');
+const { estimateTokens } = require('./adaptiveBudget');
 
 /**
  * Chọn tối đa `limit` target từ danh sách đã rotation-order, ƯU TIÊN đa dạng provider (mỗi hãng góp
@@ -340,8 +343,13 @@ async function callWithFailover(providers, args, { preferWebSearch = false, requ
       // tránh phải sửa mọi nơi đang destructure kết quả p.call() như 1 chuỗi.
       const meta = {};
       const text = stripThinkingTags(await p.call({ ...args, timeoutMs: callTimeout, meta }));
-      logAttempt({ requestId: args.requestId, stage: 'failover', target: p, latency: Date.now() - attemptStartedAt, status: text ? 'success' : 'empty' });
-      if (text) { markSuccess(p); return { text, provider: p, tried, finishReason: meta.finishReason || null }; }
+      const failoverLatency = Date.now() - attemptStartedAt;
+      logAttempt({ requestId: args.requestId, stage: 'failover', target: p, latency: failoverLatency, status: text ? 'success' : 'empty' });
+      if (text) {
+        markSuccess(p, failoverLatency);
+        recordThroughput(p, { outputTokens: estimateTokens(text), elapsedMs: failoverLatency });
+        return { text, provider: p, tried, finishReason: meta.finishReason || null, interrupted: false, latencyMs: failoverLatency };
+      }
       tried.push({ label: p.label, error: 'Phản hồi rỗng' });
     } catch (err) {
       // mục 4: bị hủy (client disconnect/bấm Dừng) — KHÔNG coi là lỗi provider, dừng failover ngay,
@@ -408,6 +416,7 @@ function attemptTarget(p, raceArgs, tried, requestId) {
       const latency = Date.now() - startedAt;
       logAttempt({ requestId, stage: 'fast', target: p, latency, status: 'success' });
       markSuccess(p, latency);
+      recordThroughput(p, { outputTokens: estimateTokens(visible), elapsedMs: latency });
       return { text: visible, provider: p, _latencyMs: latency, finishReason: meta.finishReason || null };
     })
     .catch((err) => {
@@ -595,13 +604,30 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
     // nằm trong khối thinking (chưa có gì hiển thị cho người dùng), hệ thống vẫn coi là AN TOÀN để
     // failover sang target khác.
     let committed = false;
+    // PHẦN B FIX (ROOT CAUSE #1): giữ CHÍNH XÁC phần text ĐÃ được forward tới người dùng ở lượt này.
+    // TRƯỚC ĐÂY khi provider chết giữa stream, hàm này trả về `{ text: '', ..., partialError }` —
+    // text RỖNG! Toàn bộ phần đã sinh chỉ còn tồn tại trong biến `full` của closure onDelta ở
+    // chat.js, và `partialError` thì KHÔNG CÓ NƠI NÀO ĐỌC (caller chỉ destructure
+    // `{provider, finishReason}`). Hệ quả dây chuyền:
+    //   (a) caller không biết lượt gọi đã bị NGẮT -> finishReason=null -> completeness phải đoán mò;
+    //   (b) target vừa chết KHÔNG được markFailure -> không cooldown -> vẫn eligible -> rotation có
+    //       thể trao lại ĐÚNG target đó cho lượt continuation -> chết y hệt -> lặp tới khi cạn
+    //       reserve -> phát "error" với thông điệp "Câu trả lời chưa đầy đủ sau khi đã thử khôi
+    //       phục — không thể coi là hoàn thành." (chính lỗi người dùng báo).
+    // NAY: text đã sinh được TRẢ VỀ đầy đủ, kèm cờ `interrupted` để caller chuyển sang RESUME MODE,
+    // và target chết bị markFailure để rotation chắc chắn đưa lượt tiếp theo sang target KHÁC.
+    let attemptText = '';
     // Ghép 2 lớp lọc streaming theo đúng thứ tự: (1) bỏ khối <thinking>/<think> trước, (2) trên
     // phần "đã ra khỏi thinking" đó mới lọc tiếp các dòng nhãn phân loại an toàn bị lộ. `committed`
     // CHỈ bật ở lớp lọc CUỐI CÙNG — nhờ vậy nếu 1 target trả về response mà toàn bộ nội dung "thấy
     // được" chỉ là nhãn kiểu "User Safety: unsafe" (không có câu trả lời thật nào), dòng đó bị lớp
     // lọc thứ 2 âm thầm loại bỏ, committed vẫn là false, và hệ thống tự động failover sang target
     // khác — thay vì hiển thị nhãn "unsafe" đó cho người dùng như thể đó là câu trả lời.
-    const safetyFilter = createSafetyLineFilter((visible) => { committed = true; onDelta(visible); });
+    const safetyFilter = createSafetyLineFilter((visible) => {
+      committed = true;
+      attemptText += visible;
+      onDelta(visible);
+    });
     const filter = createStreamingThinkingFilter((visible) => safetyFilter.feed(visible));
     const attemptStartedAt = Date.now();
     try {
@@ -615,18 +641,51 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
       safetyFilter.flush();
       const visibleText = stripThinkingTags(text);
       if (visibleText || committed) {
-        logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'success' });
-        markSuccess(p); return { text: visibleText, provider: p, tried, finishReason: meta.finishReason || null };
+        const latency = Date.now() - attemptStartedAt;
+        logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency, status: 'success' });
+        // PHẦN J FIX: TRƯỚC ĐÂY đường streaming gọi `markSuccess(p)` KHÔNG kèm latency, nên toàn bộ
+        // telemetry latency/throughput không bao giờ học được gì từ đường code chạy NHIỀU NHẤT
+        // (mọi request thật đều là streaming). Nay ghi cả latency (cho isTargetSlow) và throughput
+        // token/giây thực đo (cho adaptive budget — xem throughputStats.js).
+        markSuccess(p, latency);
+        recordThroughput(p, { outputTokens: estimateTokens(visibleText || attemptText), elapsedMs: latency });
+        return {
+          text: visibleText, provider: p, tried, finishReason: meta.finishReason || null,
+          interrupted: false, latencyMs: latency
+        };
       }
       logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'empty' });
       markFailure(p, new Error('Phản hồi rỗng (chỉ chứa nhãn phân loại an toàn nội bộ bị lộ, không có câu trả lời thật)'));
       tried.push({ label: p.label, error: 'Phản hồi rỗng (chỉ chứa nhãn phân loại an toàn nội bộ bị lộ, không có câu trả lời thật — xem safetyLeakFilter.js)' });
     } catch (err) {
       if (committed) {
-        // Đã stream được 1 phần cho người dùng thấy — không thể lùi lại đổi target khác giữa
-        // chừng, đành coi phần đã có là kết quả cuối (tốt hơn là hủy bỏ mọi thứ đã hiển thị).
+        // ---------- CASE 2 (PHẦN B): provider lỗi SAU KHI đã gửi delta ----------
+        // KHÔNG coi là FAILED, KHÔNG bỏ phần đã sinh, KHÔNG regenerate từ đầu. Đóng 2 lớp lọc để
+        // lấy nốt phần đang nằm trong buffer (trước đây bị mất trắng: nhánh catch không hề gọi
+        // filter.flush()/safetyFilter.flush(), nên đoạn văn bản cuối còn đệm trong bộ lọc thinking
+        // bị bỏ đi cùng lỗi), rồi trả checkpoint để caller chuyển sang RESUME MODE.
+        try { filter.flush(); safetyFilter.flush(); } catch (e) { /* bộ lọc đã đóng — bỏ qua */ }
         logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'partial_error', err });
-        return { text: '', provider: p, tried, partialError: err };
+        // Người dùng hủy giữa chừng thì KHÔNG phải lỗi provider — không cooldown, không resume.
+        if (err && err.cancelled) {
+          return { text: attemptText, provider: p, tried, interrupted: false, cancelled: true, finishReason: null };
+        }
+        // markFailure ở ĐÂY là mấu chốt để RESUME đi sang target KHÁC: nó áp cooldown đúng tầng
+        // (key/model/target theo errorClassifier) nên getEligibleTargets() ở lượt resume không còn
+        // trả về target vừa chết. Thiếu dòng này (như bản trước) là lý do vòng recovery cứ gọi lại
+        // đúng provider đã chết và luôn thất bại.
+        const partialClassification = markFailure(p, err);
+        invalidateModelIfNeeded(p, partialClassification);
+        return {
+          text: attemptText,
+          provider: p,
+          tried,
+          interrupted: true,
+          partialError: err,
+          errorScope: partialClassification.scope,
+          sanitizedMessage: partialClassification.sanitizedMessage,
+          finishReason: null // bị ngắt: provider CHƯA gửi stop_reason -> không được giả định 'stop'
+        };
       }
       // mục 4: bị hủy (client disconnect/bấm Dừng) trước khi kịp phát delta nào — dừng ngay, không
       // thử target khác (mọi target khác cũng dùng chung signal, cũng sẽ abort ngay lập tức).

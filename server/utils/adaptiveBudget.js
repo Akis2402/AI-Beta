@@ -123,23 +123,32 @@ function estimateExpectedOutputBudget({ complexity, stage, deepThinking = false,
 // cắt ngang giữa chừng bởi timeoutMs (đã bị co lại theo deadline — xem requestDeadline.js), sinh ra
 // response INCOMPLETE gần như chắc chắn. Ước lượng thô: model sinh được khoảng THROUGHPUT_TOKENS_PER_SEC
 // token/giây khi streaming — trừ đi 1 khoảng dự phòng cho độ trễ mạng/khởi động trước khi ước lượng.
-const THROUGHPUT_TOKENS_PER_SEC = 60;
+// PHẦN J FIX: hằng số 60 chỉ còn là GIÁ TRỊ MẶC ĐỊNH khi chưa có telemetry thật (xem
+// throughputStats.js — EMA đo theo từng model/provider, tự cập nhật sau mỗi lượt gọi thành công).
+// Giữ tên hằng số này để mọi nơi import cũ không vỡ, nhưng đường tính budget thật LUÔN nhận
+// throughput qua tham số `throughputTokensPerSec` (chat.js truyền từ throughputStats).
+const THROUGHPUT_TOKENS_PER_SEC = Number(process.env.THROUGHPUT_TOKENS_PER_SEC) || 60;
 const NETWORK_OVERHEAD_MS = 2000;
 
 /**
  * @param {number} remainingMs Thời gian còn lại (ms) của request deadline tại thời điểm tính budget.
  *   Nếu không hữu hạn (undefined/không phải số) → không giới hạn theo thời gian (Infinity), giữ đúng
  *   hành vi cũ cho các lời gọi chưa truyền deadline.
+ * @param {number} [throughputTokensPerSec] Throughput ĐO THẬT của provider/model dự kiến dùng (PHẦN
+ *   J). Không truyền -> dùng THROUGHPUT_TOKENS_PER_SEC mặc định (hành vi cũ, tương thích ngược).
  * @returns {number}
  */
-function timeRemainingBudget(remainingMs) {
+function timeRemainingBudget(remainingMs, throughputTokensPerSec) {
   if (!Number.isFinite(remainingMs)) return Infinity;
   // Sàn tối thiểu 200 token dù remaining <= 0 — quyết định "có nên gọi provider hay không nữa" khi
   // hết ngân sách thời gian là việc của safeCallTimeout()/requestDeadline.js (mục 5), KHÔNG phải của
   // hàm này; ở đây chỉ đảm bảo maxTokens không bao giờ về 0/âm (giá trị vô nghĩa cho API provider).
   if (remainingMs <= 0) return 200;
+  const rate = Number.isFinite(throughputTokensPerSec) && throughputTokensPerSec > 0
+    ? throughputTokensPerSec
+    : THROUGHPUT_TOKENS_PER_SEC;
   const usableMs = Math.max(0, remainingMs - NETWORK_OVERHEAD_MS);
-  return Math.max(200, Math.round((usableMs / 1000) * THROUGHPUT_TOKENS_PER_SEC));
+  return Math.max(200, Math.round((usableMs / 1000) * rate));
 }
 
 /**
@@ -154,7 +163,8 @@ function timeRemainingBudget(remainingMs) {
 function calculateAdaptiveBudget(opts) {
   const {
     stage, problemText = '', historyText = '', contextsText = '', approachText = '',
-    hasImage = false, deepThinking = false, crossCheck = false, remainingMs
+    hasImage = false, deepThinking = false, crossCheck = false, remainingMs,
+    throughputTokensPerSec
   } = opts;
 
   const complexity = estimateProblemComplexity({ problemText, hasImage });
@@ -168,13 +178,13 @@ function calculateAdaptiveBudget(opts) {
   const complexityTarget2 = complexityTarget + contextBonus;
 
   // budget = min(complexityBudget, timeRemainingBudget, providerLimit) — mục VII.
-  const timeBudget = timeRemainingBudget(remainingMs);
+  const timeBudget = timeRemainingBudget(remainingMs, throughputTokensPerSec);
   const target = Math.min(HARD_CEILING, complexityTarget2, timeBudget);
 
   const min = Math.max(200, Math.min(Math.round(complexityTarget2 * 0.35), target));
   const max = Math.min(HARD_CEILING, Math.round(complexityTarget2 * 1.25), Math.max(target, timeBudget));
 
-  return { min, target, max, complexity, inputLoad, timeBudget };
+  return { min, target, max, complexity, inputLoad, timeBudget, throughputTokensPerSec: throughputTokensPerSec || THROUGHPUT_TOKENS_PER_SEC };
 }
 
 module.exports = {
@@ -184,5 +194,6 @@ module.exports = {
   estimateExpectedOutputBudget,
   timeRemainingBudget,
   calculateAdaptiveBudget,
-  HARD_CEILING
+  HARD_CEILING,
+  THROUGHPUT_TOKENS_PER_SEC
 };

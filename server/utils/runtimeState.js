@@ -68,4 +68,48 @@ function assertFinalResponseComplete(completeness) {
   return true;
 }
 
-module.exports = { STATES, isFinalSuccess, assertFinalResponseComplete };
+// ============================================================================================
+// PARTIAL — trạng thái THẬT THỨ BA (bổ sung ở bản fix PHẦN B/C)
+// ============================================================================================
+// VẤN ĐỀ CỦA MÔ HÌNH 2 TRẠNG THÁI CŨ: chỉ có COMPLETED hoặc FAILED. Khi mọi đường recovery đã dùng
+// hết (deadline cạn / reserve cạn / provider tiếp nối cũng lỗi) mà câu trả lời vẫn còn HARD, chat.js
+// phát sự kiện "error" — và client (public/js/app.js) coi "error" là NÉM LỖI, XOÁ toàn bộ preview,
+// KHÔNG lưu gì vào lịch sử. Nghĩa là 90% một lời giải dài, đúng, đã hiển thị trên màn hình bị XOÁ
+// SẠCH và thay bằng đúng 1 dòng "Câu trả lời chưa đầy đủ sau khi đã thử khôi phục…". Đó là hành vi
+// tệ nhất có thể: vi phạm trực tiếp nguyên tắc "Không mất phần câu trả lời đã sinh".
+//
+// Mô hình 3 trạng thái giữ được CẢ HAI cam kết:
+//   COMPLETED — đã COMPLETE thật (hoặc chỉ còn SOFT warning). KHÔNG BAO GIỜ gắn nhãn này cho 1
+//               response còn HARD (không nói dối về completeness — cam kết cũ giữ nguyên 100%).
+//   PARTIAL   — còn HARD nhưng ĐÃ CÓ nội dung dùng được và KHÔNG còn đường recovery nào. Vẫn giao
+//               phần đã sinh cho người dùng, gắn nhãn rõ ràng là chưa đầy đủ + lý do.
+//   FAILED    — không có gì dùng được (INVALID/rỗng/quá ngắn), hoặc lỗi provider ngay từ đầu.
+//
+// Ngưỡng "có nội dung dùng được": đủ dài để chắc chắn là lời giải thật chứ không phải 1 câu mở đầu
+// bị cắt. Dưới ngưỡng này thì giao ra chỉ gây nhầm lẫn -> FAILED như cũ.
+const MIN_DELIVERABLE_PARTIAL_CHARS = Number(process.env.MIN_DELIVERABLE_PARTIAL_CHARS) || 400;
+
+/**
+ * classifyFinalOutcome() — NƠI DUY NHẤT quyết định trạng thái cuối của 1 response hiển thị.
+ * @param {{status:string, severity?:string}} completeness
+ * @param {{textLength?:number}} [ctx]
+ * @returns {{state:string, deliverable:boolean, partial:boolean}}
+ */
+function classifyFinalOutcome(completeness, ctx = {}) {
+  const status = completeness && completeness.status;
+  const severity = completeness && completeness.severity;
+  if (isFinalSuccess(status, severity)) {
+    return { state: STATES.COMPLETED, deliverable: true, partial: false };
+  }
+  const len = ctx.textLength || 0;
+  // INVALID = rỗng/quá ngắn -> không có gì để giao, dù dài bao nhiêu ký tự cũng không đáng tin.
+  if (status !== 'INVALID' && len >= MIN_DELIVERABLE_PARTIAL_CHARS) {
+    return { state: STATES.PARTIAL, deliverable: true, partial: true };
+  }
+  return { state: STATES.FAILED, deliverable: false, partial: false };
+}
+
+module.exports = {
+  STATES, isFinalSuccess, assertFinalResponseComplete, classifyFinalOutcome,
+  MIN_DELIVERABLE_PARTIAL_CHARS
+};

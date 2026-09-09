@@ -85,7 +85,7 @@ function allocateCoreReserve(targetBudget) {
  * @param {number} reserveUsedSoFar
  * @param {number} reserveBudget
  */
-function shouldUseReserve(completeness, reserveUsedSoFar, reserveBudget) {
+function shouldUseReserve(completeness, reserveUsedSoFar, reserveBudget, opts = {}) {
   if (!completeness || completeness.status === 'COMPLETE') return { allow: false, amount: 0 };
   // FIX mục 2/9 (audit continuation): SOFT_INCOMPLETE đã được coi là thành công (isFinalSuccess ở
   // runtimeState.js trả true) — KHÔNG được tiêu reserve để "sửa" 1 thứ vốn dĩ không cần sửa. Việc
@@ -96,8 +96,44 @@ function shouldUseReserve(completeness, reserveUsedSoFar, reserveBudget) {
   if (remaining <= 0) return { allow: false, amount: 0 };
   // Continuation không cần cả reserve cùng lúc — cấp theo lô nhỏ (delta), không phải toàn bộ reserve
   // một lần (đúng tinh thần "generateMissingDelta" ở 21.13, không phải "regenerate full").
-  const amount = Math.min(remaining, Math.max(200, Math.round(reserveBudget * 0.5)));
+  //
+  // FIX PHẦN I (root cause #4 của lỗi "chưa đầy đủ sau khi khôi phục"): lô mặc định = 50% reserve
+  // (tức chỉ ~15% tổng budget) được tính HOÀN TOÀN KHÔNG BIẾT phần còn thiếu dài bao nhiêu. Với 1
+  // câu trả lời bị NGẮT ở 40% (PHẦN L), phần còn thiếu là ~60% tổng budget — cấp 15% thì lượt tiếp
+  // nối chắc chắn lại bị finish_reason=length, sinh ra HARD mới, tiêu lô tiếp… tới khi reserve cạn
+  // và pipeline buộc phải báo thất bại DÙ deadline còn dư. Nay: nếu caller ước lượng được phần còn
+  // thiếu (`deficitTokens` — xem estimateRemainingWork()), cấp ĐÚNG mức đó + 20% đệm, vẫn bị chặn
+  // bởi `remaining` nên KHÔNG BAO GIỜ vượt reserve (hard cap của PHẦN I giữ nguyên).
+  const MIN_BATCH = 200;
+  const deficit = Number(opts.deficitTokens);
+  const wanted = Number.isFinite(deficit) && deficit > 0
+    ? Math.round(deficit * 1.2)
+    : Math.max(MIN_BATCH, Math.round(reserveBudget * 0.5));
+  const amount = Math.min(remaining, Math.max(MIN_BATCH, wanted));
   return { allow: true, amount };
+}
+
+/**
+ * estimateRemainingWork() — ước lượng số token OUTPUT còn thiếu để hoàn thành câu trả lời (PHẦN I).
+ * Dùng cho `shouldUseReserve({deficitTokens})` và cho quyết định mở rộng reserve.
+ *
+ * KHÔNG dùng công thức phẳng theo độ dài input (bị cấm ở PHẦN I) — dựa trên: ngân sách đã kỳ vọng
+ * cho lớp bài này (`expectedTotal`, do adaptiveBudget tính theo ĐỘ PHỨC TẠP), trừ đi phần đã sinh
+ * thật, cộng phần bù cho các ý còn thiếu đã biết chắc (missingCoverage).
+ *
+ * @param {{expectedTotal:number, producedTokens:number, missingSections?:number,
+ *   interrupted?:boolean}} opts
+ * @returns {number} token còn thiếu (>=200).
+ */
+function estimateRemainingWork({ expectedTotal = 0, producedTokens = 0, missingSections = 0, interrupted = false } = {}) {
+  const base = Math.max(0, Math.round(expectedTotal) - Math.round(producedTokens));
+  // Mỗi ý còn thiếu đã xác định được cần ít nhất 1 khoảng trình bày tối thiểu.
+  const perSection = 260;
+  const sectionNeed = Math.max(0, Math.round(missingSections)) * perSection;
+  // Bị NGẮT giữa stream: phần còn lại gần như chắc chắn còn nhiều (model chưa tới kết luận) — không
+  // để ước lượng tụt xuống sàn chỉ vì `expectedTotal` bị đánh giá thấp ở lượt đầu.
+  const interruptedFloor = interrupted ? Math.max(400, Math.round(producedTokens * 0.5)) : 0;
+  return Math.max(200, base, sectionNeed, interruptedFloor);
 }
 
 // FIX ROOT CAUSE mục 4 (audit continuation): TRƯỚC ĐÂY reserve CỐ ĐỊNH ở đúng 30% budget ban đầu —
@@ -694,6 +730,7 @@ module.exports = {
   classifyProblem,
   allocateCoreReserve,
   shouldUseReserve,
+  estimateRemainingWork,
   extendReserveIfTruncated,
   buildMathIR,
   serializeMathIR,
