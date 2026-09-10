@@ -165,7 +165,11 @@ test('19. subjectId mặc định "general" khi không truyền -> không throw,
   assert.ok(typeof system === 'string' && system.length > 0);
 });
 test('20. PROMPT_VERSION đã bump khi thêm subject directive (tránh dùng nhầm cache L1 cũ)', () => {
-  assert.strictEqual(PROMPT_VERSION, 'chat-prompt-v4');
+  // Cập nhật lên v5 khi thêm LANGUAGE_RULE_STATIC + buildLanguageContract() (sửa bug trộn ngôn ngữ
+  // Answer/Explanation) và schema scene3d/scenepatch vào prompt — xem ghi chú tại PROMPT_VERSION
+  // trong promptBuilder.js. Ý nghĩa của test này KHÔNG đổi: version phải được bump mỗi khi cấu
+  // trúc/nội dung prompt thay đổi đủ để làm output khác đi, nếu không cache L1 cũ bị dùng nhầm.
+  assert.strictEqual(PROMPT_VERSION, 'chat-prompt-v5');
 });
 
 // ---------- getSubject fallback ----------
