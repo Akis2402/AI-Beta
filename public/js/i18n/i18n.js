@@ -16,7 +16,7 @@
    cần reload trang (PHẦN AH).
    ===================================================================================== */
 
-function t(key, vars) {
+function translateKey(key, vars) {
   const lang = (window.languageStore && window.languageStore.getUILanguage()) || 'vi';
   const dict = (window.TRANSLATIONS && window.TRANSLATIONS[lang]) || {};
   let str = dict[key];
@@ -32,14 +32,14 @@ function t(key, vars) {
 
 function applyStaticTranslations(root) {
   const scope = root || document;
-  scope.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.getAttribute('data-i18n')); });
+  scope.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = translateKey(el.getAttribute('data-i18n')); });
   // data-i18n-html: DÙNG RẤT HẠN CHẾ, chỉ cho chuỗi có markup cố định do CHÍNH translations.js
   // định nghĩa (vd <strong> trong hướng dẫn) — KHÔNG bao giờ dùng cho nội dung người dùng/AI nhập
   // vào (đó là lỗ XSS); mọi chuỗi động vẫn phải qua data-i18n/textContent.
-  scope.querySelectorAll('[data-i18n-html]').forEach((el) => { el.innerHTML = t(el.getAttribute('data-i18n-html')); });
-  scope.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = t(el.getAttribute('data-i18n-placeholder')); });
-  scope.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.getAttribute('data-i18n-title')); });
-  scope.querySelectorAll('[data-i18n-aria-label]').forEach((el) => { el.setAttribute('aria-label', t(el.getAttribute('data-i18n-aria-label'))); });
+  scope.querySelectorAll('[data-i18n-html]').forEach((el) => { el.innerHTML = translateKey(el.getAttribute('data-i18n-html')); });
+  scope.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = translateKey(el.getAttribute('data-i18n-placeholder')); });
+  scope.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = translateKey(el.getAttribute('data-i18n-title')); });
+  scope.querySelectorAll('[data-i18n-aria-label]').forEach((el) => { el.setAttribute('aria-label', translateKey(el.getAttribute('data-i18n-aria-label'))); });
 }
 
 /* ---------------------------------------------------------------------------------------
@@ -69,11 +69,11 @@ const ERROR_CODE_I18N_KEY = {
  * dùng khi code không nhận diện được — vẫn hơn là không hiện gì, nhưng ưu tiên bản đã dịch. */
 function tError(code, fallbackText) {
   const key = ERROR_CODE_I18N_KEY[code];
-  if (key) return t(key);
-  return fallbackText || t('error.generic');
+  if (key) return translateKey(key);
+  return fallbackText || translateKey('error.generic');
 }
 
-window.t = t;
+window.t = translateKey;
 window.tError = tError;
 window.ERROR_CODE_I18N_KEY = ERROR_CODE_I18N_KEY;
 window.applyStaticTranslations = applyStaticTranslations;
