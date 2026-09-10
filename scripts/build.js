@@ -39,9 +39,15 @@ const CORE_JS = [
   'formulas.js',
   'subjects.js',
   'solid3d.js',
+  'scene3d.js', // PHẦN J-S: engine 3D mới (compact scene JSON + patch)
   'geo2d-engine.js',
   'app.js',
 ];
+// PHẦN T-AZ (i18n) / A-C (Puter) / E-I (task manager): asset mới nằm ở thư mục con riêng —
+// fingerprint từng nhóm bằng process() riêng (mỗi nhóm 1 relDir) thay vì gộp chung CORE_JS.
+const I18N_JS = ['translations.js', 'languageStore.js', 'i18n.js'];
+const PROVIDER_JS = ['puterAdapter.js', 'providerRouter.js'];
+const TASK_JS = ['conversationTaskManager.js'];
 const CORE_CSS = ['styles.css'];
 
 function escapeRegExp(s) {
@@ -116,6 +122,9 @@ function main() {
   }
 
   process('js', CORE_JS);
+  process('js/i18n', I18N_JS);
+  process('js/providers', PROVIDER_JS);
+  process('js/tasks', TASK_JS);
   process('css', CORE_CSS);
 
   fs.writeFileSync(indexHtmlPath, html, 'utf8');

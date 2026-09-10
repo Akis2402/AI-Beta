@@ -1,5 +1,7 @@
 'use strict';
 
+const tokenCounter = require('./tokenCounter');
+
 // ---------- ADAPTIVE TOKEN BUDGET (mục III) ----------
 // Trước đây maxTokens là hằng số cố định theo stage/deepThinking (xem chat.js cũ: ternary
 // 2100/3300/3000/6000). Điều đó KHÔNG tính tới độ dài đề bài thực tế, số sub-question, độ dài
@@ -19,9 +21,11 @@ const HARD_CEILING = 8000; // trần tuyệt đối, không vượt giới hạn
  * nguồn hơn). Ước lượng token bằng ký tự/3.2 — xấp xỉ hợp lý cho văn bản có dấu tiếng Việt (dấu
  * thanh/nguyên âm ghép khiến tỉ lệ ký tự/token thấp hơn tiếng Anh thuần).
  */
-function estimateTokens(str) {
+function estimateTokens(str, opts) {
   if (!str) return 0;
-  return Math.ceil(String(str).length / 3.2);
+  // Vấn đề #4: uỷ quyền cho tokenCounter — nó dùng ĐÚNG hằng số 3.2 như cũ cho tới khi thu thập đủ
+  // mẫu `usage` thật từ provider, nên hành vi hiện tại (và mọi test) KHÔNG đổi cho tới lúc đó.
+  return tokenCounter.countTokens(str, opts || {});
 }
 
 function estimateInputTokenLoad({ problemText = '', historyText = '', contextsText = '', approachText = '' } = {}) {

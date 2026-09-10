@@ -22,15 +22,40 @@ const PROGRAM_OPS = new Set([
   'diametricOpposite', 'angleBisectorFoot', 'rotate', 'tangentPoint'
 ]);
 
-/** Trích mọi khối ```shape/solid3d/plot ... ``` (đã đóng) khỏi 1 văn bản. */
+// PHẦN J-L (scene3d.js): điểm/vector/đường/mặt phẳng/mặt cong Oxyz — object nén, KHÔNG dùng lại
+// SOLID3D_PRIMITIVE_TYPES (đặt cạnh nhau để chấp nhận cả khối rắn nhúng trong scene3d).
+const SCENE3D_OBJ_TYPES = new Set([
+  'pt', 'line', 'seg', 'vec', 'plane', 'surf', 'axes', 'grid',
+  'cube', 'box', 'sphere', 'cylinder', 'cone', 'pyramid', 'prism'
+]);
+
+/** Trích mọi khối ```shape/solid3d/plot/scene3d/scenepatch ... ``` (đã đóng) khỏi 1 văn bản. */
 function extractDrawBlocks(text) {
   const blocks = [];
-  const re = /```(shape|solid3d|plot)\n?([\s\S]*?)```/g;
+  const re = /```(shape|solid3d|plot|scene3d|scenepatch)\n?([\s\S]*?)```/g;
   let m;
   while ((m = re.exec(text || ''))) {
     blocks.push({ kind: m[1], raw: m[2].trim(), index: m.index });
   }
   return blocks;
+}
+
+function validateScene3dBlock(json) {
+  const errors = [];
+  if (!Array.isArray(json.objs) || !json.objs.length) errors.push('scene3d.objs phải là mảng không rỗng');
+  else json.objs.forEach((o, i) => {
+    if (!o || typeof o !== 'object' || !SCENE3D_OBJ_TYPES.has(o.t)) errors.push(`scene3d.objs[${i}].t không hợp lệ: ${o && o.t}`);
+  });
+  return errors;
+}
+
+function validateScenePatchBlock(json) {
+  const errors = [];
+  if (!Array.isArray(json.op) || !json.op.length) errors.push('scenepatch.op phải là mảng không rỗng');
+  else json.op.forEach((entry, i) => {
+    if (!Array.isArray(entry) || !['add', 'del', 'update'].includes(entry[0])) errors.push(`scenepatch.op[${i}] không hợp lệ (chỉ nhận add|del|update)`);
+  });
+  return errors;
 }
 
 function validatePlotBlock(json) {
@@ -257,6 +282,8 @@ function validateDrawingBlock(block) {
   if (block.kind === 'plot') errors = validatePlotBlock(json);
   else if (block.kind === 'shape') errors = validateShapeBlock(json);
   else if (block.kind === 'solid3d') errors = validateSolid3dBlock(json);
+  else if (block.kind === 'scene3d') errors = validateScene3dBlock(json);
+  else if (block.kind === 'scenepatch') errors = validateScenePatchBlock(json);
 
   return { valid: errors.length === 0, errors, json };
 }

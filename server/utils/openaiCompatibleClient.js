@@ -164,7 +164,10 @@ function createOpenAICompatibleClient(config) {
     const data = await res.json();
     const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
     // mục 1 (completion-first): choices[0].finish_reason ('stop'/'length'/...) forward qua meta.
-    if (meta) meta.finishReason = normalizeFinishReason(data.choices && data.choices[0] && data.choices[0].finish_reason);
+    if (meta) {
+      meta.finishReason = normalizeFinishReason(data.choices && data.choices[0] && data.choices[0].finish_reason);
+      if (data.usage) meta.usage = { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens };
+    }
     return String(text).trim();
   }
 
@@ -253,6 +256,7 @@ function createOpenAICompatibleClient(config) {
         // vòng lặp là finish_reason của chunk cuối cùng.
         const fr = chunk.choices && chunk.choices[0] && chunk.choices[0].finish_reason;
         if (fr && meta) meta.finishReason = normalizeFinishReason(fr);
+        if (meta && evt.usage) meta.usage = { inputTokens: evt.usage.prompt_tokens, outputTokens: evt.usage.completion_tokens };
       }
     } finally {
       linked.cleanup();

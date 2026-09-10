@@ -112,6 +112,13 @@ function buildContinuationPrompt({ priorText, reasons = [], missingCoverage = []
  * @param {{reasons:string[], missingCoverage:string[]}} completeness
  * @returns {Array} Mảng messages mới, sẵn sàng cho lượt gọi continuation.
  */
+/**
+ * @deprecated (từ bản fix PHẦN B/G) — GỬI LẠI NGUYÊN VĂN toàn bộ `priorText`, tức chính nguồn lãng
+ * phí input token lớn nhất của pipeline cũ (đo được: 4527 -> 2434 token khi thay bằng bản tối thiểu).
+ * KHÔNG dùng cho code mới. Đường chạy thật đã chuyển hết sang buildMinimalContinuationContext().
+ * Giữ lại CHỈ để: (1) tương thích ngược với test hiện có, (2) làm baseline "before" cho
+ * scripts/measure-tokens.js so sánh trung thực.
+ */
 function appendContinuationTurn(messages, priorText, completeness) {
   return [
     ...messages,

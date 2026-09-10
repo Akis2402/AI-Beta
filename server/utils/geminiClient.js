@@ -173,7 +173,11 @@ async function callGemini({ system, messages, maxTokens = 1000, temperature, web
     .join('\n')
     .trim();
   // mục 1 (completion-first): candidate.finishReason ('STOP'/'MAX_TOKENS'/...) forward qua meta.
-  if (meta) meta.finishReason = normalizeFinishReason(candidate.finishReason);
+  if (meta) {
+    meta.finishReason = normalizeFinishReason(candidate.finishReason);
+    const um = data && data.usageMetadata;
+    if (um) meta.usage = { inputTokens: um.promptTokenCount, outputTokens: um.candidatesTokenCount };
+  }
   return text;
 }
 
@@ -269,6 +273,7 @@ async function callGeminiStream({ system, messages, maxTokens = 1000, temperatur
       // mục 1: finishReason chỉ xuất hiện ở chunk CUỐI (khi model thực sự dừng) — ghi đè liên tục,
       // giá trị còn lại sau vòng lặp chính là finishReason của chunk cuối cùng nhận được.
       if (cand.finishReason && meta) meta.finishReason = normalizeFinishReason(cand.finishReason);
+      if (meta && obj.usageMetadata) meta.usage = { inputTokens: obj.usageMetadata.promptTokenCount, outputTokens: obj.usageMetadata.candidatesTokenCount };
     }
   } finally {
     linked.cleanup();

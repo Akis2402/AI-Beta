@@ -16,6 +16,7 @@ const { estimateTokens } = require('../server/utils/adaptiveBudget');
 const cc = require('../server/utils/contextCompressor');
 const { appendContinuationTurn, buildMinimalContinuationContext } = require('../server/utils/continuation');
 const { buildChatSystemPrompt } = require('../server/utils/promptBuilder');
+const { buildCitationIndex } = require('../server/utils/citationIndex');
 const { calculateAdaptiveBudget } = require('../server/utils/adaptiveBudget');
 
 function makeHistory(pairs) {
@@ -130,6 +131,58 @@ for (const steps of [10, 25, 50, 80]) {
     console.log(`   !! CẢNH BÁO: mất ${lost.length} số — quality gate phải chặn trường hợp này`);
     process.exitCode = 1;
   }
+}
+
+// ============================================================================================
+// VẤN ĐỀ #1 + #2 — request CÓ NGUỒN: dedupe đoạn trùng + nén boilerplate trong đoạn trích
+// ============================================================================================
+console.log('\n============================================================');
+console.log('VẤN ĐỀ #1+#2 — INPUT TOKEN của request CÓ ĐOẠN TRÍCH NGUỒN');
+console.log('============================================================\n');
+console.log('số đoạn nguồn | before | after  | giảm   | đoạn gộp | dòng boilerplate bỏ');
+console.log('--------------+--------+--------+--------+----------+--------------------');
+
+function makeSourceContexts(n, dupEvery) {
+  const header = 'Tài liệu ôn tập Toán — Trường THPT chuyên Lê Quý Đôn';
+  const footer = 'Bản quyền tổ Toán, lưu hành nội bộ, không phát tán';
+  const bodies = [
+    'Chu vi hình tròn bằng hai pi nhân bán kính, còn diện tích bằng pi nhân bình phương bán kính.',
+    'Định lý Pytago phát biểu rằng trong tam giác vuông, bình phương cạnh huyền bằng tổng bình phương hai cạnh góc vuông.',
+    'Công thức Heron cho phép tính diện tích tam giác khi biết độ dài ba cạnh và nửa chu vi của nó.',
+    'Định lý cosin tổng quát hoá định lý Pytago cho tam giác bất kỳ, dùng để tính cạnh khi biết hai cạnh và góc xen giữa.'
+  ];
+  const first = `${header}\n${footer}\n${bodies[0]}\nGiá trị tham chiếu R_1 = 4 cm`;
+  return Array.from({ length: n }, (_, i) => {
+    // Cứ dupEvery đoạn lại có 1 đoạn TRÙNG HOÀN TOÀN đoạn đầu — mô phỏng đúng tình huống thực tế
+    // hay gặp: client cắt excerpt chồng lấn, hoặc cùng 1 định lý xuất hiện ở 2 tài liệu khác nhau.
+    if (i > 0 && dupEvery && i % dupEvery === 0) return { doc: 'ThamKhao', id: i + 1, text: first };
+    return {
+      doc: 'OnTap', id: i + 1,
+      text: `${header}\n${footer}\n${bodies[i % bodies.length]}\nGiá trị tham chiếu R_${i + 1} = ${(i + 1) * 4} cm`
+    };
+  });
+}
+
+for (const n of [4, 8, 16]) {
+  const raw = makeSourceContexts(n, 3);
+  const rawTokens = raw.reduce((s2, c) => s2 + estimateTokens(c.text), 0);
+  const idx = buildCitationIndex(raw);
+  const packed = cc.compressSourceExcerpts(idx.effectiveContexts);
+  const afterTokens = packed.contexts.reduce((s2, c) => s2 + estimateTokens(c.text), 0);
+  const pct = (1 - afterTokens / rawTokens) * 100;
+  console.log(
+    String(n).padEnd(13) + ' | ' + String(rawTokens).padStart(6) + ' | ' + String(afterTokens).padStart(6) +
+    ' | ' + (pct.toFixed(1) + '%').padStart(6) + ' | ' + String(idx.duplicatesMerged).padStart(8) +
+    ' | ' + String(packed.droppedBoilerplateLines).padStart(19)
+  );
+  // an toàn: không mất số nào, citeNo không đổi
+  const nums = (t) => new Set(t.match(/-?\d+(?:[.,]\d+)?/g) || []);
+  const before = idx.effectiveContexts.map((c) => c.text).join('\n');
+  const after = packed.contexts.map((c) => c.text).join('\n');
+  const lost = [...nums(before)].filter((x) => !nums(after).has(x));
+  if (lost.length) { console.log('   !! mất số:', lost.slice(0, 5)); process.exitCode = 1; }
+  const noChanged = packed.contexts.some((c, i) => c.citeNo !== idx.effectiveContexts[i].citeNo);
+  if (noChanged) { console.log('   !! citeNo bị đổi khi nén nội dung'); process.exitCode = 1; }
 }
 
 console.log('\n============================================================');

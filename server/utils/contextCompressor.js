@@ -513,6 +513,94 @@ function assignTiers(history) {
 }
 
 /**
+ * compressSourceExcerpts() — Vấn đề #2: nâng mức nén cho request có NHIỀU ĐOẠN TRÍCH NGUỒN.
+ *
+ * Vì sao cần riêng hàm này: đo thật (scripts/measure-tokens.js) cho thấy scenario STANDARD chỉ đạt
+ * 7.9% dù mục tiêu 15% — lý do là history ở đó chỉ chiếm ~13% tổng input, phần còn lại là system
+ * prompt (chỉ thị an toàn/định dạng — KHÔNG được nén sâu) và ĐOẠN TRÍCH NGUỒN. Nguồn là chỗ duy nhất
+ * còn dư thật: các excerpt được client cắt ra từ CÙNG 1 tài liệu thường mang theo header/footer trang
+ * LẶP LẠI y nguyên ở mọi đoạn ("Chương 3 — Hình học phẳng", "Trang 42/150", tên sách...). Những dòng
+ * đó là metadata trình bày, không phải nội dung học thuật.
+ *
+ * NGUYÊN TẮC AN TOÀN (khác hẳn nén history):
+ *   - KHÔNG BAO GIỜ loại bỏ 1 excerpt (dù trùng lặp) — việc gộp nguồn là việc của citationIndex.js,
+ *     nơi có xử lý citeNo/alias. Ở đây chỉ nén NỘI DUNG BÊN TRONG từng excerpt.
+ *   - Chỉ loại dòng xuất hiện y nguyên ở >= 2 excerpt VÀ không chứa dữ liệu (isDataLine=false) VÀ
+ *     ngắn (<= 80 ký tự — header/footer thật, không phải 1 câu định lý dài).
+ *   - Excerpt bị đánh dấu `truncated` (đã bị cắt ở validators) được nén NHẸ HƠN: nó vốn đã thiếu,
+ *     không nên bớt thêm.
+ *   - Mọi excerpt đều qua quality gate; fail -> rollback về lossless.
+ *
+ * @param {Array<{text:string, doc?:string, truncated?:boolean, citeNo?:number}>} contexts
+ * @returns {{contexts:Array, rawTokens:number, compressedTokens:number, droppedBoilerplateLines:number,
+ *   rolledBack:number}}
+ */
+function compressSourceExcerpts(contexts) {
+  const list = Array.isArray(contexts) ? contexts : [];
+  const rawTokens = list.reduce((n, c) => n + estimateTokens(c.text), 0);
+  if (list.length < 2) {
+    // 1 excerpt duy nhất: không có gì để so "lặp giữa các đoạn", chỉ normalize lossless.
+    const out = list.map((c) => ({ ...c, text: normalizeWhitespaceSafe(c.text) }));
+    return {
+      contexts: out, rawTokens,
+      compressedTokens: out.reduce((n, c) => n + estimateTokens(c.text), 0),
+      droppedBoilerplateLines: 0, rolledBack: 0
+    };
+  }
+
+  // Đếm số excerpt mà mỗi dòng xuất hiện trong đó (theo tài liệu — header của sách A không nên ảnh
+  // hưởng tới excerpt của sách B).
+  const seenIn = new Map(); // `${doc} ${normLine}` -> số excerpt chứa nó
+  list.forEach((c) => {
+    const doc = c.doc || '';
+    const uniqueLines = new Set(
+      String(c.text || '').split('\n').map((l) => l.trim()).filter(Boolean)
+    );
+    uniqueLines.forEach((l) => {
+      const k = doc + '\u0000' + l.toLowerCase().replace(/\s+/g, ' ');
+      seenIn.set(k, (seenIn.get(k) || 0) + 1);
+    });
+  });
+
+  let droppedBoilerplateLines = 0;
+  let rolledBack = 0;
+
+  const out = list.map((c) => {
+    const original = String(c.text || '');
+    const lossless = normalizeWhitespaceSafe(original);
+    if (c.truncated) return { ...c, text: lossless }; // excerpt vốn đã bị cắt -> chỉ lossless
+
+    const doc = c.doc || '';
+    let dropped = 0;
+    const kept = [];
+    let insideFence = false;
+    for (const line of lossless.split('\n')) {
+      if (/^\s*```/.test(line)) { insideFence = !insideFence; kept.push(line); continue; }
+      if (insideFence) { kept.push(line); continue; }
+      const t = line.trim();
+      if (!t) { kept.push(line); continue; }
+      const k = doc + '\u0000' + t.toLowerCase().replace(/\s+/g, ' ');
+      const repeats = seenIn.get(k) || 0;
+      const isBoilerplate = repeats >= 2 && t.length <= 80 && !isDataLine(line);
+      if (isBoilerplate) { dropped += 1; continue; }
+      kept.push(line);
+    }
+
+    const candidate = kept.join('\n').trim();
+    const gate = qualityGate(original, candidate);
+    if (!gate.ok || !candidate) { rolledBack += 1; return { ...c, text: lossless }; }
+    droppedBoilerplateLines += dropped;
+    return { ...c, text: candidate };
+  });
+
+  return {
+    contexts: out, rawTokens,
+    compressedTokens: out.reduce((n, c) => n + estimateTokens(c.text), 0),
+    droppedBoilerplateLines, rolledBack
+  };
+}
+
+/**
  * compressSystemPrompt(): TIER 4 cho system prompt — chỉ loại boilerplate/dòng chỉ thị LẶP LẠI y
  * nguyên và khoảng trắng dư. Nội dung chỉ thị xuất hiện LẦN ĐẦU không bao giờ bị bỏ (đó là
  * "model/provider instructions thực sự cần thiết" mà PHẦN D cấm nén), và luôn qua quality gate.
@@ -534,5 +622,6 @@ module.exports = {
   COMPRESSION_MIN_TOKENS, TARGET_RATIO_NORMAL, TARGET_RATIO_HEAVY, TARGET_RATIO_MAX,
   normalizeWhitespaceSafe, dedupeRepeatedLines, compressProsePreservingData,
   semanticGrains, qualityGate, missingGrains, isDataLine,
-  scoreImportance, targetRatioFor, semanticCompressContext, assignTiers, compressSystemPrompt
+  scoreImportance, targetRatioFor, semanticCompressContext, assignTiers, compressSystemPrompt,
+  compressSourceExcerpts
 };

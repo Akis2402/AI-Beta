@@ -17,8 +17,19 @@ const CITATION_RE = /\[(\d{1,3})\]/g;
  *   i tương ứng citation [i]). Chỉ cần `contexts.length`, không cần nội dung.
  * @returns {{valid:boolean, invalidCitations:number[], usedContextIds:number[], allCitations:number[]}}
  */
-function validateCitations(text, contexts) {
-  const n = Array.isArray(contexts) ? contexts.length : 0;
+function validateCitations(text, contexts, opts = {}) {
+  const list = Array.isArray(contexts) ? contexts : [];
+  const n = list.length;
+  // FIX (Vấn đề #1 — bật được context dedupe): citation KHÔNG còn được validate theo KHOẢNG
+  // `1..contexts.length`. Sau khi gộp đoạn trùng, tập số hợp lệ có thể KHÔNG liên tục (vd [1],[2],[4])
+  // — validate theo khoảng sẽ vừa coi [3] (đã bị gộp) là hợp lệ, vừa coi [4] (thật) là bịa. Nay dùng
+  // đúng TẬP citeNo do citationIndex.js gán, kèm alias của các số đã bị gộp.
+  const validSet = new Set(
+    Array.isArray(opts.validCiteNos) && opts.validCiteNos.length
+      ? opts.validCiteNos
+      : list.map((c, i) => (c && c.citeNo != null ? c.citeNo : i + 1))
+  );
+  const aliasOf = opts.aliasOf || {};
   const clean = String(text || '');
   const all = new Set();
   let m;
@@ -28,9 +39,10 @@ function validateCitations(text, contexts) {
     if (all.size > 200) break; // pathological guard
   }
 
+  const isValid = (id) => validSet.has(id) || (aliasOf[id] != null && validSet.has(aliasOf[id]));
   const allCitations = [...all].sort((a, b) => a - b);
-  const usedContextIds = allCitations.filter((id) => id >= 1 && id <= n);
-  const invalidCitations = allCitations.filter((id) => id < 1 || id > n);
+  const usedContextIds = allCitations.filter(isValid);
+  const invalidCitations = allCitations.filter((id) => !isValid(id));
 
   return { valid: invalidCitations.length === 0, invalidCitations, usedContextIds, allCitations };
 }

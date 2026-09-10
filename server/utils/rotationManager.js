@@ -16,6 +16,9 @@
 // giả định global qua nhiều serverless instance (xem giới hạn ghi trong báo cáo cuối).
 
 const { classify } = require('./errorClassifier');
+// Vấn đề #3: store dùng chung (tuỳ chọn) để fairness/cooldown lan qua nhiều serverless instance.
+// KHÔNG cấu hình -> mọi thứ hoạt động y hệt bản cũ (in-memory per-instance).
+const rotationStore = require('./rotationStore');
 
 const keyHealth = new Map(); // keyId -> {cooldownUntil, invalid, requests, failures}
 const modelHealth = new Map(); // modelId -> {cooldownUntil, requests, failures}
@@ -42,6 +45,18 @@ const targetHealth = new Map(); // targetId -> {cooldownUntil, requests, failure
 let selectionSeq = 0;
 const selectionState = new Map(); // targetId -> lastSelectedSeq (số càng nhỏ = càng lâu chưa dùng)
 
+// "Vé xoay" toàn cục cho REQUEST HIỆN TẠI, do rotationStore.reserveRotationSlot() cấp bằng atomic
+// INCR ở đầu request (xem rotationStore.js). Có vé -> vòng xoay là round-robin TOÀN CỤC thật sự,
+// không request nào trên bất kỳ instance nào nhận cùng số. Không có vé (store tắt/lỗi) -> null, và
+// rotation quay về LRU in-memory như cũ.
+let currentGlobalSlot = null;
+
+/** Đặt vé xoay cho request hiện tại (gọi từ aiProviders.ensureProvidersReady). */
+function setGlobalRotationSlot(slot) {
+  currentGlobalSlot = Number.isFinite(slot) ? slot : null;
+}
+function getGlobalRotationSlot() { return currentGlobalSlot; }
+
 /**
  * noteSelection(): ghi nhận 1 target VỪA THỰC SỰ được dùng cho 1 lượt gọi (thành công hay thất bại
  * đều tính — đã "tiêu" 1 lượt ưu tiên của nó). Được gọi từ orderByRotation() cho phần tử đứng đầu
@@ -52,11 +67,13 @@ function noteSelection(target) {
   if (!target || !target.id) return;
   selectionSeq += 1;
   selectionState.set(target.id, selectionSeq);
+  rotationStore.scheduleWrite(); // write-behind, fire-and-forget (Vấn đề #3)
 }
 
 /** Chỉ dùng cho test — xoá sạch trạng thái rotation/health giữa các kịch bản độc lập. */
 function _resetRotationStateForTest() {
   selectionSeq = 0;
+  currentGlobalSlot = null;
   selectionState.clear();
   keyHealth.clear();
   modelHealth.clear();
@@ -94,6 +111,59 @@ function isAvailable(entry) {
  *   được coi là eligible (không chặn nhầm khi không có đủ thông tin, mục 10 "chọn fallback gần nhất").
  * @returns {Array} Target còn đủ điều kiện tham gia rotation.
  */
+// ---------- Serialize/merge trạng thái cho store dùng chung (Vấn đề #3) ----------
+// Chỉ xuất những gì THỰC SỰ cần chia sẻ: mốc LRU + cooldown/invalid. KHÔNG xuất khóa API (keyId đã
+// là id nội bộ kiểu "gemini#2"), không xuất nội dung request nào.
+function exportSnapshot() {
+  const mapOut = (m) => {
+    const o = {};
+    m.forEach((v, k) => {
+      o[k] = { cooldownUntil: v.cooldownUntil || 0, invalid: !!v.invalid, failures: v.failures || 0 };
+    });
+    return o;
+  };
+  const lru = {};
+  selectionState.forEach((v, k) => { lru[k] = v; });
+  return { v: 1, at: Date.now(), seq: selectionSeq, lru, key: mapOut(keyHealth), model: mapOut(modelHealth), target: mapOut(targetHealth) };
+}
+
+/**
+ * MERGE (không ghi đè) trạng thái từ store vào bộ nhớ:
+ *   - cooldownUntil: lấy giá trị LỚN HƠN — an toàn theo hướng thận trọng (nếu instance khác vừa thấy
+ *     429 cho khóa đó, ta phải tôn trọng cooldown ấy, không được xoá nó đi).
+ *   - invalid: OR — khóa sai ở instance nào thì sai ở mọi instance.
+ *   - LRU seq: lấy MAX để không "làm mới" oan 1 target vừa được instance khác dùng.
+ */
+function applySnapshot(snap) {
+  if (!snap || typeof snap !== 'object') return;
+  if (Number.isFinite(snap.seq)) selectionSeq = Math.max(selectionSeq, snap.seq);
+  Object.entries(snap.lru || {}).forEach(([id, seq]) => {
+    if (!Number.isFinite(seq)) return;
+    selectionState.set(id, Math.max(selectionState.get(id) || 0, seq));
+  });
+  const mergeInto = (map, obj) => {
+    Object.entries(obj || {}).forEach(([id, v]) => {
+      const cur = ensureHealth(map, id);
+      cur.cooldownUntil = Math.max(cur.cooldownUntil || 0, (v && v.cooldownUntil) || 0);
+      cur.invalid = !!cur.invalid || !!(v && v.invalid);
+      cur.failures = Math.max(cur.failures || 0, (v && v.failures) || 0);
+    });
+  };
+  mergeInto(keyHealth, snap.key);
+  mergeInto(modelHealth, snap.model);
+  mergeInto(targetHealth, snap.target);
+}
+
+rotationStore.register({ getSnapshot: exportSnapshot, applySnapshot });
+// Vấn đề #4 (vòng 3): chia sẻ luôn dữ liệu hiệu chỉnh token qua CÙNG snapshot — không phát sinh thêm
+// lượt gọi mạng nào, và instance mới không phải học lại từ đầu sau mỗi cold start.
+const tokenCounterForStore = require('./tokenCounter');
+rotationStore.registerExtra({
+  name: 'tokenCalib',
+  getSnapshot: () => tokenCounterForStore.snapshot(),
+  applySnapshot: (snap) => tokenCounterForStore.applySnapshot(snap)
+});
+
 function getEligibleTargets(targets, requirements = {}) {
   return targets.filter((t) => {
     if (requirements.requireWebSearch && !t.supportsWebSearch) return false;
@@ -116,6 +186,20 @@ function getEligibleTargets(targets, requirements = {}) {
  */
 function orderByRotation(eligibleTargets) {
   if (!eligibleTargets || eligibleTargets.length <= 1) return eligibleTargets || [];
+
+  // ---------- Đường TOÀN CỤC (fairness tuyệt đối) ----------
+  // Danh sách eligible được sắp theo ID để MỌI instance nhìn thấy CÙNG một thứ tự cơ sở — nếu sắp
+  // theo thứ tự tự nhiên của mảng đầu vào, hai instance có cấu hình khác nhau sẽ map cùng 1 slot vào
+  // 2 target khác nhau và fairness lại vỡ.
+  if (currentGlobalSlot != null) {
+    const stable = [...eligibleTargets].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const start = ((currentGlobalSlot % stable.length) + stable.length) % stable.length;
+    const ordered = [...stable.slice(start), ...stable.slice(0, start)];
+    noteSelection(ordered[0]);
+    return ordered;
+  }
+
+  // ---------- Đường LOCAL (LRU in-memory) — khi không có store dùng chung ----------
   // Sắp theo mốc chọn gần nhất TĂNG DẦN (chưa từng chọn = -1 -> đi đầu). Tie-break bằng vị trí gốc
   // trong danh sách để thứ tự luôn TIỀN ĐỊNH (deterministic) khi nhiều target cùng mốc — nhờ vậy với
   // 4 target mới toanh, lượt đầu tiên ra đúng [T1,T2,T3,T4] chứ không phụ thuộc thứ tự Map.
@@ -203,6 +287,7 @@ function markFailure(target, err) {
     t.failures += 1;
     t.cooldownUntil = now + result.cooldownMs;
   }
+  rotationStore.scheduleWrite(); // lan cooldown sang các instance khác (Vấn đề #3)
   // scope === 'invalid_request': không cooldown gì — lỗi do request, xoay target khác không ích gì
   // nhưng cũng không nên chặn target đó cho các request khác (request khác có thể hợp lệ).
 
@@ -232,5 +317,6 @@ function getHealthSnapshot(targets) {
 
 module.exports = {
   getEligibleTargets, orderByRotation, shuffle, markSuccess, markFailure, getHealthSnapshot, isTargetSlow,
-  noteSelection, getRotationPositions, _resetRotationStateForTest
+  noteSelection, getRotationPositions, _resetRotationStateForTest,
+  exportSnapshot, applySnapshot, setGlobalRotationSlot, getGlobalRotationSlot
 };

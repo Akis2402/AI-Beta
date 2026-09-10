@@ -148,7 +148,11 @@ async function callClaude({ system, messages, maxTokens = 1000, tools, temperatu
   // `meta` — không đổi kiểu trả về (vẫn Promise<string>) để không phá bất kỳ nơi gọi cũ nào đang
   // destructure kết quả như 1 chuỗi. aiProviders.js là nơi DUY NHẤT truyền `meta` và đọc lại sau khi
   // await xong (xem callWithFailover/streamWithFailover).
-  if (meta) meta.finishReason = normalizeFinishReason(data.stop_reason);
+  if (meta) {
+    meta.finishReason = normalizeFinishReason(data.stop_reason);
+    // Vấn đề #4: số token THẬT do provider báo — dùng để hiệu chỉnh tokenCounter (xem tokenCounter.js).
+    if (data.usage) meta.usage = { inputTokens: data.usage.input_tokens, outputTokens: data.usage.output_tokens };
+  }
 
   return text;
 }
@@ -246,6 +250,7 @@ async function callClaudeStream({ system, messages, maxTokens = 1000, tools, tem
       // max_tokens), forward ra ngoài qua `meta` giống hệt bản không-streaming ở trên.
       if (evt.type === 'message_delta' && evt.delta && evt.delta.stop_reason && meta) {
         meta.finishReason = normalizeFinishReason(evt.delta.stop_reason);
+        if (evt.usage) meta.usage = { ...(meta.usage || {}), outputTokens: evt.usage.output_tokens };
       }
     }
   } finally {

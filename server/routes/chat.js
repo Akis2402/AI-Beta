@@ -29,6 +29,8 @@ const contextCompressor = require('../utils/contextCompressor');
 // PHẦN J: throughput đo thật theo provider/model, thay hằng số 60 tok/s.
 const throughputStats = require('../utils/throughputStats');
 const { validateAllDrawingBlocks, checkCanonicalDrawingConsistency } = require('../utils/drawingValidator');
+// Vấn đề #1: citeNo ỔN ĐỊNH -> mới bật được dedupe context an toàn (xem citationIndex.js).
+const { buildCitationIndex } = require('../utils/citationIndex');
 const { createRequestDeadline } = require('../utils/requestDeadline');
 const { STATES, isFinalSuccess, assertFinalResponseComplete, classifyFinalOutcome } = require('../utils/runtimeState');
 const { analyzeSourceCoverage } = require('../utils/sourceCoverage');
@@ -125,7 +127,8 @@ async function ensureCompleteNonStream(callOnce, initialResult, ctx) {
   const coverageList = extractCoverageList(ctx.problemText);
   const evaluate = (text, sig) => checkCompletenessWithDrawings(text, {
     stage: ctx.stage, coverageList, approachText: ctx.approachText, contexts: ctx.contexts,
-    finishReason: sig.finishReason, interrupted: sig.interrupted
+    finishReason: sig.finishReason, interrupted: sig.interrupted,
+    validCiteNos: ctx.validCiteNos, aliasOf: ctx.aliasOf
   });
 
   const run = await runResumableNonStream({
@@ -350,7 +353,30 @@ router.post('/', async (req, res, next) => {
     // cảnh đã nặng (nhiều context/approachText dài), thay vì bị validators cắt cứng theo ký tự.
     // `currentProblemText` (mục 8): cho phép compressHistoryForBudget ưu tiên giữ lượt LIÊN QUAN tới
     // câu hỏi hiện tại thay vì chỉ cắt mù theo tuổi, và tự loại các lượt trùng lặp trước tiên.
-    const contextsText = input.contexts.map((c) => c.text).join('\n');
+    // ---------- Vấn đề #1: BẬT context dedupe (trước đây tePlan.dedupedContexts là dead code) ----------
+    // Gán citeNo ổn định MỘT LẦN cho cả request rồi gộp đoạn trùng/gần trùng. Từ đây trở xuống, MỌI
+    // nơi (prompt, completeness/citation validation, sourceCoverage, cache key, payload trả client)
+    // đều dùng `effectiveContexts` — KHÔNG dùng `input.contexts` thô nữa, để 3 nơi sinh số citation
+    // không thể lệch nhau được nữa.
+    const citationIndex = buildCitationIndex(input.contexts);
+    // ---------- Vấn đề #2: nén NỘI DUNG đoạn trích (header/footer trang lặp lại giữa các đoạn) ----------
+    // Chạy SAU buildCitationIndex để citeNo đã cố định (nén nội dung không bao giờ đổi số trích dẫn),
+    // và KHÔNG BAO GIỜ loại bỏ 1 đoạn nào — việc gộp đoạn trùng là của citationIndex.js.
+    const excerptPack = contextCompressor.compressSourceExcerpts(citationIndex.effectiveContexts);
+    const effectiveContexts = excerptPack.contexts;
+    input.contexts = effectiveContexts;
+    if (citationIndex.duplicatesMerged) {
+      reqLogger.log({
+        stage: 'context_dedupe',
+        excerptBoilerplateLinesDropped: excerptPack.droppedBoilerplateLines,
+        excerptRolledBack: excerptPack.rolledBack,
+        merged: citationIndex.duplicatesMerged,
+        before: citationIndex.citationMap.reduce((n, m) => n + m.originalIndexes.length, 0),
+        after: effectiveContexts.length
+      });
+    }
+
+    const contextsText = effectiveContexts.map((c) => c.text).join('\n');
     // ---------- mục 1: deep thinking capability routing (KHÔNG hard-code fast:true nữa) ----------
     // deepThinking=false -> fast model (như cũ). deepThinking=true -> KHÔNG BAO GIỜ ép fast model;
     // client tự quyết cơ chế reasoning NATIVE hay prompt-based dựa theo capability của provider được
@@ -371,15 +397,24 @@ router.post('/', async (req, res, next) => {
     //
     // Quyết định CÓ NÉN hay không dựa trên TỔNG tải input của request (system prompt + nguồn + đề
     // bài + history), không dựa riêng phần history — request nhẹ thì KHÔNG nén (PHẦN D.2).
+    // System prompt CHỨA LUÔN khối đoạn trích, nên muốn có 1 con số "before" TRUNG THỰC ta phải dựng
+    // 2 bản: bản RAW (đoạn trích chưa nén) và bản đã nén. Trước đó tôi cộng riêng excerptPack.rawTokens
+    // vào tổng input — sai, vì như vậy đoạn trích bị ĐẾM 2 LẦN (một lần trong system prompt, một lần
+    // riêng), làm tỷ lệ nén báo cáo THẤP hơn thực tế.
+    const rawSystemPrompt = buildChatSystemPrompt({
+      ...input, problemText, contexts: citationIndex.effectiveContexts
+    });
     const preSystemPrompt = buildChatSystemPrompt({ ...input, problemText });
     const systemPack = contextCompressor.compressSystemPrompt(preSystemPrompt);
     const historyItems = contextCompressor.assignTiers(compressedHistory);
+
+    const rawHistoryTokens = historyItems.reduce((acc, it) => acc + Math.ceil(String(it.text).length / 3.2), 0);
     const estimatedRawInput =
-      systemPack.rawTokens
-      + Math.ceil(contextsText.length / 3.2)
+      Math.ceil(rawSystemPrompt.length / 3.2)
       + Math.ceil(problemText.length / 3.2)
       + Math.ceil(input.approachText.length / 3.2)
-      + historyItems.reduce((acc, it) => acc + Math.ceil(String(it.text).length / 3.2), 0);
+      + rawHistoryTokens;
+
     const compressedResult = contextCompressor.semanticCompressContext({
       items: historyItems,
       problemText,
@@ -391,17 +426,25 @@ router.post('/', async (req, res, next) => {
     // PHẦN E: compression CHỈ tối ưu phía INPUT. Các con số dưới đây đi vào TELEMETRY và KHÔNG BAO
     // GIỜ được dùng để suy ra maxTokens/output budget — budget output vẫn tính hoàn toàn theo độ
     // phức tạp bài + deadline (budgetOf/calculateAdaptiveBudget), xem PHẦN E trong báo cáo.
-    const systemPromptSaving = systemPack.rawTokens - systemPack.compressedTokens;
+    const estimatedCompressedInput =
+      systemPack.compressedTokens
+      + Math.ceil(problemText.length / 3.2)
+      + Math.ceil(input.approachText.length / 3.2)
+      + compressedResult.stats.compressedTokens;
+
     const compressionTelemetry = {
       rawInputTokens: estimatedRawInput,
-      compressedInputTokens: Math.max(1, estimatedRawInput - compressedResult.stats.achievedSavingTokens - systemPromptSaving),
+      compressedInputTokens: Math.max(1, estimatedCompressedInput),
       compressionRatio: estimatedRawInput > 0
-        ? Number((((compressedResult.stats.achievedSavingTokens + systemPromptSaving) / estimatedRawInput)).toFixed(4))
+        ? Number(((estimatedRawInput - estimatedCompressedInput) / estimatedRawInput).toFixed(4))
         : 0,
       compressionTargetRatio: compressedResult.stats.targetRatio,
       compressionRollbacks: compressedResult.stats.rolledBack.length,
       compressionDroppedItems: compressedResult.stats.droppedItems,
-      systemPromptSaving
+      systemPromptSaving: systemPack.rawTokens - systemPack.compressedTokens,
+      excerptSaving: Math.max(0, excerptPack.rawTokens - excerptPack.compressedTokens),
+      excerptBoilerplateLinesDropped: excerptPack.droppedBoilerplateLines,
+      contextsMerged: citationIndex.duplicatesMerged
     };
     reqLogger.log({ stage: 'context_compression', ...compressionTelemetry });
 
@@ -443,7 +486,7 @@ router.post('/', async (req, res, next) => {
     // có thể trả NHẦM kết quả đã cache của nhau). Ảnh: bypass hẳn L1 (xem tokenEconomy.js).
     const requirementsList = extractCoverageList(problemText);
     const teTelemetry = new tokenEconomy.TelemetryRecorder();
-    const sourceIdsFp = input.contexts.map((c) => `${c.doc}#${c.id}`).sort().join(',');
+    const sourceIdsFp = effectiveContexts.map((c) => `${c.doc}#${c.id}#${c.citeNo}`).sort().join(',');
     const tePlan = tokenEconomy.runTokenEconomyPipeline({
       problemText, historyText, contextsText, approachText: input.approachText,
       contexts: input.contexts, history: compressedHistory, stage: input.stage,
@@ -597,7 +640,8 @@ router.post('/', async (req, res, next) => {
             onStatus: (st) => sseWrite(res, 'status', { state: STATES.RECOVERING, message: st.message }),
             evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
               stage: 'detail', coverageList, approachText: input.approachText,
-              contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted
+              contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted,
+              validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf
             }),
             resolveRecovery: makeRecoveryResolver({
               reserveState: reconcileReserveState, deadline: globalDeadline,
@@ -646,7 +690,8 @@ router.post('/', async (req, res, next) => {
             incompleteReasons: outcome.partial ? (completeness.hardReasons || []) : [],
             citationValidation: completeness.citationValidation || null,
             continuations,
-            resumes: reconcileRun.resumes
+            resumes: reconcileRun.resumes,
+            citationMap: citationIndex.citationMap
           };
           // PHẦN P: KHÔNG BAO GIỜ cache response PARTIAL/interrupted/chưa validate — chỉ cache khi
           // thực sự COMPLETED (partial=false), nếu không lần sau sẽ trả lại đúng câu trả lời bị cắt.
@@ -697,7 +742,8 @@ router.post('/', async (req, res, next) => {
           onStatus: (st) => sseWrite(res, 'status', { state: STATES.RECOVERING, message: st.message }),
           evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
             stage: input.stage, coverageList, approachText: input.approachText,
-            contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted
+            contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted,
+            validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf
           }),
           resolveRecovery: makeRecoveryResolver({
             reserveState: directReserveState, deadline: globalDeadline,
@@ -740,7 +786,8 @@ router.post('/', async (req, res, next) => {
           incompleteReasons: directOutcome.partial ? (completeness.hardReasons || []) : [],
           citationValidation: completeness.citationValidation || null,
           continuations,
-          resumes: directRun.resumes
+          resumes: directRun.resumes,
+          citationMap: citationIndex.citationMap
         };
         // PHẦN P: chỉ cache khi COMPLETED thật (không cache partial/interrupted).
         if (!tePlan.cacheBypassed && !directOutcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, directDonePayload);
@@ -851,6 +898,7 @@ router.post('/', async (req, res, next) => {
           messages, problemText, stage: 'detail', deadline: globalDeadline,
           approachText: input.approachText, contexts: input.contexts, signal,
           requestId: reqLogger.requestId,
+          validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf,
           resolveRecovery: jsonReconcileRecovery,
           isDisconnected: () => disconnected
         }
@@ -872,7 +920,8 @@ router.post('/', async (req, res, next) => {
         reconciledBy: reconciler.label,
         completeness: completeness.status,
             citationValidation: completeness.citationValidation || null,
-        continuations
+        continuations,
+        citationMap: citationIndex.citationMap
       };
       if (!tePlan.cacheBypassed && !reconcilePartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
       if (!reconcilePartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, finalText.length / 3.2);
@@ -920,6 +969,7 @@ router.post('/', async (req, res, next) => {
         messages, problemText, stage: input.stage, deadline: globalDeadline,
         approachText: input.approachText, contexts: input.contexts, signal,
         requestId: reqLogger.requestId,
+        validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf,
         resolveRecovery: jsonDirectRecovery,
         isDisconnected: () => disconnected
       }
@@ -929,7 +979,7 @@ router.post('/', async (req, res, next) => {
     if (disconnected) return;
 
     // ensureCompleteNonStream() đã assertFinalResponseComplete() — chắc chắn COMPLETE tới đây.
-    const finalJsonPayload = { ...subjectPayload, state: directJsonPartial ? STATES.PARTIAL : STATES.COMPLETED, partial: !!directJsonPartial, text, crossChecked: false, provider: provider.label, completeness: completeness.status, incompleteReasons: directJsonPartial ? (completeness.hardReasons || []) : [], citationValidation: completeness.citationValidation || null, continuations };
+    const finalJsonPayload = { ...subjectPayload, state: directJsonPartial ? STATES.PARTIAL : STATES.COMPLETED, partial: !!directJsonPartial, text, crossChecked: false, provider: provider.label, completeness: completeness.status, incompleteReasons: directJsonPartial ? (completeness.hardReasons || []) : [], citationValidation: completeness.citationValidation || null, continuations, citationMap: citationIndex.citationMap };
     if (!tePlan.cacheBypassed && !directJsonPartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
     if (!directJsonPartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', text.length / 3.2);
     teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);

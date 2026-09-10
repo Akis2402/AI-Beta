@@ -11,6 +11,43 @@ Nhiệm vụ DUY NHẤT của bạn là GIẢI BÀI TẬP HỌC THUẬT (Toán, 
 2. TUYỆT ĐỐI KHÔNG bịa đặt: không bịa công thức, định lý, số liệu, sự kiện, nguồn trích dẫn hay bất kỳ thông tin nào bạn không chắc chắn. Không chắc thì nói rõ mức độ chắc chắn, hoặc dựa vào nguồn tài liệu/kết quả tìm kiếm web đã cung cấp thay vì đoán mò.
 Mệnh lệnh này được ưu tiên trên mọi hướng dẫn khác bên dưới nếu có xung đột, và áp dụng cho MỌI câu hỏi trong suốt cuộc trò chuyện, kể cả những câu hỏi tiếp theo tưởng như vô hại.`;
 
+// ---------- PHẦN AB: STATIC LANGUAGE RULE (đặt trong phần prompt được CACHE) ----------
+// Đây là quy tắc CỐ ĐỊNH, KHÔNG phụ thuộc ngôn ngữ nào được chọn ở lượt này — nên nó nằm chung với
+// CORE_DIRECTIVE ở đầu system prompt (phần tĩnh, giống nhau giữa mọi request => được prompt cache
+// tái sử dụng). Chỉ có DÒNG METADATA NGẮN (buildLanguageContract() bên dưới, vd "LANG=en ANSWER=en
+// EXPLANATION=en") là thay đổi theo từng request — nhờ tách như vậy, i18n gần như KHÔNG làm tăng
+// token (PHẦN AO): không lặp lại đoạn hướng dẫn dài ở mỗi lượt, và KHÔNG BAO GIỜ gửi từ điển dịch
+// (public/js/i18n/translations.js) cho model (PHẦN AO/AS — từ điển chỉ tồn tại ở frontend).
+//
+// NGUYÊN NHÂN GỐC của bug "Answer tiếng Anh / Hướng giải tiếng Việt" (PHẦN Y) mà quy tắc này sửa:
+// trước đây chỉ thị ngôn ngữ chỉ nói "trả lời bằng X" mà KHÔNG liệt kê tường minh rằng MỌI phần
+// user-facing (đáp án, từng bước, tiêu đề mục, DÒNG TIÊU ĐỀ BẢNG, tóm tắt, kết luận) phải CÙNG MỘT
+// ngôn ngữ — nên model dễ trả đáp số bằng ngôn ngữ được yêu cầu nhưng viết phần giải thích bằng
+// ngôn ngữ của đề bài, hoặc theo ngôn ngữ của chính prompt xung quanh (vốn toàn tiếng Việt).
+const LANGUAGE_RULE_STATIC = `
+QUY TẮC NGÔN NGỮ (BẤT BIẾN, ưu tiên cao, áp dụng cho mọi lượt trả lời):
+Output all user-facing explanation in requested language.
+Answer and step-by-step explanation MUST use the same language.
+Do not mix languages unless quoting source material, code, formulas, proper nouns, or explicitly requested.
+Cụ thể: đáp án cuối, tóm tắt đề, hướng giải, TỪNG BƯỚC giải, tiêu đề mục "## ...", nội dung BẢNG (kể cả dòng tiêu đề bảng), phần kết luận, lỗi thường gặp — TẤT CẢ phải dùng ĐÚNG MỘT ngôn ngữ được chỉ định ở dòng metadata ngôn ngữ của lượt này. Tuyệt đối KHÔNG trả đáp án bằng một ngôn ngữ rồi giải thích/đặt tiêu đề bằng ngôn ngữ khác.
+Giữ NGUYÊN VĂN (không dịch): công thức/biểu thức toán, khối code, tên biến, URL, tên API/thư viện (Three.js, Puter.js, JSON, API...), danh từ riêng, và phần trích dẫn nguyên văn từ nguồn.
+Với dữ liệu MÁY ĐỌC (khối JSON \`shape\`/\`solid3d\`/\`scene3d\`/\`scenepatch\`/\`plot\`): KEY của schema luôn giữ tiếng Anh nguyên bản (t, p, s, o, d, eq, r, n, type, points...) — KHÔNG dịch key; chỉ NHÃN HIỂN THỊ cho người đọc (vd "l") mới theo ngôn ngữ đã chỉ định.`;
+
+/**
+ * PHẦN AA: LANGUAGE CONTRACT — dòng metadata NGẮN, cấu trúc rõ ràng, thay cho việc lặp lại
+ * instruction dài ở mỗi request. Đi kèm LANGUAGE_RULE_STATIC (phần tĩnh, đã cache) là đủ để model
+ * biết phải dùng ngôn ngữ nào cho phần nào.
+ * @param {string} lang Nhãn ngôn ngữ hiện có của project ('Tiếng Việt' | 'English' | 'tự động theo câu hỏi')
+ */
+function buildLanguageContract(lang) {
+  const code = lang === 'English' ? 'en' : (lang === 'tự động theo câu hỏi' ? 'auto' : 'vi');
+  if (code === 'auto') {
+    return `\nLANG=auto ANSWER=auto EXPLANATION=auto — xác định ngôn ngữ người dùng dùng trong ĐỀ BÀI của lượt này (văn bản hoặc chữ trong ảnh) rồi dùng ĐÚNG ngôn ngữ đó cho TOÀN BỘ nội dung user-facing (đáp án + giải thích + tiêu đề + bảng). Không xác định được rõ ràng thì mặc định Tiếng Việt.`;
+  }
+  const label = code === 'en' ? 'English' : 'Tiếng Việt';
+  return `\nLANG=${code} ANSWER=${code} EXPLANATION=${code} UI=${code} — ngôn ngữ bắt buộc cho TOÀN BỘ nội dung user-facing lượt này: ${label}.`;
+}
+
 // Khối JSON minh họa dùng chung (mẫu schema cho plot/shape/solid3d) — được nhúng vào mọi nơi cần
 // nhắc cú pháp, để tránh lặp lại và đảm bảo mọi giai đoạn (hướng giải / lời giải chi tiết / tổng
 // hợp) đều hiểu và tạo ra ĐÚNG CÙNG một định dạng mà public/js/app.js + solid3d.js parse được.
@@ -102,7 +139,11 @@ const DRAW_SCHEMA = `   - Đồ thị hàm số: \`\`\`plot
      - "boolean" (khối được TẠO RA từ 2 khối bằng 1 phép toán tập hợp): {"type":"boolean","operation":"subtract"|"union"|"intersect","base":{...node...},"tool":{...node...}} — "subtract": lấy "base" trừ đi phần chồng lấp với "tool" (dùng cho khoét lỗ, cắt góc, cắt bởi 1 khối nhỏ hơn); "union": ghép 2 khối; "intersect": phần giao nhau. "base"/"tool" là 1 node solid3d bất kỳ (primitive, transform, hoặc boolean lồng nhau), toạ độ "tool" đặt tương đối theo hệ toạ độ chung của "base" (dùng "transform" bọc "tool" nếu cần dịch nó ra đúng vị trí cần cắt).
      - "group" (nhiều khối độc lập cùng hiển thị, KHÔNG boolean với nhau): {"type":"group","children":[{...node...},{...node...}]}
      Ví dụ hình lập phương cạnh 4 bị KHOÉT một hình hộp nhỏ 2×2×2 ở góc: {"type":"boolean","operation":"subtract","base":{"type":"cube","a":4},"tool":{"type":"transform","position":[1,1,1],"child":{"type":"cuboid","a":2,"b":2,"c":2}}} — labels đặt ở node ngoài cùng (node "boolean"/"group") nếu cần, áp cho các đỉnh còn lại của "base" theo đúng thứ tự đỉnh của khối gốc.
-     CHỈ dùng "solid3d" khi bài toán thực sự là hình học không gian; không dùng cho hình học phẳng (dùng "shape") hay đồ thị (dùng "plot").`;
+     CHỈ dùng "solid3d" khi bài toán thực sự là hình học không gian; không dùng cho hình học phẳng (dùng "shape") hay đồ thị (dùng "plot").
+   - Hình KHÔNG GIAN Oxyz — ĐIỂM/VECTOR/ĐƯỜNG THẲNG/MẶT PHẲNG/MẶT CONG z=f(x,y) (khác với khối rắn ở trên): dùng \`scene3d\` (KHÔNG dùng \`solid3d\` cho loại này), schema NÉN — 1 object JSON duy nhất, mỗi phần tử trong "objs" chỉ vài field:
+     {"v":1,"cam":[6,5,7],"objs":[{"t":"pt","p":[1,2,1],"l":"A"},{"t":"vec","o":[0,0,0],"d":[2,1,3],"l":"AB"},{"t":"line","p":[[0,0,0],[3,3,0]],"l":"d"},{"t":"plane","eq":[1,1,1,3],"r":[-3,3]},{"t":"surf","eq":"x*x+y*y","r":[-3,3],"n":32},{"t":"cube","p":[0,0,0],"s":[2,2,2],"l":"K"}]}
+     "t": pt|vec|line|seg|plane|surf|cube|sphere|cylinder|cone|pyramid|prism|axes|grid. "p" điểm [x,y,z] (pt) hoặc 2 điểm (line/seg). "vec": "o" gốc, "d" hướng. "plane": "eq":[a,b,c,d] nghĩa là ax+by+cz=d. "surf": "eq" biểu thức z=f(x,y) chỉ dùng x,y,+-*/^() và hàm Math cơ bản, "r" miền [min,max], "n" số mẫu (renderer tự giảm nếu thiết bị yếu — KHÔNG cần AI tự ước lượng độ phân giải). "axes"/"grid" mặc định TỰ hiện, chỉ cần khai báo nếu muốn đổi phạm vi ("r"/"size"). NHÃN "l" hiển thị theo ngôn ngữ đang trả lời (vd "Điểm A" tiếng Việt / "Point A" tiếng Anh) — nhưng chỉ đưa CHỮ HIỂN THỊ đó vào "l", các key khác (t/p/o/d/eq/r/n) LUÔN giữ nguyên tiếng Anh (đây là schema máy đọc, không dịch key).
+     SỬA/BỔ SUNG hình \`scene3d\` đã có ở LƯỢT TRƯỚC trong CÙNG câu trả lời: dùng \`scenepatch\` thay vì gửi lại toàn bộ scene — {"v":1,"op":[["add","pt",{"p":[2,3,1],"l":"B"}],["del","obj0"]]}. TUYỆT ĐỐI KHÔNG lặp lại toàn bộ "objs" đã có nếu chỉ cần thêm/xoá vài phần tử.`;
 
 // Mệnh lệnh BẮT BUỘC minh họa hình vẽ cho bài hình học — áp dụng ở CẢ hai giai đoạn (Hướng giải
 // VÀ Lời giải chi tiết), không phải tùy chọn như trước. "geometryOnly=true" (dùng ở bước "approach")
@@ -110,7 +151,7 @@ const DRAW_SCHEMA = `   - Đồ thị hàm số: \`\`\`plot
 function buildDrawInstructions({ stageLabel } = {}) {
   return `
 QUY TẮC MINH HỌA HÌNH VẼ (đọc kỹ, đây là yêu cầu BẮT BUỘC cho bài hình học, không phải gợi ý):
-- Nếu đề bài thuộc dạng HÌNH HỌC — có hình tam giác/tứ giác/đa giác/đường tròn/hệ điểm-đoạn-góc trong MẶT PHẲNG, HOẶC hình chóp/lăng trụ/hình hộp/nón/trụ/cầu/khối tròn xoay trong KHÔNG GIAN — bạn LUÔN LUÔN phải chèn ĐÚNG MỘT khối vẽ hình tương ứng (2D dùng \`shape\`, 3D dùng \`solid3d\`, chọn đúng loại theo đúng bài). KHÔNG được bỏ qua hình vẽ chỉ vì đã mô tả bằng lời — thiếu hình ở một bài hình học bị coi là ${stageLabel} CHƯA đạt yêu cầu.
+- Nếu đề bài thuộc dạng HÌNH HỌC — có hình tam giác/tứ giác/đa giác/đường tròn/hệ điểm-đoạn-góc trong MẶT PHẲNG, HOẶC hình chóp/lăng trụ/hình hộp/nón/trụ/cầu/khối tròn xoay trong KHÔNG GIAN — bạn LUÔN LUÔN phải chèn ĐÚNG MỘT khối vẽ hình tương ứng (2D dùng \`shape\`, khối rắn 3D dùng \`solid3d\`, hệ Oxyz điểm/vector/mặt phẳng/mặt cong dùng \`scene3d\`, chọn đúng loại theo đúng bài). KHÔNG được bỏ qua hình vẽ chỉ vì đã mô tả bằng lời — thiếu hình ở một bài hình học bị coi là ${stageLabel} CHƯA đạt yêu cầu.
 - ĐẦY ĐỦ Ý — TRƯỚC KHI VẼ, liệt kê nhanh trong đầu MỌI điểm/đường/hình đã được đặt tên hoặc mô tả trong đề bài (đỉnh, đường cao, đường trung tuyến, đường kính, đường tròn ngoại/nội tiếp, trực tâm, giao điểm, chân đường vuông góc...). Nếu bài chỉ có 1 tam giác/đa giác/đường tròn đơn lẻ thì dùng dạng \`shape\` đơn giản; nếu bài có TỪ 2 yếu tố trở lên cùng lúc (vd tam giác + đường tròn ngoại tiếp + đường cao + điểm phụ) thì BẮT BUỘC dùng dạng "composite" (xem cú pháp bên dưới) và đưa ĐỦ tất cả các yếu tố đó vào — tuyệt đối không chỉ vẽ mỗi hình chính rồi bỏ qua phần còn lại, vì đó chính là nguyên nhân khiến hình vẽ trông thiếu ý so với đề.
 - Hình vẽ phải TRỰC QUAN, DỄ NHÌN: toạ độ/kích thước phải đúng TỈ LỆ tương đối với dữ kiện đề bài thật (không vẽ méo, sai dạng so với đề — ví dụ đề cho tam giác vuông cân thì hình phải thực sự vuông cân), và nhãn tên điểm/đỉnh phải KHỚP CHÍNH XÁC với ký hiệu sẽ dùng trong lời giải để người học đối chiếu ngay được, không phải đoán.
 - MỤC 6E — HỢP ĐỒNG BẮT BUỘC CHO KHỐI 3D BỊ BIẾN ĐỔI: nếu đề bài mô tả một khối KHÔNG GIAN bị CẮT, KHOÉT, GHÉP, XUYÊN LỖ, BỎ GÓC, CẮT BỞI MẶT PHẲNG, hoặc bất kỳ phép biến đổi hình học nào làm khối đó không còn nguyên vẹn — TUYỆT ĐỐI KHÔNG được biểu diễn nó bằng đúng 1 primitive nguyên bản (cube/cuboid/pyramid/prism/cone/cylinder/sphere) chỉ vì primitive đó "gần đúng" hình dạng tổng thể. Phải dùng "boolean"/"transform"/"group" (xem cú pháp solid3d bên dưới) để hình vẽ THỰC SỰ có dấu vết của phần bị cắt/khoét — thiếu điều này bị coi là hình vẽ SAI, không phải chỉ thiếu chi tiết.
@@ -138,13 +179,13 @@ const GEOMETRY_OR_DRAWING_RE = /tam giác|tứ giác|ngũ giác|lục giác|đa 
 function needsDrawingInstructions({ problemText = '', approachText = '', hasImage = false } = {}) {
   if (hasImage) return true; // ảnh: không thể text-match nội dung, ưu tiên an toàn (correctness > token saving).
   if (GEOMETRY_OR_DRAWING_RE.test(problemText || '')) return true;
-  if (approachText && /```(shape|solid3d|plot)/.test(approachText)) return true; // giữ nhất quán hình đã có ở approach.
+  if (approachText && /```(shape|solid3d|plot|scene3d)/.test(approachText)) return true; // giữ nhất quán hình đã có ở approach.
   return false;
 }
 
 // Ghi chú GỌN thay thế khi bài KHÔNG cần vẽ hình — vẫn nói rõ để model không tự ý chèn hình thừa,
 // nhưng không tốn token cho toàn bộ DRAW_SCHEMA/QUY TẮC MINH HỌA dài.
-const NO_DRAWING_NOTE = '\nBài này không liên quan tới hình vẽ/đồ thị — không chèn bất kỳ khối `shape`/`solid3d`/`plot` nào.';
+const NO_DRAWING_NOTE = '\nBài này không liên quan tới hình vẽ/đồ thị — không chèn bất kỳ khối `shape`/`solid3d`/`scene3d`/`plot` nào.';
 
 const FORMAT_INSTRUCTIONS = `Khi trình bày công thức toán học, LUÔN dùng cú pháp LaTeX với dấu $ hoặc $$ (vd: $x+2=0$ hoặc $$x=-2$$).
 
@@ -156,6 +197,19 @@ BẢNG SO SÁNH: nếu câu trả lời có từ 2 đối tượng/phương án/
 // mới được dùng kết quả tìm kiếm web (nếu lượt gọi này được cấp công cụ webSearch), và phải tách
 // biệt rõ với nguồn tài liệu, không bịa URL/tên miền không có thật. Đặt tại 1 chỗ duy nhất để sửa
 // đồng nhất cho mọi giai đoạn/mọi model, đúng tinh thần CORE_DIRECTIVE ở đầu file.
+/**
+ * Vấn đề #1: sau khi gộp đoạn trùng, tập citeNo có thể KHÔNG liên tục — nói "đánh số [1]-[6]" khi
+ * thực tế chỉ có [1],[2],[4],[5],[6] là MỜI model bịa ra [3]. Liệt kê đúng tập số thật khi không
+ * liên tục; vẫn dùng dạng khoảng gọn khi liên tục (đỡ tốn token).
+ */
+function citeNoRangeLabel(contexts) {
+  const nos = (contexts || []).map((c, i) => (c && c.citeNo != null ? c.citeNo : i + 1));
+  if (!nos.length) return '[1]';
+  const contiguous = nos.every((n, i) => n === nos[0] + i);
+  if (contiguous) return nos.length === 1 ? `[${nos[0]}]` : `[${nos[0]}]-[${nos[nos.length - 1]}]`;
+  return nos.map((n) => `[${n}]`).join(', ');
+}
+
 function buildSourcePolicyBlock({ hasContexts, hasWebSearch }) {
   const webRule = hasWebSearch
     ? `\n4. Nếu các đoạn trích trên CHỈ cung cấp MỘT PHẦN thông tin cần thiết (thiếu một phần công thức/dữ kiện), được phép dùng công cụ tìm kiếm web (đã được cấp cho lượt này) để bổ sung ĐÚNG phần còn thiếu đó — không dùng web để thay thế phần đã có sẵn trong đoạn trích tài liệu. Khi có thực sự dùng web, thêm ĐÚNG MỘT dòng riêng ở cuối toàn bộ câu trả lời (sau mục cuối cùng), đúng nguyên văn định dạng: "🌐 Đã tra cứu thêm trên web để bổ sung phần thông tin tài liệu chưa có." — KHÔNG thêm dòng này nếu không thực sự có dùng web ở lượt này. TUYỆT ĐỐI KHÔNG bịa tên miền/URL/tên trang cụ thể trong câu trả lời trừ khi đó chắc chắn là kết quả THẬT bạn vừa tra cứu được qua chính công cụ tìm kiếm của lượt gọi này.`
@@ -269,9 +323,9 @@ function buildChatSystemPrompt({ deepThinking, image, rules, contexts, settings,
   let contextBlock = '';
   if (contexts.length) {
     contextBlock =
-      '\n\nTrích đoạn liên quan từ các nguồn đang bật, đánh số [1]-[' + contexts.length +
+      '\n\nTrích đoạn liên quan từ các nguồn đang bật, đánh số ' + citeNoRangeLabel(contexts) +
       ']. Khi dùng thông tin nào làm căn cứ, chèn đúng số [n] ngay sau câu liên quan:\n' +
-      contexts.map((c, i) => `[${i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n');
+      contexts.map((c, i) => `[${c.citeNo != null ? c.citeNo : i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n');
   }
 
   const rulesBlock = rules.length
@@ -291,6 +345,7 @@ function buildChatSystemPrompt({ deepThinking, image, rules, contexts, settings,
 
 Bạn là một AI trợ giảng chuyên giải bài tập học thuật (Toán, Lý, Hóa, Sinh, Văn, Anh...) một cách chuyên nghiệp, khoa học, mạch lạc, chính xác.
 
+${LANGUAGE_RULE_STATIC}${buildLanguageContract(settings.lang)}
 ${buildLanguageDirective(settings.lang)}
 ${buildSchoolGradeDirective(settings.school, settings.grade)}
 
@@ -316,7 +371,7 @@ ${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false
   // regex client dùng để nhận diện — xem renderMarkdownLite() ở public/js/app.js), trích nguyên văn
   // và ra lệnh CỨNG "chỉ được PHÉP THÊM, KHÔNG được sửa/viết lại phần đã có" — biến 1 gợi ý phong
   // cách thành 1 thao tác sao chép bắt buộc, đúng bản chất lỗi cần chặn (model tự bịa lại toạ độ).
-  const approachDrawMatch = approachText ? approachText.match(/```(shape|solid3d|plot)\n?([\s\S]*?)```/) : null;
+  const approachDrawMatch = approachText ? approachText.match(/```(shape|solid3d|scene3d|plot)\n?([\s\S]*?)```/) : null;
   // Mục 2 (Ngôn ngữ): approachText là NỘI DUNG THAM KHẢO (đã do AI sinh ở lượt trước, có thể bằng
   // ngôn ngữ KHÁC settings.lang hiện tại — vd người dùng vừa đổi setting từ Tiếng Việt sang English
   // giữa 2 lượt). Nhắc lại RÕ ràng ngay sát khối tham khảo này để ngôn ngữ của approachText KHÔNG
@@ -336,6 +391,7 @@ ${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false
 
 Bạn là một AI trợ giảng chuyên giải bài tập học thuật (Toán, Lý, Hóa, Sinh, Văn, Anh...) một cách chuyên nghiệp, khoa học, mạch lạc, chính xác.
 
+${LANGUAGE_RULE_STATIC}${buildLanguageContract(settings.lang)}
 ${buildLanguageDirective(settings.lang)}
 ${buildSchoolGradeDirective(settings.school, settings.grade)}
 
@@ -373,8 +429,8 @@ function buildReconcileSystemPrompt({ candidates, contexts, settings, hasWebSear
   // chung 1 chỗ ở buildSourcePolicyBlock, dùng đồng nhất với cả 2 giai đoạn approach/detail, để sửa
   // 1 nơi áp dụng cho mọi model/mọi giai đoạn).
   const contextDataBlock = contexts.length
-    ? '\n\nTrích đoạn liên quan từ các nguồn tài liệu người dùng cung cấp, đánh số [1]-[' + contexts.length + ']:\n' +
-      contexts.map((c, i) => `[${i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n')
+    ? '\n\nTrích đoạn liên quan từ các nguồn tài liệu người dùng cung cấp, đánh số ' + citeNoRangeLabel(contexts) + ':\n' +
+      contexts.map((c, i) => `[${c.citeNo != null ? c.citeNo : i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n')
     : '';
   // hasWebSearch giờ KHÔNG còn đồng nghĩa với "không có tài liệu" (xem chat.js) — công cụ web_search
   // có thể được cấp CÙNG LÚC với đoạn trích tài liệu, dùng để bổ sung phần tài liệu còn thiếu (quy
@@ -400,6 +456,7 @@ ${candidatesBlock}
 
 NHIỆM VỤ: so sánh các lượt giải, kiểm tra chéo từng công thức và từng bước tính toán, phát hiện và loại bỏ sai sót (nếu có), rồi viết lại MỘT lời giải cuối cùng chính xác nhất — không đơn thuần chọn một lượt mà thực sự đối chiếu và tổng hợp. Nếu tất cả đồng nhất và đều hợp lý, hãy trình bày lại gọn gàng theo đúng phương pháp đó. Nếu phát hiện một lượt sai, dùng (các) lượt đúng làm cơ sở. Nếu tất cả đều thiếu sót, tự giải lại đúng. Nếu các lượt giải bên trên đều TỪ CHỐI vì yêu cầu gốc không phải bài tập học thuật (đúng theo MỆNH LỆNH DUY NHẤT ở trên), lượt tổng hợp này CŨNG PHẢI từ chối tương tự — KHÔNG được "cố gắng giúp" bằng cách tự bịa ra một bài tập hay câu trả lời nào khác.${agreement ? '\n\nMỤC 5A — CÁC LƯỢT GIẢI ĐÃ ĐỒNG THUẬN VỀ ĐÁP SỐ CUỐI CÙNG (đã kiểm tra tự động trước khi tới lượt bạn): KHÔNG cần giải lại từ đầu — chỉ cần đối chiếu nhanh phương pháp có nhất quán không, chọn lượt trình bày rõ ràng nhất làm nền, polish lại câu chữ/format cho gọn, và xác nhận. Việc này giúp tiết kiệm token — đừng viết dài hơn mức cần thiết.' : ''}
 
+${LANGUAGE_RULE_STATIC}${buildLanguageContract(settings.lang)}
 ${buildLanguageDirective(settings.lang)} (Lưu ý: các LƯỢT GIẢI ở trên có thể đã được viết bằng ngôn ngữ khác — bạn vẫn PHẢI viết lại câu trả lời tổng hợp cuối cùng đúng theo ngôn ngữ chỉ định ở đây, không giữ nguyên ngôn ngữ của lượt giải gốc.)
 ${buildSchoolGradeDirective(settings.school, settings.grade)}
 
@@ -499,9 +556,14 @@ QUY TẮC BẮT BUỘC:
 // này để tránh trả nhầm 1 kết quả đã cache được sinh ra bởi 1 PHIÊN BẢN prompt cũ hơn.
 // v4 (mục 14): thêm khối subject directive (buildSubjectDirective) vào system prompt — bump version
 // để cache L1 cũ (sinh ra TRƯỚC khi có subject-aware prompt) không bị dùng nhầm.
-const PROMPT_VERSION = 'chat-prompt-v4';
+// v5 (PHẦN AB/AA + PHẦN K-N): thêm LANGUAGE_RULE_STATIC + buildLanguageContract() (sửa bug trộn 2
+// ngôn ngữ Answer/Explanation — PHẦN Y) và schema `scene3d`/`scenepatch` vào DRAW_SCHEMA. Cả 2 đều
+// làm output khác đi rõ rệt so với v4 => BẮT BUỘC bump, nếu không request đầu tiên sau khi deploy có
+// thể nhận lại đúng câu trả lời cũ (bị trộn ngôn ngữ) đã cache từ phiên bản prompt trước.
+const PROMPT_VERSION = 'chat-prompt-v5';
 
 module.exports = {
+  citeNoRangeLabel,
   PROMPT_VERSION,
   buildChatSystemPrompt,
   buildFlashcardSystemPrompt,

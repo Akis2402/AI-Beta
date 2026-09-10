@@ -231,7 +231,12 @@ function looksTruncated(text) {
  *   finishReason:string|null}}
  */
 function validateSolutionCompleteness(text, opts = {}) {
-  const { stage = 'detail', problemText = '', coverageList, contexts, finishReason: rawFinishReason } = opts;
+  const {
+    stage = 'detail', problemText = '', coverageList, contexts, finishReason: rawFinishReason,
+    // Vấn đề #1: tập citeNo hợp lệ + alias (citationIndex.js). Không truyền -> validator tự suy ra
+    // từ `contexts` như cũ (tương thích ngược 100%).
+    validCiteNos, aliasOf
+  } = opts;
   const clean = (text || '').trim();
   const reasons = [];
   const finishReason = rawFinishReason ? normalizeFinishReason(rawFinishReason) || rawFinishReason : (rawFinishReason || null);
@@ -261,7 +266,7 @@ function validateSolutionCompleteness(text, opts = {}) {
   // mục 7/15: citation [n] phải nằm trong 1..contexts.length — KHÔNG để frontend âm thầm bỏ qua.
   let citationValidation = null;
   if (Array.isArray(contexts) && contexts.length) {
-    citationValidation = validateCitations(clean, contexts);
+    citationValidation = validateCitations(clean, contexts, { validCiteNos, aliasOf });
     if (!citationValidation.valid) reasons.push('invalid_citation');
   }
 

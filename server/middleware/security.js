@@ -58,11 +58,17 @@ const helmetConfig = helmet({
       // ty/trường học...) thay vì chỉ mở CSP cho các domain đó. scriptSrc/styleSrc/fontSrc/
       // workerSrc do đó thu hẹp lại chỉ còn 'self' (+ Google Fonts cho font chữ giao diện, không
       // phải thư viện chức năng nào phụ thuộc cứng vào nó).
-      scriptSrc: ["'self'"],
+      // PHẦN AX (Puter integration): js.puter.com host SDK Puter.js CHỈ tải khi providerRouter thực
+      // sự fallback (lazy — xem puterAdapter.js), nhưng CSP phải khai trước (không thể "mở CSP khi
+      // cần" tại runtime). api.puter.com là endpoint SDK gọi để chat/xác thực. Đây là NGOẠI LỆ DUY
+      // NHẤT với chính sách "mọi thư viện tự host cùng-origin" ở trên — chấp nhận vì Puter yêu cầu
+      // xác thực phiên người dùng (không thể tự host/proxy được) và ĐÂY LÀ FALLBACK, không phải
+      // đường chính. unsafe-inline/unsafe-eval TUYỆT ĐỐI không thêm (PHẦN AX).
+      scriptSrc: ["'self'", 'https://js.puter.com'],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com'],
       imgSrc: ["'self'", 'data:', 'blob:'],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", 'https://api.puter.com', 'https://js.puter.com'],
       // pdf.worker.min.js giờ tự host tại /vendor/pdfjs/pdf.worker.min.js (cùng-origin) — 'self' +
       // blob: (Worker tạo qua Blob URL nội bộ của pdf.js) là đủ, không cần domain CDN nào nữa.
       workerSrc: ["'self'", 'blob:'],

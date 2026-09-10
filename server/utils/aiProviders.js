@@ -20,13 +20,16 @@
 
 const { getAllExecutionTargets, listAutoDiscoveryDefs } = require('./executionTargets');
 const {
-  getEligibleTargets, orderByRotation, shuffle, markSuccess, markFailure, getHealthSnapshot, isTargetSlow
+  getEligibleTargets, orderByRotation, shuffle, markSuccess, markFailure, getHealthSnapshot, isTargetSlow,
+  // Vấn đề #1 (vòng 3): đặt "vé xoay" toàn cục lấy bằng atomic INCR ở đầu request.
+  setGlobalRotationSlot
 } = require('./rotationManager');
 // ---------- mục 3/9/21: model discovery orchestration ----------
 // aiProviders.js chỉ ĐIỀU PHỐI (gọi warmDiscovery cho mọi provider/khóa cần auto-discovery TRƯỚC
 // khi build execution target) — modelDiscovery.js giữ toàn bộ logic gọi API liệt kê model/chọn
 // model/cache; executionTargets.js chỉ lắp ráp target từ cache đã có (mục 3, tách trách nhiệm).
 const { warmDiscovery, invalidateModelCache } = require('./modelDiscovery');
+const rotationStore = require('./rotationStore');
 // Lọc khối <thinking>/<think> (nháp suy luận nội bộ) khỏi MỌI văn bản forward ra ngoài — xem giải
 // thích đầy đủ nguyên nhân gốc + phạm vi áp dụng ở đầu file thinkingFilter.js.
 const { stripThinkingTags, createStreamingThinkingFilter } = require('./thinkingFilter');
@@ -75,6 +78,8 @@ const CROSS_CHECK_MAX_CANDIDATES = Number(process.env.CROSS_CHECK_MAX_CANDIDATES
 const { createRequestDeadline, safeCallTimeout, MIN_CALL_TIMEOUT_MS } = require('./requestDeadline');
 // PHẦN J: throughput đo thật theo từng model/provider — thay hằng số 60 tok/s dùng chung.
 const { recordThroughput } = require('./throughputStats');
+// Vấn đề #4: hiệu chỉnh tỷ lệ ký tự/token từ số token THẬT provider báo về.
+const tokenCounter = require('./tokenCounter');
 const { estimateTokens } = require('./adaptiveBudget');
 
 /**
@@ -140,6 +145,13 @@ function getActiveProviders() {
  * @returns {Promise<void>}
  */
 async function ensureProvidersReady() {
+  // Vấn đề #3: nạp trạng thái rotation/cooldown dùng chung (nếu ROTATION_STORE_* được cấu hình) —
+  // best-effort, không bao giờ throw, không chặn request nếu store chậm/lỗi.
+  await rotationStore.hydrate().catch(() => false);
+  // Vấn đề #1 (vòng 3): đặt trước "vé xoay" toàn cục bằng atomic INCR — đây là chỗ DUY NHẤT trong
+  // vòng đời request còn là async trước khi rotation phải quyết định, nên là chỗ đúng để làm việc này.
+  const slot = await rotationStore.reserveRotationSlot().catch(() => null);
+  setGlobalRotationSlot(slot);
   const defs = listAutoDiscoveryDefs();
   if (!defs.length) return;
   await Promise.allSettled(
@@ -347,7 +359,12 @@ async function callWithFailover(providers, args, { preferWebSearch = false, requ
       logAttempt({ requestId: args.requestId, stage: 'failover', target: p, latency: failoverLatency, status: text ? 'success' : 'empty' });
       if (text) {
         markSuccess(p, failoverLatency);
-        recordThroughput(p, { outputTokens: estimateTokens(text), elapsedMs: failoverLatency });
+        const realOutNs = meta.usage && Number(meta.usage.outputTokens);
+        if (Number.isFinite(realOutNs) && realOutNs > 0) tokenCounter.recordUsage(p.providerKey, { text, tokens: realOutNs });
+        recordThroughput(p, {
+          outputTokens: Number.isFinite(realOutNs) && realOutNs > 0 ? realOutNs : estimateTokens(text),
+          elapsedMs: failoverLatency
+        });
         return { text, provider: p, tried, finishReason: meta.finishReason || null, interrupted: false, latencyMs: failoverLatency };
       }
       tried.push({ label: p.label, error: 'Phản hồi rỗng' });
@@ -648,7 +665,16 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
         // (mọi request thật đều là streaming). Nay ghi cả latency (cho isTargetSlow) và throughput
         // token/giây thực đo (cho adaptive budget — xem throughputStats.js).
         markSuccess(p, latency);
-        recordThroughput(p, { outputTokens: estimateTokens(visibleText || attemptText), elapsedMs: latency });
+        // Ưu tiên số token THẬT (meta.usage) cho cả throughput lẫn hiệu chỉnh tokenizer; chỉ rơi về
+        // ước lượng theo ký tự khi provider không trả usage.
+        const realOut = meta.usage && Number(meta.usage.outputTokens);
+        if (Number.isFinite(realOut) && realOut > 0) {
+          tokenCounter.recordUsage(p.providerKey, { text: visibleText || attemptText, tokens: realOut });
+        }
+        recordThroughput(p, {
+          outputTokens: Number.isFinite(realOut) && realOut > 0 ? realOut : estimateTokens(visibleText || attemptText),
+          elapsedMs: latency
+        });
         return {
           text: visibleText, provider: p, tried, finishReason: meta.finishReason || null,
           interrupted: false, latencyMs: latency
