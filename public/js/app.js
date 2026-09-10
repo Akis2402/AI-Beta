@@ -8,6 +8,20 @@
 // nhưng không bấm được gì). Khai báo `el` làm dòng đầu tiên sau 'use strict' để loại bỏ hoàn toàn
 // khả năng này, bất kể thứ tự các đoạn code khác bên dưới có thay đổi ra sao trong tương lai.
 const el = (id) => document.getElementById(id);
+// PHẦN W (an toàn khi nạp lỗi): app.js gọi t(...) ở rất nhiều chỗ. i18n.js được nạp TRƯỚC app.js
+// trong index.html nên window.t luôn có sẵn ở đường chạy bình thường — nhưng nếu vì lý do nào đó
+// i18n.js tải lỗi (mạng/CSP/content-blocker), mọi lần gọi t() sẽ ném ReferenceError và làm chết
+// toàn bộ app. Shim này chỉ nhảy vào khi window.t THỰC SỰ vắng mặt, trả về chính key để giao diện
+// vẫn dùng được (xuống cấp mềm) thay vì trắng màn hình.
+if (typeof window.t !== 'function') {
+  window.t = function tFallback(key, vars) {
+    const dict = (window.TRANSLATIONS && (window.TRANSLATIONS.vi || {})) || {};
+    let s = dict[key] != null ? dict[key] : key;
+    if (vars) Object.keys(vars).forEach((k) => { s = String(s).replace(new RegExp('\\{\\{' + k + '\\}\\}', 'g'), String(vars[k])); });
+    return s;
+  };
+}
+const t = window.t;
 
 // FIX ROOT CAUSE (desktop hoạt động sai trong khi mobile bình thường): dòng này TRƯỚC ĐÂY chạy
 // KHÔNG có guard, ngay đầu file — nếu pdf.js CDN tải chậm/bị chặn (ad-block, tường lửa mạng
@@ -69,20 +83,38 @@ const state = {
 };
 
 let pendingTurn = null; // lượt hỏi đang chờ (đã có "Hướng giải", chưa bấm "Xem chi tiết")
-// mục 4: AbortController của lượt chat streaming ĐANG CHẠY (approach/detail) — null khi không có
-// request nào đang chờ. Dùng chung 1 biến vì tại 1 thời điểm chỉ có đúng 1 lượt chat đang stream
-// (sendBtn bị disable trong lúc chờ) — bấm "Dừng" sẽ abort() đúng request này.
-let chatAbortController = null;
-function setChatStreaming(isStreaming) {
+// PHẦN E/F/G (thay thế "chatAbortController" toàn cục cũ — đúng anti-pattern mà PHẦN F liệt kê):
+// trạng thái generating/AbortController giờ SỐNG TRONG conversationTaskManager, tra theo
+// conversationId — KHÔNG còn 1 biến duy nhất khoá toàn app. setChatStreaming() chỉ còn nhiệm vụ
+// UI THUẦN TÚY: cập nhật nút Gửi/Dừng CHO ĐÚNG conversation đang được xem — nếu task hoàn thành ở
+// 1 conversation khác (đang chạy nền), KHÔNG được đụng vào nút của conversation đang hiển thị
+// (NGUYÊN TẮC TỐI CAO #1: "UI lifecycle KHÔNG quyết định AI lifecycle").
+function setChatStreaming(isStreaming, conversationId) {
+  // Nếu có truyền conversationId và nó KHÁC conversation đang mở trên màn hình -> đây là 1 task nền,
+  // không đụng gì tới nút bấm hiện tại (chỉ cập nhật khi đúng là conv đang xem, hoặc gọi không kèm id).
+  if (conversationId != null && (!currentConversation() || currentConversation().id !== conversationId)) return;
   if (el('sendBtn')) el('sendBtn').style.display = isStreaming ? 'none' : '';
   if (el('stopBtn')) el('stopBtn').style.display = isStreaming ? '' : 'none';
+}
+/** Gọi mỗi khi đổi conversation đang xem (loadConversation/startNewConversation) — đồng bộ lại nút
+ * Gửi/Dừng theo ĐÚNG trạng thái generating của conversation VỪA MỞ (PHẦN F: trạng thái sinh câu trả
+ * lời độc lập theo từng conversation, không phải 1 cờ isGenerating dùng chung). */
+function syncSendButtonForActiveConversation() {
+  const conv = currentConversation();
+  const generating = !!conv && window.conversationTaskManager && window.conversationTaskManager.isGenerating(conv.id);
+  if (el('sendBtn')) { el('sendBtn').style.display = generating ? 'none' : ''; el('sendBtn').disabled = false; }
+  if (el('stopBtn')) el('stopBtn').style.display = generating ? '' : 'none';
+  if (statusEl) statusEl.textContent = generating ? (window.t ? window.t('chat.generating').toUpperCase() : 'ĐANG TẠO...') : 'SẴN SÀNG';
 }
 // FIX (event listener safety, mục 8): guard null trước khi bind — nếu vì lý do gì đó #stopBtn
 // không tồn tại trong DOM (HTML đổi id, load lỗi một phần...), KHÔNG được ném TypeError làm dừng
 // toàn bộ phần script còn lại phía dưới.
 if (el('stopBtn')) {
   el('stopBtn').addEventListener('click', () => {
-    if (chatAbortController) chatAbortController.abort();
+    // PHẦN D: Dừng CHỈ abort task của conversation ĐANG XEM — không đụng các conversation khác
+    // đang chạy nền (đây chính là điểm khác biệt cốt lõi với "chuyển chat = abort" bị cấm).
+    const conv = currentConversation();
+    if (conv && window.conversationTaskManager) window.conversationTaskManager.abortActiveTask(conv.id);
   });
 }
 function isCancelledError(e) {
@@ -103,14 +135,23 @@ async function apiPost(path, body, { signal } = {}) {
   let data;
   try { data = await res.json(); } catch (e) { data = null; }
   if (!res.ok) {
-    let msg = (data && data.error) || `Lỗi máy chủ (HTTP ${res.status}).`;
+    // PHẦN AG: ưu tiên DỊCH theo `code` ổn định do backend trả về (errorNormalize.js) thay vì dùng
+    // nguyên câu chữ tiếng Việt của server — nhờ đó thông báo lỗi đổi theo Settings > Language.
+    let msg = (data && data.code && window.tError)
+      ? window.tError(data.code, data && data.error)
+      : ((data && data.error) || t('error.generic'));
     // Khi TẤT CẢ nhà cung cấp AI đều lỗi, server trả kèm providerErrors (tên provider + lý do lỗi
     // cụ thể của từng nơi, vd "API key sai", "model không hợp lệ", "hết hạn mức"...) — nối luôn vào
-    // thông báo để tự chẩn đoán ngay trên giao diện mà không cần vào xem log server.
+    // thông báo để tự chẩn đoán ngay trên giao diện mà không cần vào xem log server. Phần này CỐ Ý
+    // giữ nguyên văn từ provider (chẩn đoán kỹ thuật, không phải câu hiển thị cho người học).
     if (data && Array.isArray(data.providerErrors) && data.providerErrors.length) {
       msg += '\n' + data.providerErrors.map((p) => `• ${p.label}: ${p.error}`).join('\n');
     }
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    if (data && data.code) err.code = data.code;
+    if (data && typeof data.retryable === 'boolean') err.retryable = data.retryable;
+    throw err;
   }
   return data;
 }
@@ -140,11 +181,17 @@ async function apiPostStream(path, body, { onDelta, onStatus, signal } = {}) {
     // Server từ chối trước khi mở stream (lỗi validate, thiếu API key...) — đọc lỗi JSON thường.
     let data;
     try { data = await res.json(); } catch (e) { data = null; }
-    let msg = (data && data.error) || `Lỗi máy chủ (HTTP ${res.status}).`;
+    let msg = (data && data.code && window.tError)
+      ? window.tError(data.code, data && data.error)
+      : ((data && data.error) || t('error.generic'));
     if (data && Array.isArray(data.providerErrors) && data.providerErrors.length) {
       msg += '\n' + data.providerErrors.map((p) => `• ${p.label}: ${p.error}`).join('\n');
     }
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    if (data && data.code) err.code = data.code;
+    if (data && typeof data.retryable === 'boolean') err.retryable = data.retryable;
+    throw err;
   }
 
   const reader = res.body.getReader();
@@ -154,6 +201,7 @@ async function apiPostStream(path, body, { onDelta, onStatus, signal } = {}) {
   let doneData = null;
   let errorMsg = null;
   let errorState = null;
+  let errorCode = null;
   let lastKnownState = 'IDLE';
 
   while (true) {
@@ -182,7 +230,13 @@ async function apiPostStream(path, body, { onDelta, onStatus, signal } = {}) {
       // client XOÁ SẠCH toàn bộ phần đã stream (có thể là 90% một lời giải dài đúng) — hành vi tệ
       // nhất có thể, và chính là thứ người dùng nhìn thấy khi câu trả lời dài bị ngắt giữa chừng.
       else if (currentEvent === 'done') doneData = payload;
-      else if (currentEvent === 'error') { errorMsg = payload.message || 'Có lỗi khi kết nối tới máy chủ AI.'; errorState = payload.state || 'FAILED'; }
+      // PHẦN AF/AG: sự kiện error qua SSE cũng mang `code` ổn định — ưu tiên dịch theo code, chỉ
+      // dùng payload.message làm phương án cuối (code lạ/backend cũ chưa gửi code).
+      else if (currentEvent === 'error') {
+        errorMsg = (payload.code && window.tError) ? window.tError(payload.code, payload.message) : (payload.message || t('error.generic'));
+        errorState = payload.state || 'FAILED';
+        errorCode = payload.code || null;
+      }
     }
   }
 
@@ -190,9 +244,9 @@ async function apiPostStream(path, body, { onDelta, onStatus, signal } = {}) {
   // chừng...) — dù đã stream được bao nhiêu delta, KHÔNG được coi phần đã nhận là câu trả lời cuối
   // cùng. Némlỗi thay vì âm thầm dùng preview.getText() làm kết quả, để nơi gọi (sendMessage/
   // fetchDetail) không lưu nhầm 1 câu trả lời dang dở vào lịch sử hội thoại.
-  if (errorMsg) { const err = new Error(errorMsg); err.state = errorState; throw err; }
+  if (errorMsg) { const err = new Error(errorMsg); err.state = errorState; if (errorCode) err.code = errorCode; throw err; }
   if (!doneData) {
-    const err = new Error('Kết nối streaming bị ngắt trước khi AI trả lời xong (chưa nhận được "done"). Câu trả lời dang dở KHÔNG được lưu — vui lòng thử lại.');
+    const err = new Error(t('error.streamInterrupted'));
     err.state = lastKnownState === 'IDLE' ? 'FAILED' : lastKnownState;
     throw err;
   }
@@ -414,7 +468,17 @@ function updateGradeBadge() {
   badgeEl.style.display = text ? '' : 'none';
 }
 document.querySelectorAll('#detailChips .chip').forEach((c) => c.onclick = () => { state.settings.detail = c.dataset.val; applySettingsUI(); lsSet(LS_KEYS.settings, state.settings); });
-document.querySelectorAll('#langChips .chip').forEach((c) => c.onclick = () => { state.settings.lang = c.dataset.val; applySettingsUI(); lsSet(LS_KEYS.settings, state.settings); });
+// PHẦN T/U/AH: đổi ngôn ngữ TRẢ LỜI (settings.lang, cơ chế cũ) đồng thời đồng bộ languageStore —
+// nguồn ngôn ngữ UI trung tâm — để toàn bộ giao diện (qua t()) chuyển theo NGAY, không cần reload.
+document.querySelectorAll('#langChips .chip').forEach((c) => c.onclick = () => {
+  state.settings.lang = c.dataset.val;
+  applySettingsUI();
+  lsSet(LS_KEYS.settings, state.settings);
+  if (window.languageStore) {
+    const code = c.dataset.val === 'English' ? 'en' : (c.dataset.val === 'Tiếng Việt' ? 'vi' : null);
+    if (code) window.languageStore.setUILanguage(code); // "tự động theo câu hỏi": giữ nguyên uiLanguage hiện tại, chỉ đổi answerLanguage
+  }
+});
 document.querySelectorAll('#schoolChips .chip').forEach((c) => c.onclick = () => {
   state.settings.school = c.dataset.val;
   const grades = (window.SCHOOL_LEVELS[state.settings.school] || {}).grades || [];
@@ -1184,7 +1248,7 @@ function parseMarkdownTables(text) {
 function renderMarkdownLite(text) {
   const drawBlocks = [];
   const mathBlocks = [];
-  let working = text.replace(/```(plot|shape|solid3d)\n?([\s\S]*?)```/g, (m, kind, body) => {
+  let working = text.replace(/```(plot|shape|solid3d|scene3d|scenepatch)\n?([\s\S]*?)```/g, (m, kind, body) => {
     const spec = parseDrawSpecSafe(body);
     drawBlocks.push({ kind, spec });
     return `\u0000DRAW${drawBlocks.length - 1}\u0000`;
@@ -1230,12 +1294,16 @@ function renderMarkdownLite(text) {
   const draws = [];
   html = html.replace(/\u0000DRAW(\d+)\u0000/g, (m, i) => {
     const b = drawBlocks[+i];
-    if (!b || !b.spec) return '<p style="color:#c0392b;font-size:12px;">⚠️ Không thể hiển thị hình minh họa (dữ liệu không hợp lệ).</p>';
+    if (!b || !b.spec) return `<p style="color:#c0392b;font-size:12px;">${escapeHtml(t('error.drawInvalid'))}</p>`;
     const id = 'draw_' + Math.random().toString(36).slice(2, 9);
     draws.push({ id, kind: b.kind, spec: b.spec });
-    const cls = b.kind === 'solid3d' ? 'draw-wrap draw-wrap-3d' : 'draw-wrap';
+    // PHẦN L: scenepatch KHÔNG dựng container riêng — áp lên khối scene3d gần nhất phía trước.
+    if (b.kind === 'scenepatch') return `\u0000PATCH${draws.length - 1}\u0000`;
+    const cls = (b.kind === 'solid3d' || b.kind === 'scene3d') ? 'draw-wrap draw-wrap-3d' : 'draw-wrap';
     return `<div class="${cls}" id="${id}"></div>`;
   });
+  // scenepatch không tạo container riêng — placeholder của nó có thể còn nằm trong 1 <p> rỗng, bỏ đi.
+  html = html.replace(/<p>\u0000PATCH(\d+)\u0000<\/p>/g, '').replace(/\u0000PATCH(\d+)\u0000/g, '');
   return { html, draws };
 }
 
@@ -1249,17 +1317,29 @@ function renderDrawing(container, kind, spec) {
       // index.html) nên khối 3D đầu tiên trong phiên phải CHỜ tải xong trước khi vẽ được — hiện
       // placeholder "Đang tải..." trong lúc chờ thay vì để trống, rồi vẽ ngay khi sẵn sàng. Các khối
       // 3D sau đó trong CÙNG phiên vẽ ngay lập tức vì ensureThree() trả về ngay (window.THREE đã có).
-      container.innerHTML = '<p style="font-size:12px;color:#6b7593;">Đang tải bộ máy vẽ 3D…</p>';
+      container.innerHTML = `<p style="font-size:12px;color:#6b7593;">${escapeHtml(t('loading.3dEngine'))}</p>`;
       ensureThree().then(() => {
         if (window.drawSolid3D) window.drawSolid3D(container, spec);
-        else container.innerHTML = '<p style="font-size:12px;color:#c0392b;">⚠️ Không tải được thư viện vẽ 3D.</p>';
+        else container.innerHTML = `<p style="font-size:12px;color:#c0392b;">${escapeHtml(t('error.load3d'))}</p>`;
       }).catch(() => {
-        container.innerHTML = '<p style="font-size:12px;color:#c0392b;">⚠️ Không tải được thư viện vẽ 3D — kiểm tra kết nối mạng rồi thử lại.</p>';
+        container.innerHTML = `<p style="font-size:12px;color:#c0392b;">${escapeHtml(t('error.load3dNetwork'))}</p>`;
+      });
+    }
+    else if (kind === 'scene3d') {
+      // PHẦN K/O: scene3d dùng cùng lazy-load three.js với solid3d, nhưng renderer riêng (scene3d.js)
+      // hỗ trợ compact JSON đa-object + patch + quality tiers + WebGL fallback.
+      container.innerHTML = `<p style="font-size:12px;color:#6b7593;">${escapeHtml(t('loading.3dEngine'))}</p>`;
+      ensureThree().then(() => {
+        if (window.renderScene3D) window.renderScene3D(container, spec);
+        else container.innerHTML = `<p style="font-size:12px;color:#c0392b;">${escapeHtml(t('error.load3d'))}</p>`;
+      }).catch(() => {
+        if (window.renderScene3D) window.renderScene3D(container, spec); // vẫn thử -> tự fallback 2D/text nếu WebGL không khả dụng
+        else container.innerHTML = `<p style="font-size:12px;color:#c0392b;">${escapeHtml(t('error.load3dNetwork'))}</p>`;
       });
     }
     else drawShape(container, spec);
   } catch (e) {
-    container.innerHTML = '<p style="color:#c0392b;font-size:12px;">⚠️ Có lỗi khi vẽ minh họa.</p>';
+    container.innerHTML = `<p style="color:#c0392b;font-size:12px;">${escapeHtml(t('error.drawFailed'))}</p>`;
     console.error(e);
   }
 }
@@ -1502,12 +1582,12 @@ function appendGenErrorMessage(label, message, retryFn) {
   content.innerHTML = `
     <div class="gen-error-card">
       <p class="gen-error-text">⚠️ ${escapeHtml(message)}</p>
-      <button class="gen-error-retry" type="button">${ICONS.refresh}<span>Thử lại</span></button>
+      <button class="gen-error-retry" type="button">${ICONS.refresh}<span>${escapeHtml(t('chat.retry'))}</span></button>
     </div>`;
   const btn = content.querySelector('.gen-error-retry');
   btn.onclick = async () => {
     btn.disabled = true;
-    btn.innerHTML = '<span>Đang thử lại…</span>';
+    btn.innerHTML = `<span>${escapeHtml(t('chat.retrying'))}</span>`;
     row.remove(); // gỡ thẻ lỗi cũ — retryFn() tự thêm tin nhắn mới (thành công hoặc lỗi khác)
     await retryFn();
   };
@@ -1538,8 +1618,8 @@ function updateChatMeta() {
   const solved = conv.messages.filter((m) => m.role === 'user').length;
   const notesInConv = conv.messages.filter((m) => m.role === 'ai' && m.userNote).length;
   const parts = [];
-  if (solved) parts.push(`${solved} bài đã giải`);
-  if (notesInConv) parts.push(`${notesInConv} ghi chú`);
+  if (solved) parts.push(t('chat.solvedCount', { n: solved }));
+  if (notesInConv) parts.push(t('chat.notesCount', { n: notesInConv }));
   metaEl.textContent = parts.join(' · ');
 }
 
@@ -1553,7 +1633,7 @@ function revokeThreadBlobImages() {
 window.addEventListener('pagehide', revokeThreadBlobImages);
 
 function startNewConversation(silent) {
-  const conv = { id: uid(), title: 'Buổi học mới', createdAt: Date.now(), updatedAt: Date.now(), messages: [] };
+  const conv = { id: uid(), title: t('chat.newChatTitle'), createdAt: Date.now(), updatedAt: Date.now(), messages: [] };
   state.conversations.unshift(conv);
   if (state.conversations.length > MAX_STORED_CONVERSATIONS) state.conversations.length = MAX_STORED_CONVERSATIONS;
   state.currentConvId = conv.id;
@@ -1562,9 +1642,10 @@ function startNewConversation(silent) {
   revokeThreadBlobImages();
   threadEl.innerHTML = '';
   welcome();
-  el('chatTitle').textContent = 'Buổi học mới';
+  el('chatTitle').textContent = t('chat.newChatTitle');
   saveConversations();
   renderHistoryList();
+  syncSendButtonForActiveConversation();
   if (!silent) closeSidebarOnMobile();
 }
 el('newChatBtn').onclick = () => startNewConversation(false);
@@ -1609,6 +1690,24 @@ async function loadConversation(id, silent) {
   lsSet(LS_KEYS.currentConv, id);
   updateChatMeta();
   renderHistoryList();
+  // PHẦN E/H: nếu conversation vừa mở đang có task chạy nền, phản ánh đúng lên nút Gửi/Dừng NGAY —
+  // KHÔNG chờ tới khi task đó xong mới cập nhật (task không hề biết/quan tâm UI có đang xem nó hay
+  // không, nhưng UI PHẢI tự hỏi lại đúng trạng thái mỗi lần được mở lên — PHẦN E "attach").
+  syncSendButtonForActiveConversation();
+  const activeTask = window.conversationTaskManager && window.conversationTaskManager.getActiveTask(id);
+  if (activeTask && activeTask.text) {
+    // Có nội dung đang stream dở cho conversation này — hiện tạm bằng streaming preview (PHẦN E: UI
+    // "attach" vào task đang chạy) thay vì chỉ thấy màn hình trống tới khi task xong.
+    const aiRow = addAiMsg(t('chat.continuing'));
+    const contentEl = aiRow.querySelector('.content');
+    const preview = startStreamingPreview(contentEl);
+    preview.append(activeTask.text);
+    const detach = window.conversationTaskManager.attach(id, (ev) => {
+      if (ev.type === 'delta') preview.append(ev.chunk);
+      else if (ev.type === 'statusMsg') preview.setStatus(ev.message, ev.state);
+      else if (ev.type === 'done' || ev.type === 'error' || ev.type === 'cancelled') { detach(); }
+    });
+  }
   threadEl.scrollTop = threadEl.scrollHeight;
   if (!silent) closeSidebarOnMobile();
 }
@@ -1659,17 +1758,20 @@ function renderHistoryList() {
   sorted.forEach((conv) => {
     const li = document.createElement('li');
     li.className = 'hist-card' + (conv.id === state.currentConvId ? ' active' : '');
+    // PHẦN F/H: badge "đang chạy nền" cho MỌI conversation có task active — không chỉ conv đang mở.
+    const isBgGenerating = conv.id !== state.currentConvId && window.conversationTaskManager && window.conversationTaskManager.isGenerating(conv.id);
+    const genBadge = isBgGenerating ? `<span class="hist-generating-dot" title="${window.t ? window.t('chat.generating') : 'Đang trả lời...'}"></span>` : '';
     li.innerHTML = `
       <div class="hist-main">
-        <div class="hist-title">${(conv.title || 'Buổi học mới').replace(/</g, '&lt;')}</div>
-        <div class="hist-meta">${conv.messages.length} tin nhắn · ${timeAgo(conv.updatedAt)}</div>
+        <div class="hist-title">${genBadge}${(conv.title || t('chat.newChatTitle')).replace(/</g, '&lt;')}</div>
+        <div class="hist-meta">${escapeHtml(t('chat.messages', { n: conv.messages.length }))} · ${timeAgo(conv.updatedAt)}</div>
       </div>
-      <button class="hist-del" title="Xóa cuộc trò chuyện">${ICONS.trash}</button>
+      <button class="hist-del" title="${escapeHtml(t('history.deleteChat'))}">${ICONS.trash}</button>
     `;
     li.querySelector('.hist-main').onclick = () => loadConversation(conv.id);
     li.querySelector('.hist-del').onclick = (e) => {
       e.stopPropagation();
-      if (confirm('Xóa cuộc trò chuyện này?')) deleteConversation(conv.id);
+      if (confirm(t('history.deleteConfirm'))) deleteConversation(conv.id);
     };
     ul.appendChild(li);
   });
@@ -1677,7 +1779,7 @@ function renderHistoryList() {
 function buildHistorySubjectFilter() {
   const sel = el('historySubjectFilter');
   if (!sel || !window.SUBJECTS) return;
-  const opts = [{ id: 'all', name: 'Tất cả', icon: '' }]
+  const opts = [{ id: 'all', name: t('history.all'), icon: '' }]
     .concat(window.SUBJECTS.filter((s) => s.id !== 'auto'));
   sel.innerHTML = opts.map((s) => `<option value="${s.id}">${s.icon ? s.icon + ' ' : ''}${s.name}</option>`).join('');
   sel.value = state.historyFilterSubject || 'all';
@@ -2119,7 +2221,7 @@ function renderAnswerBlock(container, rawText) {
   if (thinking) {
     const details = document.createElement('details');
     details.className = 'thinking-block';
-    details.innerHTML = '<summary>Xem quá trình suy luận sâu</summary><div class="think-body"></div>';
+    details.innerHTML = `<summary>${escapeHtml(t('chat.thinkingProcess'))}</summary><div class="think-body"></div>`;
     details.querySelector('.think-body').textContent = thinking;
     container.appendChild(details);
   }
@@ -2133,11 +2235,22 @@ function renderAnswerBlock(container, rawText) {
   if (truncated) {
     const warn = document.createElement('div');
     warn.className = 'truncated-notice';
-    warn.textContent = '⚠️ Lời giải bị cắt ngang do quá dài. Vui lòng bấm "Xem cách giải chi tiết" lại hoặc thử tắt "Suy nghĩ sâu" để nhận câu trả lời đầy đủ hơn.';
+    warn.textContent = t('chat.truncated');
     container.appendChild(warn);
   }
   renderMath(container);
-  draws.forEach((d) => renderDrawing(document.getElementById(d.id), d.kind, d.spec));
+  // PHẦN L: scenepatch áp lên khối scene3d GẦN NHẤT phía trước nó trong cùng câu trả lời (thứ tự tài
+  // liệu == thứ tự draws[] vì cả hai được ghi lại khi quét text tuần tự ở renderMarkdownLite()).
+  let lastScene3dEl = null;
+  draws.forEach((d) => {
+    if (d.kind === 'scenepatch') {
+      if (lastScene3dEl && window.applyScenePatchToContainer) window.applyScenePatchToContainer(lastScene3dEl, d.spec);
+      return;
+    }
+    const el2 = document.getElementById(d.id);
+    renderDrawing(el2, d.kind, d.spec);
+    if (d.kind === 'scene3d') lastScene3dEl = el2;
+  });
   return answer;
 }
 
@@ -2187,13 +2300,30 @@ function extractWebSourceNote(text) {
 // [n] khớp đúng chỉ số 1..contexts.length — bỏ qua các cặp ngoặc vuông chứa số khác ngữ cảnh, vd
 // ký hiệu khoảng trong LaTeX). Dùng chung cho cả renderCitations() và badge đối chiếu đa hướng, để
 // 2 nơi không lệch heuristic nhau.
-function getUsedContexts(contexts, answerText) {
+function getUsedContexts(contexts, answerText, citationMap) {
   const citedNums = new Set();
   if (answerText) {
     const re = /\[(\d+)\]/g;
     let m;
     while ((m = re.exec(answerText))) citedNums.add(Number(m[1]));
   }
+
+  // Vấn đề #1: KHÔNG còn suy ra số citation từ vị trí mảng phía client (`i + 1`). Server nay gộp các
+  // đoạn trích TRÙNG NHAU để tiết kiệm token, nên mảng nó gửi cho model KHÁC mảng `contexts` ở đây —
+  // dùng `i + 1` sẽ hiển thị SAI đoạn (prompt nói [4] là đoạn X, client vẽ ra đoạn Y). `citationMap`
+  // do server trả về là nguồn sự thật duy nhất: citeNo -> chỉ số gốc trong mảng của client.
+  if (Array.isArray(citationMap) && citationMap.length) {
+    return citationMap
+      .filter((entry) => citedNums.has(entry.citeNo))
+      .map((entry) => {
+        const idx = Array.isArray(entry.originalIndexes) ? entry.originalIndexes[0] : undefined;
+        const c = (contexts || [])[idx];
+        return c ? { c, num: entry.citeNo } : null;
+      })
+      .filter(Boolean);
+  }
+
+  // Fallback (response cũ/không có citationMap): giữ đúng hành vi trước đây.
   return (contexts || [])
     .map((c, i) => ({ c, num: i + 1 }))
     .filter((x) => citedNums.has(x.num));
@@ -2204,8 +2334,8 @@ function getUsedContexts(contexts, answerText) {
 // trích dẫn (chỉ hiển thị đúng những đoạn đó — không hiển thị 1 nguồn chỉ vì nó tồn tại trong danh
 // sách ứng viên, đúng yêu cầu "nguồn phải là tài liệu thực sự được AI sử dụng"). webNote: dòng
 // "🌐 ..." đã tách ra từ extractWebSourceNote(), nếu có, hiển thị ở mục riêng "Nguồn web bổ sung".
-function renderCitations(container, contexts, query, answerText, webNote) {
-  const used = getUsedContexts(contexts, answerText);
+function renderCitations(container, contexts, query, answerText, webNote, citationMap) {
+  const used = getUsedContexts(contexts, answerText, citationMap);
 
   if (!used.length && !webNote) {
     // Có tài liệu đã tải lên nhưng KHÔNG đoạn nào thực sự được dùng cho câu hỏi này — nêu rõ thay
@@ -2292,7 +2422,7 @@ function renderStoredAiMessage(msg) {
   approachWrap.className = 'stage-block stage-approach';
   contentEl.appendChild(approachWrap);
   renderAnswerBlock(approachWrap, msg.approach || '');
-  renderCitations(approachWrap, msg.contexts, msg.query, msg.approach || '', msg.approachWebNote);
+  renderCitations(approachWrap, msg.contexts, msg.query, msg.approach || '', msg.approachWebNote, msg.approachCitationMap);
 
   if (msg.detail) {
     appendDetailSection(contentEl, msg, aiRow);
@@ -2302,7 +2432,7 @@ function renderStoredAiMessage(msg) {
     contentEl.appendChild(buildStudyActions(msg, msg.approach || '', aiRow, 'approach-note-block'));
     const btnWrap = document.createElement('div');
     btnWrap.className = 'detail-btn-wrap';
-    btnWrap.innerHTML = `<button class="detail-btn">${ICONS.compass}<span>Xem cách giải chi tiết</span></button>`;
+    btnWrap.innerHTML = `<button class="detail-btn">${ICONS.compass}<span>${escapeHtml(t('chat.detailBtn'))}</span></button>`;
     // FIX ROOT CAUSE #1 (mục 7): trước đây luôn truyền `null` làm ảnh, khiến request "Xem cách giải
     // chi tiết" sau F5 KHÔNG BAO GIỜ còn ảnh gốc dù message có imageId. Nay khôi phục ảnh từ
     // IndexedDB (nếu có) TRƯỚC khi gọi fetchDetail() — nút hiện trạng thái chờ ngắn trong lúc đó.
@@ -2324,7 +2454,7 @@ function appendDetailSection(contentEl, msg, aiRow) {
   detailWrap.className = 'stage-block stage-detail';
   contentEl.appendChild(detailWrap);
   const answerPlain = renderAnswerBlock(detailWrap, msg.detail || '');
-  renderCitations(detailWrap, msg.contexts, msg.query, msg.detail || '', msg.detailWebNote);
+  renderCitations(detailWrap, msg.contexts, msg.query, msg.detail || '', msg.detailWebNote, msg.detailCitationMap);
 
   if (msg.crossChecked) {
     const badge = document.createElement('div');
@@ -2372,8 +2502,12 @@ async function sendMessage() {
   if (!query && !image) return;
   // Race condition (mục 11): người dùng bấm gửi ngay khi ảnh vừa chọn còn đang xử lý (FileReader/
   // IndexedDB chưa xong) hoặc ảnh bị lỗi (không decode được) — KHÔNG được gửi thiếu base64.
-  if (image && image.status === 'loading') { alert('Ảnh đang được xử lý, vui lòng đợi một chút rồi bấm gửi lại.'); return; }
-  if (image && image.status === 'error') { alert(image.errorMessage || 'Ảnh này không sử dụng được, vui lòng chọn ảnh khác trước khi gửi.'); return; }
+  if (image && image.status === 'loading') { alert(t('error.imageProcessing')); return; }
+  if (image && image.status === 'error') { alert(image.errorMessage || t('error.imageUnusable')); return; }
+  // PHẦN F: chặn double-submit CHỈ khi CHÍNH conversation đang mở đã có task chạy — KHÔNG còn chặn
+  // toàn app (trước đây sendBtn.disabled là cờ TOÀN CỤC, chặn gửi ở MỌI conversation cùng lúc).
+  const activeConvForGuard = currentConversation();
+  if (activeConvForGuard && window.conversationTaskManager && window.conversationTaskManager.isGenerating(activeConvForGuard.id)) return;
   input.value = ''; input.style.height = 'auto';
 
   // FIX PHẦN 9: TRƯỚC ĐÂY scheduleRecommend(query) được gọi TỰ ĐỘNG cho MỌI câu hỏi (kể cả 1 bài
@@ -2399,7 +2533,7 @@ async function sendMessage() {
   const mindmapOnly = !examOnly && !outlineOnly && !!query && !image && isMindmapRequest(query);
 
   el('sendBtn').disabled = true;
-  statusEl.textContent = image ? 'ĐANG ĐỌC ĐỀ BÀI…' : (examOnly ? 'ĐANG TÌM TÀI LIỆU LIÊN QUAN…' : (outlineOnly ? 'ĐANG SOẠN ĐỀ CƯƠNG…' : (mindmapOnly ? 'ĐANG VẼ MINDMAP…' : 'ĐANG TÌM HƯỚNG GIẢI…')));
+  statusEl.textContent = image ? t('chat.statusReadingProblem') : (examOnly ? t('chat.statusFindingDocs') : (outlineOnly ? t('chat.statusOutline') : (mindmapOnly ? t('chat.statusMindmap') : t('chat.statusApproach'))));
 
   finalizePendingTurnIfAny();
 
@@ -2427,7 +2561,7 @@ async function sendMessage() {
     conv.messages.push(aiMsgObj);
     touchConversation(conv);
     el('sendBtn').disabled = false;
-    statusEl.textContent = 'SẴN SÀNG';
+    statusEl.textContent = t('chat.statusReady');
     threadEl.scrollTop = threadEl.scrollHeight;
     return;
   }
@@ -2455,19 +2589,35 @@ async function sendMessage() {
   contentEl.innerHTML = '';
   const preview = startStreamingPreview(contentEl);
 
-  chatAbortController = new AbortController();
-  setChatStreaming(true);
+  // PHẦN E/F/G: đăng ký task theo conversationId (không phải biến toàn cục) — cho phép sang Chat B
+  // gửi tiếp trong lúc Chat A vẫn đang stream (bị chặn hoàn toàn ở kiến trúc cũ vì disable sendBtn
+  // toàn cục). PHẦN AJ/AK: chốt ngôn ngữ của request NGAY tại đây — settingsSnapshot là 1 bản SAO
+  // (không phải tham chiếu) nên nếu người dùng đổi Settings > Language giữa chừng, request ĐANG
+  // CHẠY này vẫn tiếp tục đúng ngôn ngữ cũ tới khi xong (không rebuild theo state.settings sống).
+  const settingsSnapshot = { ...state.settings };
+  const langLock = {
+    requestLanguage: settingsSnapshot.lang,
+    uiLanguageAtStart: window.languageStore ? window.languageStore.getUILanguage() : null,
+    answerLanguage: settingsSnapshot.lang,
+    explanationLanguage: settingsSnapshot.lang
+  };
+  const ctm = window.conversationTaskManager;
+  const taskHandle = ctm ? ctm.beginTask(conv.id, { langLock }) : null;
+  const taskSignal = taskHandle ? taskHandle.signal : undefined;
+  if (taskHandle) await taskHandle.whenReady; // PHẦN F: nếu vượt concurrency limit, chờ tới lượt (queue) trước khi thực sự gọi AI
+  setChatStreaming(true, conv.id);
   try {
-    const data = await apiPostStream('/api/chat', {
+    const data = await streamViaProviderRouter('/api/chat', {
       query, deepThinking: state.deepThinking, crossCheck: state.crossCheck, stage: 'approach',
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
-      rules: state.rules, contexts, settings: state.settings, history: state.history
+      rules: state.rules, contexts, settings: settingsSnapshot, history: state.history
     }, {
-      onDelta: (piece) => { preview.append(piece); threadEl.scrollTop = threadEl.scrollHeight; },
-      onStatus: (msg, st) => preview.setStatus(msg, st),
-      signal: chatAbortController.signal
+      onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); threadEl.scrollTop = threadEl.scrollHeight; },
+      onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
+      signal: taskSignal
     });
-    const rawFull = data.text || preview.getText() || 'Xin lỗi, không nhận được phản hồi. Vui lòng thử lại.';
+    if (taskHandle) ctm.completeTask(taskHandle.task.requestId, data);
+    const rawFull = data.text || preview.getText() || t('chat.noResponse');
     // Tách dòng "🌐 ..." (nếu AI có dùng web bổ sung — hiện giai đoạn Hướng giải chưa được cấp công
     // cụ web nên hiếm khi xảy ra, nhưng vẫn xử lý nhất quán với giai đoạn Giải chi tiết) ra khỏi nội
     // dung chính, lưu riêng để hiển thị TÁCH BIỆT khỏi nguồn tài liệu trong khối "Nguồn tham khảo".
@@ -2475,6 +2625,9 @@ async function sendMessage() {
     aiMsgObj.approach = raw;
     aiMsgObj.approachWebNote = approachWebNote;
     aiMsgObj.approachProvider = data.provider || null;
+    // Vấn đề #1: lưu citationMap để lần render lại từ lịch sử cũng resolve [n] đúng đoạn (nếu không,
+    // mở lại hội thoại cũ sẽ quay về suy ra theo vị trí mảng và hiển thị sai đoạn).
+    aiMsgObj.approachCitationMap = Array.isArray(data.citationMap) ? data.citationMap : null;
     // Mục 14.16: lưu subjectId vào metadata tin nhắn (dùng để lọc History theo môn); mục 14.4: hiển
     // thị badge ngay trên nhãn tin nhắn AI vừa nhận được kết quả.
     aiMsgObj.subjectId = data.subjectId || 'general';
@@ -2489,26 +2642,27 @@ async function sendMessage() {
     contentEl.appendChild(approachWrap);
     renderAnswerBlock(approachWrap, raw);
     renderPartialWarning(approachWrap, data);
-    renderCitations(approachWrap, contexts, query, raw, approachWebNote);
+    renderCitations(approachWrap, contexts, query, raw, approachWebNote, data.citationMap);
     // Luôn hiển thị đủ các nút chức năng (Ghi chú/Flashcard/Mindmap) ngay từ giai đoạn
     // Hướng giải — xem giải thích đầy đủ ở đầu buildStudyActions().
     contentEl.appendChild(buildStudyActions(aiMsgObj, raw, aiRow, 'approach-note-block'));
 
     const btnWrap = document.createElement('div');
     btnWrap.className = 'detail-btn-wrap';
-    btnWrap.innerHTML = `<button class="detail-btn">${ICONS.compass}<span>Xem cách giải chi tiết</span></button>`;
+    btnWrap.innerHTML = `<button class="detail-btn">${ICONS.compass}<span>${escapeHtml(t('chat.detailBtn'))}</span></button>`;
     contentEl.appendChild(btnWrap);
     const detailBtn = btnWrap.querySelector('.detail-btn');
 
     pendingTurn = { query, image, approachRaw: raw, msgObj: aiMsgObj };
     detailBtn.onclick = () => fetchDetail(detailBtn, aiRow, contentEl, aiMsgObj, image);
   } catch (e) {
+    if (taskHandle) ctm.failTask(taskHandle.task.requestId, e);
     // mục 4: người dùng chủ động bấm "Dừng" — không phải lỗi, hiển thị nhẹ nhàng, không tô đỏ.
     if (isCancelledError(e)) {
-      contentEl.innerHTML = '<p style="color:var(--muted);font-style:italic;">Đã dừng theo yêu cầu.</p>';
+      contentEl.innerHTML = `<p style="color:var(--muted);font-style:italic;">${escapeHtml(t('chat.stopped'))}</p>`;
       console.info('Chat request cancelled by user.');
     } else {
-      const msg = (e && e.message) || 'Có lỗi khi kết nối tới máy chủ.';
+      const msg = (e && e.message) || t('error.connectServer');
       // escape HTML thô sơ rồi mới chèn — thông báo lỗi có thể chứa nội dung từ phản hồi API bên
       // ngoài (OpenAI/Gemini/...), không nên tin tưởng tuyệt đối khi ghép vào innerHTML.
       const escaped = msg.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
@@ -2516,11 +2670,17 @@ async function sendMessage() {
       console.error(e);
     }
   } finally {
-    chatAbortController = null;
-    setChatStreaming(false);
-    el('sendBtn').disabled = false;
-    statusEl.textContent = 'SẴN SÀNG';
-    threadEl.scrollTop = threadEl.scrollHeight;
+    // PHẦN H: nếu người dùng đã chuyển sang conversation khác trong lúc chờ, KHÔNG đụng nút Gửi/Dừng
+    // hiện tại (setChatStreaming tự kiểm tra conv.id !== conversation đang mở) — chỉ đồng bộ lại nút
+    // khi conversation VỪA XONG task cũng chính là conversation đang được xem.
+    setChatStreaming(false, conv.id);
+    if (currentConversation() && currentConversation().id === conv.id) {
+      el('sendBtn').disabled = false;
+      statusEl.textContent = t('chat.statusReady');
+      threadEl.scrollTop = threadEl.scrollHeight;
+    } else {
+      renderHistoryList(); // PHẦN H: cập nhật badge "đang chạy nền"/thời gian cập nhật cho conv vừa xong ở nền
+    }
   }
 }
 
@@ -2531,14 +2691,14 @@ async function handleDetailClickWithRestore(btn, aiRow, contentEl, msg) {
   if (!msg.imageId) { fetchDetail(btn, aiRow, contentEl, msg, null); return; }
   btn.disabled = true;
   const originalHtml = btn.innerHTML;
-  btn.innerHTML = `<span class="typing"><span></span><span></span><span></span></span><span>Đang khôi phục ảnh…</span>`;
+  btn.innerHTML = `<span class="typing"><span></span><span></span><span></span></span><span>${escapeHtml(t('chat.restoringImage'))}</span>`;
   const restoredImage = await restoreMessageImage(msg.imageId);
   if (!restoredImage) {
     // Ảnh không còn trong IndexedDB (đã bị xoá/dọn dẹp) — báo rõ, KHÔNG crash, vẫn cho giải tiếp
     // chỉ bằng text đã có (approach/query) như hành vi trước đây, tránh chặn đứng người dùng.
     btn.innerHTML = originalHtml;
     btn.disabled = false;
-    alert('⚠️ Ảnh gốc của câu hỏi này không còn trong bộ nhớ cục bộ trình duyệt, AI sẽ giải tiếp dựa trên nội dung văn bản đã có.');
+    alert(t('error.imageGone'));
     fetchDetail(btn, aiRow, contentEl, msg, null);
     return;
   }
@@ -2548,29 +2708,44 @@ async function handleDetailClickWithRestore(btn, aiRow, contentEl, msg) {
 
 async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
   btn.disabled = true;
+  // FIX PHẦN G (response isolation): trước đây `conv` được lấy bằng currentConversation() SAU khi
+  // await xong — nếu người dùng đã chuyển sang conversation khác trong lúc chờ, touchConversation()
+  // sẽ vô tình đánh dấu NHẦM conversation đang xem là "vừa cập nhật" thay vì conversation THỰC SỰ sở
+  // hữu msgObj này. Chốt đúng chủ sở hữu NGAY TỪ ĐẦU, dùng lại ownerConv xuyên suốt hàm.
+  const ownerConv = currentConversation();
   const { deepThinking, crossCheck } = state;
   // Nhãn/trạng thái ở bước này theo cờ "Đối chiếu đa hướng" — đây là cờ thực sự quyết định server
   // có chạy nhiều lượt giải song song + tổng hợp hay không (xem chat.js); "Suy nghĩ sâu" chỉ ảnh
   // hưởng nội dung suy luận NỘI BỘ của từng lượt gọi, không đổi số lượt gọi hay luồng UI ở đây.
-  btn.innerHTML = `<span class="typing"><span></span><span></span><span></span></span><span>${crossCheck ? 'Đang đối chiếu đa hướng…' : 'Đang giải chi tiết…'}</span>`;
-  statusEl.textContent = crossCheck ? 'ĐANG ĐỐI CHIẾU ĐA HƯỚNG…' : 'ĐANG GIẢI CHI TIẾT…';
+  btn.innerHTML = `<span class="typing"><span></span><span></span><span></span></span><span>${crossCheck ? t('chat.crossChecking') : t('chat.solvingDetail')}</span>`;
+  statusEl.textContent = crossCheck ? t('chat.statusCrossCheck') : t('chat.statusDetail');
 
   const preview = startStreamingPreview(contentEl);
-  if (crossCheck) preview.setStatus('Đang đối chiếu đa hướng…');
+  if (crossCheck) preview.setStatus(t('chat.crossChecking'));
 
-  chatAbortController = new AbortController();
-  setChatStreaming(true);
+  // PHẦN AJ/AK: chốt ngôn ngữ NGAY từ đầu (bản sao settings, không phải tham chiếu sống) + đăng ký
+  // task theo conversationId thực sự sở hữu msgObj (ownerConv), không phải conversation đang mở.
+  const settingsSnapshot = { ...state.settings };
+  const langLock = {
+    requestLanguage: settingsSnapshot.lang, uiLanguageAtStart: window.languageStore ? window.languageStore.getUILanguage() : null,
+    answerLanguage: settingsSnapshot.lang, explanationLanguage: settingsSnapshot.lang
+  };
+  const ctm = window.conversationTaskManager;
+  const taskHandle = (ctm && ownerConv) ? ctm.beginTask(ownerConv.id, { langLock }) : null;
+  if (taskHandle) await taskHandle.whenReady;
+  if (ownerConv) setChatStreaming(true, ownerConv.id);
   try {
-    const data = await apiPostStream('/api/chat', {
+    const data = await streamViaProviderRouter('/api/chat', {
       query: msgObj.query, deepThinking, crossCheck, stage: 'detail', approachText: msgObj.approach,
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
-      rules: state.rules, contexts: msgObj.contexts, settings: state.settings, history: state.history
+      rules: state.rules, contexts: msgObj.contexts, settings: settingsSnapshot, history: state.history
     }, {
-      onDelta: (piece) => { preview.append(piece); threadEl.scrollTop = threadEl.scrollHeight; },
-      onStatus: (msg, st) => preview.setStatus(msg, st),
-      signal: chatAbortController.signal
+      onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); threadEl.scrollTop = threadEl.scrollHeight; },
+      onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
+      signal: taskHandle ? taskHandle.signal : undefined
     });
-    const rawFull = data.text || preview.getText() || 'Xin lỗi, không nhận được phản hồi. Vui lòng thử lại.';
+    if (taskHandle) ctm.completeTask(taskHandle.task.requestId, data);
+    const rawFull = data.text || preview.getText() || t('chat.noResponse');
     // Tách dòng "🌐 ..." (đánh dấu có dùng web bổ sung — chỉ có thể xảy ra ở chế độ "Đối chiếu đa
     // hướng", nơi lượt tổng hợp được cấp công cụ web search) ra khỏi nội dung chính, lưu riêng
     // (msgObj.detailWebNote) để hiển thị TÁCH BIỆT khỏi nguồn tài liệu — xem renderCitations().
@@ -2581,6 +2756,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
     msgObj.providers = Array.isArray(data.providers) ? data.providers : null;
     msgObj.reconciledBy = data.reconciledBy || null;
     msgObj.provider = data.provider || null;
+    msgObj.detailCitationMap = Array.isArray(data.citationMap) ? data.citationMap : null;
     msgObj.detailPartial = !!data.partial;
     msgObj.detailIncompleteReasons = Array.isArray(data.incompleteReasons) ? data.incompleteReasons : [];
     // Cập nhật lại subject sau bước "giải chi tiết" (có thể chính xác hơn approach, đặc biệt khi
@@ -2604,24 +2780,25 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
     if (state.history.length > 20) state.history = state.history.slice(-20);
     if (pendingTurn && pendingTurn.msgObj === msgObj) pendingTurn = null;
 
-    const conv = currentConversation();
-    if (conv) touchConversation(conv);
+    // FIX PHẦN G: dùng ownerConv (chốt từ đầu hàm) thay vì currentConversation() đọc lại sau await.
+    if (ownerConv) touchConversation(ownerConv);
   } catch (e) {
+    if (taskHandle) ctm.failTask(taskHandle.task.requestId, e);
     preview.wrap.remove();
     btn.disabled = false;
     // mục 4: người dùng chủ động bấm "Dừng" — không phải lỗi thật, tránh alert() gây khó chịu.
     if (isCancelledError(e)) {
-      btn.innerHTML = `${ICONS.compass}<span>Xem cách giải chi tiết</span>`;
+      btn.innerHTML = `${ICONS.compass}<span>${escapeHtml(t('chat.detailBtn'))}</span>`;
       console.info('Chat request cancelled by user.');
     } else {
-      btn.innerHTML = `${ICONS.compass}<span>Xem cách giải chi tiết (thử lại)</span>`;
-      alert((e && e.message) || 'Không lấy được lời giải chi tiết, vui lòng thử lại.');
+      btn.innerHTML = `${ICONS.compass}<span>${escapeHtml(t('chat.detailBtnRetry'))}</span>`;
+      alert((e && e.message) || t('error.detailFailed'));
       console.error(e);
     }
   } finally {
-    chatAbortController = null;
-    setChatStreaming(false);
-    statusEl.textContent = 'SẴN SÀNG';
+    if (ownerConv) setChatStreaming(false, ownerConv.id);
+    if (!currentConversation() || (ownerConv && currentConversation().id !== ownerConv.id)) renderHistoryList();
+    statusEl.textContent = t('chat.statusReady');
     threadEl.scrollTop = threadEl.scrollHeight;
   }
 }
@@ -2667,7 +2844,7 @@ async function handleOutlineOnlyTurn(query, conv) {
     contentEl.innerHTML = `
       <div class="gen-error-card">
         <p class="gen-error-text">⚠️ ${escapeHtml(msg)}</p>
-        <button class="gen-error-retry" type="button">${ICONS.refresh}<span>Thử lại</span></button>
+        <button class="gen-error-retry" type="button">${ICONS.refresh}<span>${escapeHtml(t('chat.retry'))}</span></button>
       </div>`;
     contentEl.querySelector('.gen-error-retry').onclick = () => {
       aiRow.remove();
@@ -2678,7 +2855,7 @@ async function handleOutlineOnlyTurn(query, conv) {
     console.error(e);
   } finally {
     el('sendBtn').disabled = false;
-    statusEl.textContent = 'SẴN SÀNG';
+    statusEl.textContent = t('chat.statusReady');
     threadEl.scrollTop = threadEl.scrollHeight;
   }
 }
@@ -3754,7 +3931,7 @@ async function handleMindmapOnlyTurn(query, conv) {
     console.error(e);
   } finally {
     el('sendBtn').disabled = false;
-    statusEl.textContent = 'SẴN SÀNG';
+    statusEl.textContent = t('chat.statusReady');
     threadEl.scrollTop = threadEl.scrollHeight;
   }
 }

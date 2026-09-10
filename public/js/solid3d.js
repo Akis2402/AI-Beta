@@ -325,8 +325,10 @@ function drawSolid3D(container, spec) {
 
   const hint = document.createElement('div');
   hint.className = 'draw-legend';
-  hint.textContent = '🖱️ Kéo để xoay · cuộn để phóng to/thu nhỏ mô hình 3D';
+  hint.textContent = window.t ? window.t('scene3d.hint') : '🖱️ Kéo để xoay · cuộn để phóng to/thu nhỏ mô hình 3D';
   container.appendChild(hint);
 }
 
 window.drawSolid3D = drawSolid3D;
+// PHẦN M (scene3d.js): cho phép scene3d.js tái dùng logic dựng geometry khối rắn thay vì trùng lặp.
+window.buildPrimitiveGeometryAndVertices = buildPrimitiveGeometryAndVertices;

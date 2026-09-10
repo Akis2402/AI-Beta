@@ -213,6 +213,9 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .hist-card.active{background:var(--sidebar-2);border-color:var(--sidebar-rule);box-shadow:inset 2px 0 0 var(--primary);}
 .hist-main{flex:1;min-width:0;}
 .hist-title{font-size:12.5px;color:var(--sidebar-text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* PHẦN F/H: chấm nhấp nháy báo conversation khác đang sinh câu trả lời ở NỀN */
+.hist-generating-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--primary);margin-right:5px;animation:hist-pulse 1.2s ease-in-out infinite;vertical-align:middle;}
+@keyframes hist-pulse{0%,100%{opacity:.35;}50%{opacity:1;}}
 .hist-meta{font-size:10.5px;color:var(--sidebar-muted);margin-top:2px;font-family:var(--font-mono);letter-spacing:0;}
 .hist-del{background:none;border:none;color:var(--sidebar-muted);cursor:pointer;padding:4px;flex-shrink:0;border-radius:var(--r-sm);}
 .hist-del svg{width:14px;height:14px;display:block;}
@@ -542,6 +545,14 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .draw-wrap-3d{padding:12px;text-align:center;}
 .draw-wrap-3d canvas{border-radius:var(--r-sm);}
 .draw-wrap-3d .draw-legend{font-size:11px;color:var(--muted);}
+/* PHẦN P — scene3d.js: toolbar tương tác 0-AI-request (orbit/zoom/pan/axes/grid/fit/fullscreen) */
+.scene3d-wrap{padding:10px;}
+.scene3d-toolbar{display:flex;gap:6px;justify-content:flex-end;margin-bottom:6px;flex-wrap:wrap;}
+.scene3d-btn{border:1px solid var(--rule);background:var(--paper);border-radius:var(--r-sm);padding:4px 9px;font-size:13px;cursor:pointer;color:var(--text);}
+.scene3d-btn:hover{background:var(--paper-3);}
+.scene3d-canvas-host{width:100%;display:flex;justify-content:center;}
+.scene3d-canvas-host canvas{border-radius:var(--r-sm);max-width:100%;}
+.scene3d-fallback{padding:10px;border:1px dashed var(--rule);border-radius:var(--r-sm);background:var(--paper-3);}
 
 /* ---------- Hai giai đoạn: Hướng giải -> Lời giải chi tiết ---------- */
 .stage-block{position:relative;}
