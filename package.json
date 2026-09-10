@@ -4,14 +4,18 @@
   "private": true,
   "description": "Trợ Giải — AI học tập (full-stack): frontend tĩnh + backend Node/Express proxy bảo mật cho Anthropic API",
   "main": "server/index.js",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "build": "node scripts/build.js",
     "test": "node test/run-all.js",
     "smoke-test": "node scripts/smoke-test.js",
-    "check-static-assets": "node scripts/check-static-assets.js"
+    "check-static-assets": "node scripts/check-static-assets.js",
+    "live-smoke": "node scripts/live-smoke.js",
+    "measure-tokens": "node scripts/measure-tokens.js"
   },
   "dependencies": {
     "compression": "^1.7.4",
