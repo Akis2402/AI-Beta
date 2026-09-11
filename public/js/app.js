@@ -352,6 +352,8 @@ function loadAll() {
   // ghi chú -> đúng câu trả lời và cuộn tới đúng vị trí khi bấm vào ghi chú đã lưu).
   state.conversations.forEach((conv) => {
     (conv.messages || []).forEach((m) => { if (m.role === 'ai' && !m.id) m.id = uid(); });
+    // Mục 14.20 (migration): hội thoại cũ lưu trước khi có dominantSubjectId -> tính bù ngay lúc nạp.
+    if (!conv.dominantSubjectId) conv.dominantSubjectId = computeDominantSubject(conv);
   });
   renderNotesList();
   renderFormulaSubjectTabs();
@@ -1732,7 +1734,34 @@ function deleteConversation(id) {
   }
 }
 
-function touchConversation(conv) { conv.updatedAt = Date.now(); saveConversations(); renderHistoryList(); }
+// Mục 14.20 — MÔN CHỦ ĐẠO của cả cuộc trò chuyện (không phải môn của 1 tin nhắn lẻ): tổng hợp
+// TOÀN BỘ tin nhắn AI trong hội thoại, mỗi tin nhắn đóng góp trọng số = subjectConfidence (môn phụ
+// secondarySubjectId đóng góp nửa trọng số) — môn có tổng điểm cao nhất được coi là môn chủ đạo.
+// Nhờ đó 1 cuộc hỏi-đáp được "xếp" đúng 1 môn lớn nhất thay vì mơ hồ khớp theo bất kỳ tin nhắn nào.
+function computeDominantSubject(conv) {
+  const scores = {};
+  (conv.messages || []).forEach((m) => {
+    if (m.role !== 'ai') return;
+    const w = m.subjectConfidence > 0 ? m.subjectConfidence : 0.5;
+    if (m.subjectId && m.subjectId !== 'general') scores[m.subjectId] = (scores[m.subjectId] || 0) + w;
+    if (m.secondarySubjectId && m.secondarySubjectId !== 'general') {
+      scores[m.secondarySubjectId] = (scores[m.secondarySubjectId] || 0) + w * 0.5;
+    }
+  });
+  const ids = Object.keys(scores);
+  if (!ids.length) return 'general';
+  return ids.reduce((best, id) => (scores[id] > scores[best] ? id : best), ids[0]);
+}
+
+// Mỗi lần hội thoại có cập nhật (sau khi hỏi/trả lời xong) -> tính lại NGAY môn chủ đạo và lưu
+// (14.20) trước khi ghi localStorage, để "Lịch sử" luôn tự động xếp đúng cuộc trò chuyện vào môn
+// liên quan lớn nhất mà không cần bước thủ công nào thêm.
+function touchConversation(conv) {
+  conv.updatedAt = Date.now();
+  conv.dominantSubjectId = computeDominantSubject(conv);
+  saveConversations();
+  renderHistoryList();
+}
 
 function timeAgo(ts) {
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -1747,11 +1776,11 @@ function renderHistoryList() {
   const ul = el('historyList');
   const filterVal = state.historyFilterSubject || 'all';
   let sorted = [...state.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
-  // Mục 14.16: lọc theo subjectId gắn ở TỪNG tin nhắn AI (msg.subjectId) — 1 cuộc trò chuyện có thể
-  // chứa nhiều môn (14.7); "match" nghĩa là có ÍT NHẤT 1 tin nhắn thuộc đúng môn đang lọc.
+  // Mục 14.20: lọc theo MÔN CHỦ ĐẠO (dominantSubjectId — xem computeDominantSubject) của cả hội
+  // thoại, không còn khớp "có ít nhất 1 tin nhắn" như trước (14.16 cũ) — mỗi hội thoại giờ thuộc
+  // đúng 1 danh mục lớn nhất, tránh lẫn vào nhiều môn không liên quan chính.
   if (filterVal !== 'all') {
-    sorted = sorted.filter((conv) => (conv.messages || []).some((m) =>
-      m.role === 'ai' && (m.subjectId === filterVal || m.secondarySubjectId === filterVal)));
+    sorted = sorted.filter((conv) => (conv.dominantSubjectId || computeDominantSubject(conv)) === filterVal);
   }
   el('historyEmpty').style.display = sorted.length ? 'none' : 'block';
   ul.innerHTML = '';
@@ -1761,9 +1790,14 @@ function renderHistoryList() {
     // PHẦN F/H: badge "đang chạy nền" cho MỌI conversation có task active — không chỉ conv đang mở.
     const isBgGenerating = conv.id !== state.currentConvId && window.conversationTaskManager && window.conversationTaskManager.isGenerating(conv.id);
     const genBadge = isBgGenerating ? `<span class="hist-generating-dot" title="${window.t ? window.t('chat.generating') : 'Đang trả lời...'}"></span>` : '';
+    // Mục 14.20: icon môn chủ đạo ngay cạnh tiêu đề, để thấy ngay hội thoại này đã được "xếp" vào
+    // danh mục nào mà không cần mở dropdown lọc.
+    const domSubj = conv.dominantSubjectId || computeDominantSubject(conv);
+    const domInfo = domSubj !== 'general' && window.getSubjectInfo ? window.getSubjectInfo(domSubj) : null;
+    const domIcon = domInfo ? `<span class="hist-subject-ic" title="${escapeHtml(domInfo.name)}">${domInfo.icon}</span>` : '';
     li.innerHTML = `
       <div class="hist-main">
-        <div class="hist-title">${genBadge}${(conv.title || t('chat.newChatTitle')).replace(/</g, '&lt;')}</div>
+        <div class="hist-title">${genBadge}${domIcon}${(conv.title || t('chat.newChatTitle')).replace(/</g, '&lt;')}</div>
         <div class="hist-meta">${escapeHtml(t('chat.messages', { n: conv.messages.length }))} · ${timeAgo(conv.updatedAt)}</div>
       </div>
       <button class="hist-del" title="${escapeHtml(t('history.deleteChat'))}">${ICONS.trash}</button>
