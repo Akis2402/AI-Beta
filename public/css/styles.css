@@ -1214,3 +1214,32 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
   font-size: 0.92em;
   line-height: 1.5;
 }
+
+
+/* ================= PHẦN 20/21 — Hình minh họa do AI tự quyết định tạo ================= */
+/* Hình là phần BỔ SUNG cho lời giải: không bao giờ chiếm chỗ của văn bản, và khi không có hình
+   thì bố cục câu trả lời không đổi một pixel nào. */
+.visual-figure {
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--card, transparent);
+}
+.visual-figure .visual-svg { color: var(--fg); line-height: 0; }
+.visual-figure .visual-svg svg { max-width: 100%; height: auto; }
+.visual-figure .visual-img { display: block; max-width: 100%; height: auto; border-radius: 8px; }
+.visual-figure figcaption {
+  margin-top: 8px;
+  font-size: 12.5px;
+  opacity: 0.72;
+  text-align: center;
+  line-height: 1.45;
+}
+.visual-note {
+  margin: 12px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--rule);
+  font-size: 12.5px;
+  opacity: 0.7;
+}

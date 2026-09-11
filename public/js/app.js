@@ -91,7 +91,8 @@ const state = {
   deepThinking: false,     // "Suy nghĩ sâu" — AI tự phản biện/kiểm tra lại trong khối <thinking> nội bộ
   crossCheck: false,       // "Đối chiếu đa hướng" — giải 2 hướng độc lập rồi tổng hợp (chỉ áp dụng ở bước giải chi tiết)
   formulaSubject: 'toan',
-  settings: { detail: 'tiêu chuẩn', lang: 'Tiếng Việt', school: 'thpt', grade: '10', subject: 'auto' },
+  // PHẦN 27: `visual` = chế độ hình minh hoạ ('auto' | 'always' | 'never'). Mặc định 'auto'.
+  settings: { detail: 'tiêu chuẩn', lang: 'Tiếng Việt', school: 'thpt', grade: '10', subject: 'auto', visual: 'auto' },
   historyFilterSubject: 'all',
   // Thư viện flashcard đã lưu — {id, topic, cards:[{q,a}], createdAt}. Bộ thẻ VỪA tạo (chưa đóng
   // khung/quay lại danh sách) được giữ tạm ở activeFlashcardSet, chỉ chuyển vào flashcardSets (và
@@ -250,6 +251,18 @@ async function apiPostStream(path, body, { onDelta, onStatus, signal } = {}) {
       // client XOÁ SẠCH toàn bộ phần đã stream (có thể là 90% một lời giải dài đúng) — hành vi tệ
       // nhất có thể, và chính là thứ người dùng nhìn thấy khi câu trả lời dài bị ngắt giữa chừng.
       else if (currentEvent === 'done') doneData = payload;
+      // ---------- PHẦN 21: kênh SỰ KIỆN RIÊNG cho hình minh hoạ ----------
+      // Server gửi "done" NGAY khi text xong (kèm visualPending), rồi mới gửi visual:ready/error.
+      // Vì vậy vòng đọc vẫn tiếp tục sau "done" và ta gộp hình vào doneData trước khi trả về.
+      // Ảnh lỗi TUYỆT ĐỐI không được biến câu trả lời thành lỗi (PHẦN 20/32).
+      else if (currentEvent === 'visual:pending') { if (typeof onStatus === 'function') onStatus(t('chat.visualPending'), lastKnownState); }
+      else if (currentEvent === 'visual:ready') {
+        if (!doneData) doneData = {};
+        if (!Array.isArray(doneData.visuals)) doneData.visuals = [];
+        doneData.visuals.push(payload);
+        doneData.visualStatus = 'ready';
+      }
+      else if (currentEvent === 'visual:error') { if (doneData) { doneData.visualStatus = 'failed'; doneData.visualError = payload.reason || null; } }
       // PHẦN AF/AG: sự kiện error qua SSE cũng mang `code` ổn định — ưu tiên dịch theo code, chỉ
       // dùng payload.message làm phương án cuối (code lạ/backend cũ chưa gửi code).
       else if (currentEvent === 'error') {
@@ -362,6 +375,7 @@ function loadAll() {
   // Mục 1 — migration: localStorage cũ có thể còn giá trị 'rất chi tiết' (đã bị loại khỏi UI/server).
   // Migrate ngay khi load để applySettingsUI() không cố highlight 1 chip không còn tồn tại, và mọi
   // request sau đó gửi đúng giá trị hợp lệ (server validators.js vẫn tự migrate lần nữa cho chắc).
+  if (!['auto', 'always', 'never'].includes(state.settings.visual)) state.settings.visual = 'auto';
   if (state.settings.detail !== 'ngắn gọn' && state.settings.detail !== 'tiêu chuẩn') {
     state.settings.detail = 'tiêu chuẩn';
     lsSet(LS_KEYS.settings, state.settings);
@@ -562,6 +576,7 @@ el('practiceStartBtn').onclick = () => {
 
 function applySettingsUI() {
   document.querySelectorAll('#detailChips .chip').forEach((c) => c.classList.toggle('active', c.dataset.val === state.settings.detail));
+  document.querySelectorAll('#visualChips .chip').forEach((c) => c.classList.toggle('active', c.dataset.val === state.settings.visual));
   document.querySelectorAll('#langChips .chip').forEach((c) => c.classList.toggle('active', c.dataset.val === state.settings.lang));
   document.querySelectorAll('#schoolChips .chip').forEach((c) => c.classList.toggle('active', c.dataset.val === state.settings.school));
   renderGradeChips();
@@ -580,6 +595,7 @@ function updateGradeBadge() {
   badgeEl.style.display = text ? '' : 'none';
 }
 document.querySelectorAll('#detailChips .chip').forEach((c) => c.onclick = () => { state.settings.detail = c.dataset.val; applySettingsUI(); lsSet(LS_KEYS.settings, state.settings); });
+document.querySelectorAll('#visualChips .chip').forEach((c) => c.onclick = () => { state.settings.visual = c.dataset.val; applySettingsUI(); lsSet(LS_KEYS.settings, state.settings); });
 // PHẦN T/U/AH: đổi ngôn ngữ TRẢ LỜI (settings.lang, cơ chế cũ) đồng thời đồng bộ languageStore —
 // nguồn ngôn ngữ UI trung tâm — để toàn bộ giao diện (qua t()) chuyển theo NGAY, không cần reload.
 document.querySelectorAll('#langChips .chip').forEach((c) => c.onclick = () => {
@@ -2372,6 +2388,52 @@ function renderPartialWarning(container, data) {
   container.appendChild(box);
 }
 
+/**
+ * renderVisuals() — gắn hình minh hoạ (SVG dựng sẵn ở server hoặc ảnh sinh) vào 1 khối câu trả lời.
+ *
+ * An toàn: server CHỈ gửi 2 dạng — `format:'svg'` (chuỗi SVG đã qua visualValidator, bị chặn
+ * script, thuộc tính on..., foreignObject ở tầng validate) và `format:'data_url'|'image_url'`.
+ * Ở client vẫn kiểm tra lại một lần nữa trước khi nhúng — không tin tuyệt đối vào payload mạng.
+ *
+ * PHẦN 32: `status==='failed'` KHÔNG BAO GIỜ hiển thị như lỗi câu trả lời — chỉ là 1 dòng ghi chú.
+ */
+function renderVisuals(container, visuals, status) {
+  if (status === 'failed') {
+    const note = document.createElement('div');
+    note.className = 'visual-note';
+    note.textContent = t('chat.visualFailed');
+    container.appendChild(note);
+    return;
+  }
+  if (!Array.isArray(visuals) || !visuals.length) return;
+  visuals.forEach((v) => {
+    if (!v) return;
+    const fig = document.createElement('figure');
+    fig.className = 'visual-figure';
+    if (v.format === 'svg' && typeof v.content === 'string') {
+      if (/<script|javascript:|\son\w+\s*=|<foreignObject/i.test(v.content)) return; // fail-safe, bỏ hình đáng ngờ
+      const holder = document.createElement('div');
+      holder.className = 'visual-svg';
+      holder.innerHTML = v.content;
+      fig.appendChild(holder);
+    } else if ((v.format === 'data_url' || v.format === 'image_url') && typeof v.url === 'string'
+      && /^(data:image\/|https:\/\/)/i.test(v.url)) {
+      const img = document.createElement('img');
+      img.className = 'visual-img';
+      img.loading = 'lazy';
+      img.alt = v.title || '';
+      img.src = v.url;
+      fig.appendChild(img);
+    } else return;
+    if (v.caption || v.title) {
+      const cap = document.createElement('figcaption');
+      cap.textContent = v.title ? (v.caption ? v.title + ' — ' + v.caption : v.title) : v.caption;
+      fig.appendChild(cap);
+    }
+    container.appendChild(fig);
+  });
+}
+
 function renderAnswerBlock(container, rawText) {
   const { thinking, answer, truncated } = extractThinking(rawText);
   if (thinking) {
@@ -2578,6 +2640,7 @@ function renderStoredAiMessage(msg) {
   approachWrap.className = 'stage-block stage-approach';
   contentEl.appendChild(approachWrap);
   renderAnswerBlock(approachWrap, msg.approach || '');
+  renderVisuals(approachWrap, msg.approachVisuals, msg.approachVisualStatus);
   renderCitations(approachWrap, msg.contexts, msg.query, msg.approach || '', msg.approachWebNote, msg.approachCitationMap);
 
   if (msg.detail) {
@@ -2610,6 +2673,7 @@ function appendDetailSection(contentEl, msg, aiRow) {
   detailWrap.className = 'stage-block stage-detail';
   contentEl.appendChild(detailWrap);
   const answerPlain = renderAnswerBlock(detailWrap, msg.detail || '');
+  renderVisuals(detailWrap, msg.detailVisuals, msg.detailVisualStatus);
   renderCitations(detailWrap, msg.contexts, msg.query, msg.detail || '', msg.detailWebNote, msg.detailCitationMap);
 
   if (msg.crossChecked) {
@@ -2789,6 +2853,8 @@ async function sendMessage() {
     aiMsgObj.subjectId = data.subjectId || 'general';
     aiMsgObj.subjectConfidence = Number.isFinite(data.subjectConfidence) ? data.subjectConfidence : 0;
     aiMsgObj.secondarySubjectId = data.secondarySubjectId || null;
+    aiMsgObj.approachVisuals = Array.isArray(data.visuals) ? data.visuals : [];
+    aiMsgObj.approachVisualStatus = data.visualStatus || null;
     setMsgSubjectBadge(aiRow, aiMsgObj.subjectId, aiMsgObj.subjectConfidence, aiMsgObj.secondarySubjectId);
     touchConversation(conv);
 
@@ -2797,6 +2863,7 @@ async function sendMessage() {
     approachWrap.className = 'stage-block stage-approach';
     contentEl.appendChild(approachWrap);
     renderAnswerBlock(approachWrap, raw);
+    renderVisuals(approachWrap, aiMsgObj.approachVisuals, aiMsgObj.approachVisualStatus);
     renderPartialWarning(approachWrap, data);
     renderCitations(approachWrap, contexts, query, raw, approachWebNote, data.citationMap);
     // Luôn hiển thị đủ các nút chức năng (Ghi chú/Flashcard/Mindmap) ngay từ giai đoạn
@@ -2914,6 +2981,9 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
     msgObj.provider = data.provider || null;
     msgObj.detailCitationMap = Array.isArray(data.citationMap) ? data.citationMap : null;
     msgObj.detailPartial = !!data.partial;
+    // PHẦN 20/32: hình chỉ là phần BỔ SUNG — không có/không tạo được thì lời giải vẫn đầy đủ.
+    msgObj.detailVisuals = Array.isArray(data.visuals) ? data.visuals : [];
+    msgObj.detailVisualStatus = data.visualStatus || null;
     msgObj.detailIncompleteReasons = Array.isArray(data.incompleteReasons) ? data.incompleteReasons : [];
     // Cập nhật lại subject sau bước "giải chi tiết" (có thể chính xác hơn approach, đặc biệt khi
     // approach chỉ có ảnh chưa detect được — xem resolveSubject() phía server).
