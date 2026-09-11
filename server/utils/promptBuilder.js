@@ -563,7 +563,7 @@ QUY TẮC BẮT BUỘC:
 // v6: siết lại chỉ thị "## Hướng giải" (stage=approach) — tối đa 5 gạch đầu dòng, mỗi gạch 1 câu
 // ngắn, không câu phụ — để hướng giải GỌN hơn nhưng vẫn giữ đủ ý khoa học (công thức/bước/điều
 // kiện). Thay đổi output rõ rệt so với v5 => bump để không trả nhầm hướng giải dài kiểu cũ từ cache.
-const PROMPT_VERSION = 'chat-prompt-v6';
+const PROMPT_VERSION = 'chat-prompt-v7'; // v7: approach compactness repair (mục II) + cross-check không còn cắt candidate theo risk (mục XII/XXII)
 
 module.exports = {
   citeNoRangeLabel,

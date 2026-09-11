@@ -17,6 +17,10 @@ const {
   PROMPT_VERSION
 } = require('../utils/promptBuilder');
 const { validateChatBody } = require('../utils/validators');
+// Mục II master spec: "Hướng giải" (approach) phải ngắn/compact, độc lập với "Lời giải" — validator
+// + repair NGẮN (KHÔNG regenerate toàn bộ, KHÔNG retry vô hạn) khi model lỡ sinh approach quá dài/
+// leak đáp số/tính toán chi tiết.
+const { validateApproachCompactness, buildApproachRepairPrompt, extractApproachSection } = require('../utils/approachValidator');
 const { normalizeError } = require('../utils/errorNormalize');
 const { calculateAdaptiveBudget } = require('../utils/adaptiveBudget');
 const { compressHistoryForBudget } = require('../utils/semanticCompression');
@@ -49,6 +53,43 @@ function candidatesAgree(candidates) {
   const answers = candidates.map((c) => normalizeAnswerString(extractFinalAnswer(c.text) || ''));
   if (answers.some((a) => !a)) return false;
   return answers.every((a) => a === answers[0]);
+}
+
+/**
+ * maybeRepairApproach() — mục II: chỉ chạy khi stageName === 'approach'. Validator thuần (không AI)
+ * kiểm tra compactness; nếu vi phạm, gửi ĐÚNG 1 lượt repair prompt NGẮN (system tối giản, chỉ đúng
+ * approachText cũ + yêu cầu viết lại phần "Hướng giải" gọn hơn) — KHÔNG regenerate toàn bộ
+ * conversation, KHÔNG retry nếu lượt repair đó lỗi/timeout (mục II cấm "retry vô hạn"). Nếu repair
+ * thất bại vì bất kỳ lý do gì, giữ nguyên bản gốc — không để lỗi ở bước tối ưu này làm hỏng câu trả
+ * lời chính đã có.
+ */
+async function maybeRepairApproach({ stageName, text, activeProviders, requestId, signal, deadline, reqLogger }) {
+  if (stageName !== 'approach' || !text) return text;
+  const check = validateApproachCompactness(extractApproachSection(text));
+  if (check.ok) return text;
+  try {
+    const repairPrompt = buildApproachRepairPrompt(text, check.violations);
+    const repaired = await callWithFailover(
+      activeProviders,
+      {
+        system: 'Bạn là trợ lý sửa định dạng câu trả lời — chỉ thực hiện đúng yêu cầu rút gọn được nêu, không thêm/bớt nội dung khoa học nào khác.',
+        messages: [{ role: 'user', content: repairPrompt }],
+        maxTokens: 900,
+        requestId,
+        signal
+      },
+      { deadline }
+    );
+    const repairedText = repaired && repaired.text ? repaired.text.trim() : '';
+    if (repairedText.length > 40) {
+      const recheck = validateApproachCompactness(extractApproachSection(repairedText));
+      if (reqLogger) reqLogger.log({ stage: 'approach_repair', violations: check.violations, repairOk: recheck.ok });
+      return repairedText;
+    }
+  } catch (e) {
+    if (reqLogger) reqLogger.log({ stage: 'approach_repair_failed', violations: check.violations, error: e && e.message });
+  }
+  return text; // repair thất bại/không đủ dài -> giữ bản gốc, không retry thêm lần nào nữa
 }
 
 /**
@@ -547,15 +588,10 @@ router.post('/', async (req, res, next) => {
           const system = systemPack.text;
           const variantSystem = system + buildVariantAddendum();
 
-          // PHẦN 10 FIX: crossCheckPolicy() nay THỰC SỰ điều khiển số candidate thu thập — trước đây
-          // được tính (dead code) nhưng route luôn gọi cứng CROSS_CHECK_MAX_CANDIDATES bất kể risk.
-          // Người dùng vẫn được tôn trọng lựa chọn bật "Đối chiếu đa hướng" (KHÔNG bỏ qua cross-check
-          // hoàn toàn — vẫn >= 2 candidate để có gì đó đối chiếu), chỉ risk LOW mới giảm từ 3 -> 2.
-          const ccPolicy = tokenEconomy.crossCheckPolicy({
-            problemClass: tePlan.classification.problemClass,
-            hasGeometryProof: tokenEconomy.detectGeometryProofHint(problemText)
-          });
-          const ccMaxCandidates = ccPolicy.risk === 'LOW' ? 2 : undefined; // undefined = giữ CROSS_CHECK_MAX_CANDIDATES mặc định
+          // Mục XII/XXII (spec token-compression v2): KHÔNG được giảm SỐ LƯỢNG candidate cross-check
+          // chỉ vì risk thấp — token saving CHỈ được đến từ nén representation/context, không phải
+          // giảm verification. Luôn dùng CROSS_CHECK_MAX_CANDIDATES mặc định (>=2, tôn trọng lựa
+          // chọn "Đối chiếu đa hướng" của người dùng đầy đủ, mọi problemClass).
 
           sseWrite(res, 'status', { message: 'Đang đối chiếu đa hướng…' });
 
@@ -573,7 +609,6 @@ router.post('/', async (req, res, next) => {
               onStatus: (message) => sseWrite(res, 'status', { message }),
               deadline: globalDeadline, // mục 4/6: dùng chung 1 đồng hồ với toàn bộ request, không tự tạo riêng
               requireVision: !!input.image,
-              ...(ccMaxCandidates ? { maxCandidates: ccMaxCandidates } : {}),
               signal
             });
             candidates = gathered.candidates;
@@ -754,7 +789,7 @@ router.post('/', async (req, res, next) => {
           isDisconnected: () => disconnected
         });
 
-        const full = directRun.text;
+        let full = directRun.text;
         const completeness = directRun.completeness;
         const continuations = directRun.continuations;
         const provider = directRun.provider || { label: 'unknown' };
@@ -776,6 +811,12 @@ router.post('/', async (req, res, next) => {
           });
           return res.end();
         }
+
+        // Mục II: chỉ áp dụng cho stage 'approach' — repair NGẮN nếu vi phạm compactness contract.
+        full = await maybeRepairApproach({
+          stageName: directStageName, text: full, activeProviders,
+          requestId: reqLogger.requestId, signal, deadline: globalDeadline, reqLogger
+        });
 
         const directDonePayload = {
           ...subjectPayload,
@@ -835,19 +876,13 @@ router.post('/', async (req, res, next) => {
       const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
       const variantSystem = system + buildVariantAddendum();
 
-      // PHẦN 10 FIX: xem giải thích đầy đủ ở nhánh streaming phía trên — cùng logic, cùng lý do.
-      const ccPolicy = tokenEconomy.crossCheckPolicy({
-        problemClass: tePlan.classification.problemClass,
-        hasGeometryProof: tokenEconomy.detectGeometryProofHint(problemText)
-      });
-      const ccMaxCandidates = ccPolicy.risk === 'LOW' ? 2 : undefined;
-
+      // Mục XII/XXII: xem giải thích đầy đủ ở nhánh streaming phía trên — không giảm số candidate
+      // theo risk, luôn dùng CROSS_CHECK_MAX_CANDIDATES mặc định.
       const { candidates } = await gatherCrossCheckCandidates(activeProviders, {
         system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget, requestId: reqLogger.requestId,
         deepThinking: input.deepThinking,
         deadline: globalDeadline, // mục 4/6
         requireVision: !!input.image,
-        ...(ccMaxCandidates ? { maxCandidates: ccMaxCandidates } : {}),
         signal
       });
 
@@ -958,7 +993,7 @@ router.post('/', async (req, res, next) => {
       reserveState: jsonDirectReserveState, deadline: globalDeadline,
       recalcTarget: () => budgetOf(input.stage === 'approach' ? 'approach' : 'detail').target
     });
-    const { text, completeness, continuations, provider, partial: directJsonPartial } = await ensureCompleteNonStream(
+    let { text, completeness, continuations, provider, partial: directJsonPartial } = await ensureCompleteNonStream(
       (msgs, _currentCompleteness, grantedMaxTokens) => directCaller(
         activeProviders,
         { system, messages: msgs, maxTokens: grantedMaxTokens, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
@@ -977,6 +1012,12 @@ router.post('/', async (req, res, next) => {
 
     // mục 4: xem giải thích ở nhánh cross-check JSON phía trên — cùng lý do.
     if (disconnected) return;
+
+    // Mục II: repair NGẮN cho stage 'approach' nếu vi phạm compactness contract (xem streaming ở trên).
+    text = await maybeRepairApproach({
+      stageName: input.stage === 'approach' ? 'approach' : 'detail', text, activeProviders,
+      requestId: reqLogger.requestId, signal, deadline: globalDeadline, reqLogger
+    });
 
     // ensureCompleteNonStream() đã assertFinalResponseComplete() — chắc chắn COMPLETE tới đây.
     const finalJsonPayload = { ...subjectPayload, state: directJsonPartial ? STATES.PARTIAL : STATES.COMPLETED, partial: !!directJsonPartial, text, crossChecked: false, provider: provider.label, completeness: completeness.status, incompleteReasons: directJsonPartial ? (completeness.hardReasons || []) : [], citationValidation: completeness.citationValidation || null, continuations, citationMap: citationIndex.citationMap };
