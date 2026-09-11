@@ -354,7 +354,7 @@ NHIỆM VỤ Ở BƯỚC NÀY: người dùng CHƯA muốn lời giải chi ti�
 ${h.summary}
 Diễn đạt lại ngắn gọn đề bài và dữ kiện đã cho (2-4 câu). Nếu đề chưa rõ, nêu giả định hợp lý.
 ${h.approach}
-Nếu đề là bài hình học, chèn hình minh họa NGAY ĐẦU mục này (xem quy tắc bắt buộc bên dưới) trước khi liệt kê gạch đầu dòng. Sau đó liệt kê 3-6 gạch đầu dòng ngắn gọn: sẽ dùng công thức/định lý/phương pháp nào, các bước chính theo thứ tự, cần chú ý điều gì. TUYỆT ĐỐI KHÔNG thực hiện phép tính chi tiết, KHÔNG đưa ra đáp số cuối cùng — chỉ định hướng cách làm để người học có thể tự thử trước.
+Nếu đề là bài hình học, chèn hình minh họa NGAY ĐẦU mục này (xem quy tắc bắt buộc bên dưới) trước khi liệt kê gạch đầu dòng. Sau đó liệt kê TỐI ĐA 5 gạch đầu dòng, MỖI gạch đầu dòng CHỈ 1 CÂU NGẮN, KHÔNG câu phụ/diễn giải thêm: công thức/định lý/phương pháp sẽ dùng, thứ tự các bước chính, và điều kiện/lưu ý quan trọng không được bỏ sót (đơn vị, điều kiện xác định, trường hợp đặc biệt...). Ưu tiên GỌN — cắt hết từ thừa, không lặp ý, không giải thích lý do hiển nhiên — nhưng TUYỆT ĐỐI KHÔNG được lược bỏ một bước/điều kiện quan trọng nào chỉ để cho ngắn: gọn về CÂU CHỮ, không gọn về NỘI DUNG khoa học. TUYỆT ĐỐI KHÔNG thực hiện phép tính chi tiết, KHÔNG đưa ra đáp số cuối cùng — chỉ định hướng cách làm để người học có thể tự thử trước.
 ${FORMAT_INSTRUCTIONS}
 ${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false })}${drawingNeeded ? buildDrawInstructions({ stageLabel: 'hướng giải' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${contextBlock}`;
   }
@@ -560,7 +560,10 @@ QUY TẮC BẮT BUỘC:
 // ngôn ngữ Answer/Explanation — PHẦN Y) và schema `scene3d`/`scenepatch` vào DRAW_SCHEMA. Cả 2 đều
 // làm output khác đi rõ rệt so với v4 => BẮT BUỘC bump, nếu không request đầu tiên sau khi deploy có
 // thể nhận lại đúng câu trả lời cũ (bị trộn ngôn ngữ) đã cache từ phiên bản prompt trước.
-const PROMPT_VERSION = 'chat-prompt-v5';
+// v6: siết lại chỉ thị "## Hướng giải" (stage=approach) — tối đa 5 gạch đầu dòng, mỗi gạch 1 câu
+// ngắn, không câu phụ — để hướng giải GỌN hơn nhưng vẫn giữ đủ ý khoa học (công thức/bước/điều
+// kiện). Thay đổi output rõ rệt so với v5 => bump để không trả nhầm hướng giải dài kiểu cũ từ cache.
+const PROMPT_VERSION = 'chat-prompt-v6';
 
 module.exports = {
   citeNoRangeLabel,
