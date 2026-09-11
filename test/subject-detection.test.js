@@ -169,7 +169,7 @@ test('20. PROMPT_VERSION đã bump khi thêm subject directive (tránh dùng nh�
   // ghi chú tại PROMPT_VERSION trong promptBuilder.js. Ý nghĩa của test này KHÔNG đổi: version phải
   // được bump mỗi khi cấu trúc/nội dung prompt thay đổi đủ để làm output khác đi, nếu không cache
   // L1 cũ bị dùng nhầm.
-  assert.strictEqual(PROMPT_VERSION, 'chat-prompt-v6');
+  assert.strictEqual(PROMPT_VERSION, 'chat-prompt-v7');
 });
 
 // ---------- getSubject fallback ----------

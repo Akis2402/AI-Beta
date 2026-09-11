@@ -1,11 +1,14 @@
 'use strict';
 
-// ---------- REGRESSION: CROSS-CHECK DỰA TRÊN RISK (mục PHẦN 10) ----------
-// BUG GỐC: crossCheckPolicy() được viết sẵn nhưng KHÔNG BAO GIỜ được gọi trong chat.js — mọi request
-// bật input.crossCheck=true đều gather đúng CROSS_CHECK_MAX_CANDIDATES (mặc định 3) candidate bất kể
-// bài dễ hay khó. FIX: risk=LOW (bài đơn giản, không hình học/không phức tạp) giảm còn 2 candidate —
-// vẫn tôn trọng lựa chọn bật cross-check của người dùng (KHÔNG bỏ qua hoàn toàn), risk MEDIUM/HIGH
-// giữ nguyên hành vi cũ (không giảm khi thực sự cần — geometry proof, bài phức tạp).
+// ---------- REGRESSION: CROSS-CHECK KHÔNG ĐƯỢC GIẢM SỐ CANDIDATE THEO RISK ----------
+// LỊCH SỬ: bản trước dùng crossCheckPolicy() để giảm candidate risk=LOW từ 3 xuống 2 nhằm tiết kiệm
+// token. Yêu cầu spec mới (mục XII/XXII "token-compression v2") CẤM việc này: "Không giảm số lượng
+// verification chỉ vì token" — LOW risk vẫn phải cross-check ĐẦY ĐỦ số candidate mặc định, token
+// saving chỉ được đến từ nén representation/context, không phải cắt bớt số lượt gọi verify.
+// FIX: chat.js không còn gọi crossCheckPolicy() để suy ra maxCandidates nữa — luôn gather đúng
+// CROSS_CHECK_MAX_CANDIDATES mặc định khi input.crossCheck=true, bất kể problemClass/risk.
+// crossCheckPolicy()/detectGeometryProofHint() vẫn giữ trong tokenEconomy.js (hàm thuần, có thể tái
+// dùng sau này) — chỉ KHÔNG còn được dùng để cắt candidate.
 
 const fs = require('fs');
 const path = require('path');
@@ -21,7 +24,7 @@ function test(name, fn) {
 const chatSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'chat.js'), 'utf8');
 const aiProvidersSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'utils', 'aiProviders.js'), 'utf8');
 
-// ---------- Unit: crossCheckPolicy / detectGeometryProofHint ----------
+// ---------- Unit: crossCheckPolicy / detectGeometryProofHint (hàm thuần vẫn tồn tại, vẫn đúng) ----------
 test('MICRO/SHORT problem, không hình học -> risk LOW -> mode single', () => {
   const p = te.crossCheckPolicy({ problemClass: 'MICRO', hasGeometryProof: false });
   assert.strictEqual(p.risk, 'LOW');
@@ -40,36 +43,29 @@ test('detectGeometryProofHint() nhận diện đề bài chứng minh hình họ
   assert.strictEqual(te.detectGeometryProofHint('Tính 2 + 2 bằng bao nhiêu'), false);
 });
 
-// ---------- Static: chat.js thực sự gọi crossCheckPolicy() và truyền maxCandidates xuống ----------
-test('chat.js gọi tokenEconomy.crossCheckPolicy() ở CẢ 2 nhánh (streaming + JSON), không còn dead code', () => {
-  const usages = (chatSrc.match(/tokenEconomy\.crossCheckPolicy\(/g) || []).length;
-  assert.strictEqual(usages, 2, `phải có đúng 2 lượt gọi crossCheckPolicy (streaming + JSON), thấy ${usages}`);
+// ---------- Static: chat.js KHÔNG được giảm candidate theo risk nữa (mục XII/XXII) ----------
+test('chat.js KHÔNG còn dùng crossCheckPolicy()/ccMaxCandidates để cắt số candidate', () => {
+  assert.ok(!/ccMaxCandidates/.test(chatSrc), 'ccMaxCandidates phải bị loại bỏ khỏi chat.js — không được cắt candidate theo risk');
+  assert.ok(!/tokenEconomy\.crossCheckPolicy\(/.test(chatSrc), 'chat.js không còn gọi crossCheckPolicy() để suy ra số candidate');
 });
 
-test('chat.js truyền maxCandidates xuống gatherCrossCheckCandidates khi risk LOW (giảm từ 3 xuống 2)', () => {
-  const usages = (chatSrc.match(/ccMaxCandidates = ccPolicy\.risk === 'LOW' \? 2 : undefined/g) || []).length;
-  assert.strictEqual(usages, 2, `phải có đúng 2 chỗ tính ccMaxCandidates theo risk (thấy ${usages})`);
+test('gatherCrossCheckCandidates() được gọi KHÔNG kèm maxCandidates ở cả 2 nhánh (dùng đủ mặc định)', () => {
+  const usages = (chatSrc.match(/gatherCrossCheckCandidates\(activeProviders, \{[\s\S]{0,400}?\}\)/g) || []);
+  assert.strictEqual(usages.length, 2, `phải có đúng 2 lượt gọi gatherCrossCheckCandidates (streaming + JSON), thấy ${usages.length}`);
+  usages.forEach((u) => assert.ok(!u.includes('maxCandidates'), 'không được truyền maxCandidates xuống — luôn dùng CROSS_CHECK_MAX_CANDIDATES mặc định'));
 });
 
-test('gatherCrossCheckCandidates() chấp nhận maxCandidates param thực sự ảnh hưởng số target gọi (không phải dead param)', () => {
-  assert.ok(aiProvidersSrc.includes('maxCandidates = CROSS_CHECK_MAX_CANDIDATES'), 'phải có default param maxCandidates');
-  assert.ok(aiProvidersSrc.includes('pickDiverseCandidates(eligibleInRotationOrder(providers, { requireVision }), Math.max(2, Math.min(maxCandidates, CROSS_CHECK_MAX_CANDIDATES)))'), 'round 1 phải dùng maxCandidates thực tế (kẹp trong [2, CROSS_CHECK_MAX_CANDIDATES]), không hardcode CROSS_CHECK_MAX_CANDIDATES cứng');
+test('gatherCrossCheckCandidates() vẫn nhận maxCandidates optional (API giữ nguyên cho nơi gọi khác/test), mặc định = CROSS_CHECK_MAX_CANDIDATES', () => {
+  assert.ok(aiProvidersSrc.includes('maxCandidates = CROSS_CHECK_MAX_CANDIDATES'), 'phải có default param maxCandidates = CROSS_CHECK_MAX_CANDIDATES');
 });
 
-test('risk MEDIUM/HIGH KHÔNG giảm candidate (giữ hành vi cross-check đầy đủ khi thực sự cần)', () => {
-  assert.strictEqual(te.crossCheckPolicy({ problemClass: 'STANDARD', hasGeometryProof: true }).risk, 'HIGH');
-  // ccMaxCandidates chỉ set khi risk === 'LOW' -> MEDIUM/HIGH giữ nguyên undefined -> CROSS_CHECK_MAX_CANDIDATES mặc định
-  const codeLines = chatSrc.split('\n').filter((l) => !l.trim().startsWith('//'));
-  assert.ok(codeLines.some((l) => l.includes("risk === 'LOW' ? 2 : undefined")), 'chỉ risk LOW mới giảm candidate, các mức khác giữ mặc định');
-});
-
-// ---------- Không bao giờ giảm dưới 2 (vẫn phải có gì đó để "đối chiếu") ----------
+// ---------- Không bao giờ giảm dưới 2 (an toàn kẹp sàn, dù hiện tại không còn nhánh nào truyền số nhỏ hơn mặc định) ----------
 test('gatherCrossCheckCandidates không bao giờ giảm dưới 2 candidate (Math.max(2, ...))', () => {
   assert.ok(aiProvidersSrc.includes('Math.max(2, Math.min(maxCandidates,'), 'phải kẹp sàn tối thiểu 2 candidate — không được bỏ hẳn cross-check khi user đã bật');
 });
 
 let passed = 0, failed = 0;
-console.log('\n== Regression: CROSS-CHECK DỰA TRÊN RISK, không chỉ toggle (mục PHẦN 10) ==');
+console.log('\n== Regression: CROSS-CHECK KHÔNG giảm số candidate theo risk (mục XII/XXII) ==');
 for (const r of results) {
   if (r.pass) { passed++; console.log('  ok  - ' + r.name); }
   else { failed++; console.log('  FAIL - ' + r.name + ' :: ' + r.error); }
