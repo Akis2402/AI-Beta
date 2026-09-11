@@ -256,7 +256,7 @@ function createOpenAICompatibleClient(config) {
         // vòng lặp là finish_reason của chunk cuối cùng.
         const fr = chunk.choices && chunk.choices[0] && chunk.choices[0].finish_reason;
         if (fr && meta) meta.finishReason = normalizeFinishReason(fr);
-        if (meta && evt.usage) meta.usage = { inputTokens: evt.usage.prompt_tokens, outputTokens: evt.usage.completion_tokens };
+        if (meta && chunk.usage) meta.usage = { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens };
       }
     } finally {
       linked.cleanup();

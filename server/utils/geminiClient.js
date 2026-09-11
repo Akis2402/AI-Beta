@@ -273,7 +273,7 @@ async function callGeminiStream({ system, messages, maxTokens = 1000, temperatur
       // mục 1: finishReason chỉ xuất hiện ở chunk CUỐI (khi model thực sự dừng) — ghi đè liên tục,
       // giá trị còn lại sau vòng lặp chính là finishReason của chunk cuối cùng nhận được.
       if (cand.finishReason && meta) meta.finishReason = normalizeFinishReason(cand.finishReason);
-      if (meta && obj.usageMetadata) meta.usage = { inputTokens: obj.usageMetadata.promptTokenCount, outputTokens: obj.usageMetadata.candidatesTokenCount };
+      if (meta && chunk.usageMetadata) meta.usage = { inputTokens: chunk.usageMetadata.promptTokenCount, outputTokens: chunk.usageMetadata.candidatesTokenCount };
     }
   } finally {
     linked.cleanup();
