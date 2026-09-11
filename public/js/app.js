@@ -8,6 +8,26 @@
 // nhưng không bấm được gì). Khai báo `el` làm dòng đầu tiên sau 'use strict' để loại bỏ hoàn toàn
 // khả năng này, bất kể thứ tự các đoạn code khác bên dưới có thay đổi ra sao trong tương lai.
 const el = (id) => document.getElementById(id);
+
+/* ================= Motion: scroll khung chat có "nhận thức" vị trí người dùng =================
+   TRƯỚC ĐÂY mọi lần có nội dung mới (kể cả từng mẩu nhỏ lúc AI streaming) đều ép threadEl nhảy
+   thẳng xuống cuối — nếu người dùng đang cuộn lên đọc lại tin nhắn cũ trong lúc AI (của 1 cuộc hội
+   thoại nền khác, hoặc chỉ đang đọc lại) vẫn tiếp tục sinh chữ, màn hình bị giật xuống liên tục.
+   Giờ: chỉ auto-scroll khi người dùng ĐANG THỰC SỰ ở gần đáy (near-bottom), trừ khi force=true
+   (hành động chủ động của chính người dùng, ví dụ vừa bấm gửi câu hỏi). */
+function isThreadNearBottom(threshold = 120) {
+  const t = threadElRef();
+  if (!t) return true;
+  return (t.scrollHeight - t.scrollTop - t.clientHeight) < threshold;
+}
+function scrollThreadToBottom(force) {
+  const t = threadElRef();
+  if (!t) return;
+  if (force || isThreadNearBottom()) t.scrollTop = t.scrollHeight;
+}
+// threadEl (biến toàn cục bên dưới) được khai báo sau điểm này trong file gốc — dùng hàm tra cứu
+// lười (lazy) để tránh lỗi "used before defined" khi đây là hàm được gọi về sau, không phải khi định nghĩa.
+function threadElRef() { return typeof threadEl !== 'undefined' ? threadEl : el('thread'); }
 // PHẦN W (an toàn khi nạp lỗi): app.js gọi t(...) ở rất nhiều chỗ. i18n.js được nạp TRƯỚC app.js
 // trong index.html nên window.t luôn có sẵn ở đường chạy bình thường — nhưng nếu vì lý do nào đó
 // i18n.js tải lỗi (mạng/CSP/content-blocker), mọi lần gọi t() sẽ ném ReferenceError và làm chết
@@ -416,13 +436,94 @@ function closeSidebarOnMobile() {
   if (window.innerWidth <= 760) { el('sidebar').classList.remove('open'); el('sidebarOverlay').classList.remove('show'); }
 }
 
-/* ================= Tabs khung bên trái: Nguồn / Lịch sử / Ghi chú / Công thức ================= */
-document.querySelectorAll('.sbtab').forEach((tab) => {
-  tab.onclick = () => {
+/* ================= Tabs khung bên trái: Nguồn / Lịch sử / Ghi chú / Công thức =================
+   Motion system nhỏ, gom lại 1 chỗ (không rải logic animation khắp file):
+   - positionTabIndicator(): đo offsetLeft/offsetWidth THẬT của tab active rồi set transform/width
+     cho 1 indicator dùng chung (không hard-code vị trí, không có 4 indicator riêng).
+   - animatePanelTransition(): panel cũ fade/slide ra trong lúc panel mới fade/slide vào, hướng
+     trượt (trái/phải) suy ra từ thứ tự tab để có cảm giác "đang di chuyển trong 1 dải điều hướng".
+   - initSidebarTabsMotion(): đặt indicator đúng vị trí khi tải trang (không animate) + theo dõi
+     resize bằng ResizeObserver (không đọc offsetLeft/offsetWidth liên tục trong loop animation). */
+(function initSidebarTabsMotion() {
+  const TAB_ORDER = ['sources', 'history', 'notes', 'formulas'];
+  const tabsWrap = el('sidebarTabs');
+  const indicator = el('sbTabIndicator');
+  const panelsWrap = el('sidebarPanels');
+  const PANEL_OFFSET_PX = 10;
+  if (!tabsWrap || !indicator || !panelsWrap) return; // an toàn nếu HTML thay đổi ngoài dự kiến
+
+  function positionTabIndicator(tab, animate) {
+    if (!tab) return;
+    if (!animate) indicator.classList.add('no-anim');
+    indicator.style.transform = `translateX(${tab.offsetLeft}px)`;
+    indicator.style.width = `${tab.offsetWidth}px`;
+    indicator.dataset.tab = tab.dataset.tab || '';
+    if (!animate) {
+      void indicator.offsetWidth; // ép reflow để bỏ transition không bị "nuốt" khung tiếp theo
+      indicator.classList.remove('no-anim');
+    }
+  }
+
+  function animatePanelTransition(toPanel, direction) {
+    if (!toPanel) return;
+    const fromPanel = panelsWrap.querySelector('.sbpanel.active');
+    if (fromPanel === toPanel) return;
+    const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduceMotion) {
+      if (fromPanel) fromPanel.classList.remove('active');
+      toPanel.classList.add('active');
+      return;
+    }
+    // Panel mới: đặt tức thời (không transition) về vị trí "bắt đầu" bên phải/trái rồi mới bật
+    // active ở khung hình sau để trượt mượt vào 0 — dữ liệu bên trong panel không hề bị động tới.
+    toPanel.classList.add('no-anim');
+    toPanel.style.setProperty('--panel-offset', `${direction * PANEL_OFFSET_PX}px`);
+    toPanel.classList.remove('active');
+    void toPanel.offsetWidth;
+    toPanel.classList.remove('no-anim');
+    if (fromPanel) {
+      fromPanel.style.setProperty('--panel-offset', `${-direction * PANEL_OFFSET_PX}px`);
+      fromPanel.classList.remove('active');
+    }
+    requestAnimationFrame(() => { toPanel.classList.add('active'); });
+  }
+
+  function activateSidebarTab(tab) {
+    if (!tab || tab.classList.contains('active')) return;
+    const prevTab = tabsWrap.querySelector('.sbtab.active');
+    const prevIndex = prevTab ? TAB_ORDER.indexOf(prevTab.dataset.tab) : 0;
+    const nextIndex = TAB_ORDER.indexOf(tab.dataset.tab);
+    const direction = nextIndex >= prevIndex ? 1 : -1;
+
     document.querySelectorAll('.sbtab').forEach((t) => t.classList.toggle('active', t === tab));
-    document.querySelectorAll('.sbpanel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + tab.dataset.tab));
-  };
-});
+    positionTabIndicator(tab, true);
+    animatePanelTransition(el('panel-' + tab.dataset.tab), direction);
+  }
+
+  document.querySelectorAll('.sbtab').forEach((tab) => {
+    tab.onclick = () => activateSidebarTab(tab);
+  });
+
+  // Đặt indicator đúng vị trí tab active đầu tiên ngay khi vào trang — không animate, không có
+  // hiệu ứng "chạy từ 0" gây cảm giác lỗi.
+  positionTabIndicator(tabsWrap.querySelector('.sbtab.active'), false);
+
+  // Resize/i18n đổi độ dài chữ → tab đổi kích thước → indicator phải bám theo, không lệch.
+  function handleTabResize() {
+    positionTabIndicator(tabsWrap.querySelector('.sbtab.active'), false);
+  }
+  if (typeof ResizeObserver !== 'undefined') {
+    let raf = null;
+    const ro = new ResizeObserver(() => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(handleTabResize);
+    });
+    ro.observe(tabsWrap);
+    document.querySelectorAll('.sbtab').forEach((t) => ro.observe(t));
+  } else {
+    window.addEventListener('resize', handleTabResize);
+  }
+})();
 
 /* ================= Settings modal ================= */
 function openSettings() { el('settingsOverlay').classList.add('show'); }
@@ -1466,7 +1567,7 @@ function addUserMsg(text, imageUrl, imageState) {
     bubble.appendChild(span);
   } else if (!text) { const span = document.createElement('span'); span.textContent = '📷 Đã gửi kèm ảnh đề bài'; bubble.appendChild(span); }
   if (text) { const span = document.createElement('span'); span.textContent = text; bubble.appendChild(span); }
-  threadEl.appendChild(row); threadEl.scrollTop = threadEl.scrollHeight;
+  threadEl.appendChild(row); scrollThreadToBottom(true);
 }
 
 // Khôi phục 1 ảnh đã lưu từ IndexedDB dựa trên imageId — trả về {mediaType, base64, url} sẵn sàng
@@ -1489,7 +1590,7 @@ function addAiMsg(labelText) {
   const row = document.createElement('div');
   row.className = 'msg-row msg-ai';
   row.innerHTML = `<div class="label">${labelText || 'Trợ Giải'}</div><div class="content"><span class="typing"><span></span><span></span><span></span></span></div>`;
-  threadEl.appendChild(row); threadEl.scrollTop = threadEl.scrollHeight;
+  threadEl.appendChild(row); scrollThreadToBottom();
   return row;
 }
 
@@ -1563,7 +1664,7 @@ function appendFileMessage(kind, fileName, blob, summaryHtml) {
     a.click();
     a.remove();
   };
-  threadEl.scrollTop = threadEl.scrollHeight;
+  scrollThreadToBottom();
   return row;
 }
 
@@ -1602,7 +1703,7 @@ function appendGenErrorMessage(label, message, retryFn) {
     row.remove(); // gỡ thẻ lỗi cũ — retryFn() tự thêm tin nhắn mới (thành công hoặc lỗi khác)
     await retryFn();
   };
-  threadEl.scrollTop = threadEl.scrollHeight;
+  scrollThreadToBottom();
   return row;
 }
 
@@ -1722,7 +1823,7 @@ async function loadConversation(id, silent) {
       else if (ev.type === 'done' || ev.type === 'error' || ev.type === 'cancelled') { detach(); }
     });
   }
-  threadEl.scrollTop = threadEl.scrollHeight;
+  scrollThreadToBottom();
   if (!silent) closeSidebarOnMobile();
 }
 
@@ -2190,7 +2291,7 @@ async function handleSimilarProblem(btn, wrapper, msgObj, answerText) {
       const input = el('qInput');
       input.value = data.problem || '';
       input.dispatchEvent(new Event('input'));
-      threadEl.scrollTop = threadEl.scrollHeight;
+      scrollThreadToBottom();
       sendMessage();
     };
   } catch (e) {
@@ -2617,7 +2718,7 @@ async function sendMessage() {
     touchConversation(conv);
     el('sendBtn').disabled = false;
     statusEl.textContent = t('chat.statusReady');
-    threadEl.scrollTop = threadEl.scrollHeight;
+    scrollThreadToBottom();
     return;
   }
 
@@ -2667,7 +2768,7 @@ async function sendMessage() {
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
       rules: state.rules, contexts, settings: settingsSnapshot, history: state.history
     }, {
-      onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); threadEl.scrollTop = threadEl.scrollHeight; },
+      onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
       signal: taskSignal
     });
@@ -2732,7 +2833,7 @@ async function sendMessage() {
     if (currentConversation() && currentConversation().id === conv.id) {
       el('sendBtn').disabled = false;
       statusEl.textContent = t('chat.statusReady');
-      threadEl.scrollTop = threadEl.scrollHeight;
+      scrollThreadToBottom();
     } else {
       renderHistoryList(); // PHẦN H: cập nhật badge "đang chạy nền"/thời gian cập nhật cho conv vừa xong ở nền
     }
@@ -2795,7 +2896,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
       rules: state.rules, contexts: msgObj.contexts, settings: settingsSnapshot, history: state.history
     }, {
-      onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); threadEl.scrollTop = threadEl.scrollHeight; },
+      onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
       signal: taskHandle ? taskHandle.signal : undefined
     });
@@ -2854,7 +2955,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
     if (ownerConv) setChatStreaming(false, ownerConv.id);
     if (!currentConversation() || (ownerConv && currentConversation().id !== ownerConv.id)) renderHistoryList();
     statusEl.textContent = t('chat.statusReady');
-    threadEl.scrollTop = threadEl.scrollHeight;
+    scrollThreadToBottom();
   }
 }
 
@@ -2911,7 +3012,7 @@ async function handleOutlineOnlyTurn(query, conv) {
   } finally {
     el('sendBtn').disabled = false;
     statusEl.textContent = t('chat.statusReady');
-    threadEl.scrollTop = threadEl.scrollHeight;
+    scrollThreadToBottom();
   }
 }
 
@@ -3987,7 +4088,7 @@ async function handleMindmapOnlyTurn(query, conv) {
   } finally {
     el('sendBtn').disabled = false;
     statusEl.textContent = t('chat.statusReady');
-    threadEl.scrollTop = threadEl.scrollHeight;
+    scrollThreadToBottom();
   }
 }
 
