@@ -214,20 +214,40 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 /* ---------- Lịch sử trò chuyện ---------- */
 .hist-card{
   display:flex;align-items:center;gap:9px;background:transparent;border:1px solid transparent;border-radius:var(--r-md);
-  padding:9px 10px;cursor:pointer;position:relative;overflow:hidden;transition:.15s;
+  padding:9px 10px;cursor:pointer;position:relative;overflow:hidden;
+  transition:background-color .18s var(--ease),border-color .18s var(--ease),box-shadow .18s var(--ease),transform .18s var(--ease);
+  /* Không dùng transform:translateZ để ép layer riêng — trên 1 số GPU Android việc rasterize text
+     trên layer tổng hợp rồi dịch chuyển khi cuộn gây hiện tượng chữ mờ/nhân đôi (bug đã fix ở JS:
+     hội thoại rỗng bị lưu trùng lặp). translate nhỏ dưới đây chỉ chạy ở trạng thái nghỉ, không
+     trong lúc cuộn, nên an toàn.
+     Vào khung hình nhẹ nhàng, so le theo thứ tự (biến --i do JS gán) — 1 nhịp duy nhất lúc danh
+     sách dựng lại, không lặp lại khi hover. */
+  animation:hist-card-in .32s var(--ease) both;
+  animation-delay:calc(var(--i, 0) * 18ms);
 }
-.hist-card:hover{background:var(--sidebar-2);}
+@keyframes hist-card-in{from{opacity:0;transform:translateY(4px) scale(.98);}to{opacity:1;transform:translateY(0) scale(1);}}
+.hist-card:hover{background:var(--sidebar-2);transform:translateX(1px);}
+.hist-card:active{transform:translateX(1px) scale(.985);}
 .hist-card.active{background:var(--sidebar-2);border-color:var(--sidebar-rule);box-shadow:inset 2px 0 0 var(--primary);}
+/* Vạch chỉ báo active trượt vào từ trái thay vì bật tắt đột ngột */
+.hist-card::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:2px;background:var(--primary);border-radius:2px;transform:scaleY(0);transform-origin:center;transition:transform .22s var(--ease);}
+.hist-card.active::before{transform:scaleY(1);}
+.hist-card.active{box-shadow:none;}
 .hist-main{flex:1;min-width:0;}
 .hist-title{font-size:12.5px;color:var(--sidebar-text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 /* PHẦN F/H: chấm nhấp nháy báo conversation khác đang sinh câu trả lời ở NỀN */
 .hist-generating-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--primary);margin-right:5px;animation:hist-pulse 1.2s ease-in-out infinite;vertical-align:middle;}
-.hist-subject-ic{margin-right:5px;}
-@keyframes hist-pulse{0%,100%{opacity:.35;}50%{opacity:1;}}
+.hist-subject-ic{margin-right:5px;display:inline-block;transition:transform .18s var(--ease);}
+.hist-card:hover .hist-subject-ic{transform:scale(1.12);}
+@keyframes hist-pulse{0%,100%{opacity:.35;transform:scale(1);}50%{opacity:1;transform:scale(1.15);}}
 .hist-meta{font-size:10.5px;color:var(--sidebar-muted);margin-top:2px;font-family:var(--font-mono);letter-spacing:0;}
-.hist-del{background:none;border:none;color:var(--sidebar-muted);cursor:pointer;padding:4px;flex-shrink:0;border-radius:var(--r-sm);}
+.hist-del{background:none;border:none;color:var(--sidebar-muted);cursor:pointer;padding:4px;flex-shrink:0;border-radius:var(--r-sm);opacity:0;transform:scale(.85);transition:opacity .15s var(--ease),transform .15s var(--ease),color .15s var(--ease),background-color .15s var(--ease);}
+.hist-card:hover .hist-del,.hist-card:focus-within .hist-del{opacity:1;transform:scale(1);}
 .hist-del svg{width:14px;height:14px;display:block;}
-.hist-del:hover{color:var(--danger);background:var(--danger-tint);}
+.hist-del:hover{color:var(--danger);background:var(--danger-tint);transform:scale(1.1);}
+.hist-del:active{transform:scale(.92);}
+/* Xoá 1 thẻ: co gọn mượt thay vì biến mất đột ngột (JS thêm .hist-card--leaving trước khi remove) */
+.hist-card.hist-card--leaving{animation:none;transition:opacity .18s var(--ease),transform .18s var(--ease),max-height .22s var(--ease) .05s,margin .22s var(--ease) .05s,padding .22s var(--ease) .05s;opacity:0;transform:translateX(-6px) scale(.97);max-height:0;margin:0;padding-top:0;padding-bottom:0;}
 
 /* ---------- Ghi chú ---------- */
 /* Ghi chú = trang vở kỹ thuật số: viền trái nổi bật khi hover + nâng nhẹ như giở 1 trang note */

@@ -348,6 +348,15 @@ function loadAll() {
   }
   applySettingsUI();
   state.conversations = lsGet(LS_KEYS.conversations, []);
+  // FIX (buổi học ma): startNewConversation() từng lưu ngay hội thoại RỖNG (0 tin nhắn) vào
+  // localStorage mỗi lần app khởi động không khớp savedCurrentId, hoặc mỗi lần bấm "Buổi học mới"
+  // mà không gõ gì — tích tụ hàng chục thẻ trùng tên "Buổi học mới" lấp đầy Lịch sử, đẩy hội thoại
+  // thật ra ngoài (trần MAX_STORED_CONVERSATIONS). Dọn 1 lần các hội thoại rỗng còn sót lại từ lỗi cũ.
+  const emptyConvCount = state.conversations.filter((c) => !c.messages || c.messages.length === 0).length;
+  if (emptyConvCount) {
+    state.conversations = state.conversations.filter((c) => c.messages && c.messages.length > 0);
+    lsSet(LS_KEYS.conversations, state.conversations);
+  }
   // Di chuyển dữ liệu cũ: gán id ổn định cho các tin nhắn AI chưa có (cần id này để liên kết
   // ghi chú -> đúng câu trả lời và cuộn tới đúng vị trí khi bấm vào ghi chú đã lưu).
   state.conversations.forEach((conv) => {
@@ -1604,7 +1613,10 @@ function currentConversation() {
   return state.conversations.find((c) => c.id === state.currentConvId) || null;
 }
 function saveConversations() {
-  lsSet(LS_KEYS.conversations, state.conversations);
+  // FIX: không ghi hội thoại rỗng (chưa có tin nhắn nào) xuống localStorage — hội thoại nháp mới
+  // tạo chỉ tồn tại trong bộ nhớ tới khi người dùng thật sự gửi câu hỏi đầu tiên. Ngăn "Buổi học
+  // mới" rỗng tích tụ trong Lịch sử mỗi lần mở app / bấm nút mà không gõ gì.
+  lsSet(LS_KEYS.conversations, state.conversations.filter((c) => c.messages && c.messages.length > 0));
   lsSet(LS_KEYS.currentConv, state.currentConvId);
   updateChatMeta();
 }
@@ -1775,7 +1787,9 @@ function timeAgo(ts) {
 function renderHistoryList() {
   const ul = el('historyList');
   const filterVal = state.historyFilterSubject || 'all';
-  let sorted = [...state.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+  // FIX: bỏ hội thoại nháp rỗng (đang gõ, chưa gửi câu hỏi nào) khỏi Lịch sử — tránh thẻ "Buổi
+  // học mới" ma xuất hiện ngay khi mở tab mới, trước khi người dùng kịp gõ gì.
+  let sorted = state.conversations.filter((c) => c.messages && c.messages.length > 0).sort((a, b) => b.updatedAt - a.updatedAt);
   // Mục 14.20: lọc theo MÔN CHỦ ĐẠO (dominantSubjectId — xem computeDominantSubject) của cả hội
   // thoại, không còn khớp "có ít nhất 1 tin nhắn" như trước (14.16 cũ) — mỗi hội thoại giờ thuộc
   // đúng 1 danh mục lớn nhất, tránh lẫn vào nhiều môn không liên quan chính.
@@ -1784,9 +1798,12 @@ function renderHistoryList() {
   }
   el('historyEmpty').style.display = sorted.length ? 'none' : 'block';
   ul.innerHTML = '';
-  sorted.forEach((conv) => {
+  sorted.forEach((conv, idx) => {
     const li = document.createElement('li');
     li.className = 'hist-card' + (conv.id === state.currentConvId ? ' active' : '');
+    // Vào khung hình so le nhẹ (xem @keyframes hist-card-in) — chỉ 8 thẻ đầu, tránh chờ lâu khi
+    // danh sách dài; các thẻ sau vào ngay cùng lúc.
+    li.style.setProperty('--i', Math.min(idx, 8));
     // PHẦN F/H: badge "đang chạy nền" cho MỌI conversation có task active — không chỉ conv đang mở.
     const isBgGenerating = conv.id !== state.currentConvId && window.conversationTaskManager && window.conversationTaskManager.isGenerating(conv.id);
     const genBadge = isBgGenerating ? `<span class="hist-generating-dot" title="${window.t ? window.t('chat.generating') : 'Đang trả lời...'}"></span>` : '';
@@ -1805,7 +1822,11 @@ function renderHistoryList() {
     li.querySelector('.hist-main').onclick = () => loadConversation(conv.id);
     li.querySelector('.hist-del').onclick = (e) => {
       e.stopPropagation();
-      if (confirm(t('history.deleteConfirm'))) deleteConversation(conv.id);
+      if (!confirm(t('history.deleteConfirm'))) return;
+      // Co gọn mượt trước khi xoá thật, thay vì biến mất đột ngột (xem .hist-card--leaving trong CSS).
+      li.classList.add('hist-card--leaving');
+      li.addEventListener('transitionend', () => deleteConversation(conv.id), { once: true });
+      setTimeout(() => { if (li.isConnected) deleteConversation(conv.id); }, 400); // an toàn nếu transitionend không bắn
     };
     ul.appendChild(li);
   });
