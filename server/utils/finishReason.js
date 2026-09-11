@@ -48,3 +48,66 @@ function finishReasonFromResponsesApi(data) {
 }
 
 module.exports = { normalizeFinishReason, finishReasonFromResponsesApi };
+
+// ============================================================================================
+// PHẦN 5 (spec mới) — FINISH REASON PHẢI PHẢN ÁNH NGUYÊN NHÂN THẬT
+// ============================================================================================
+// normalizeFinishReason() ở trên cố tình chỉ trả 3 giá trị ('stop'|'length'|'other') vì đó là thứ
+// completenessCheck/continuation cần để quyết định HARD/SOFT — KHÔNG đổi hợp đồng đó (mọi test cũ
+// so sánh trực tiếp 3 giá trị này).
+//
+// Nhưng telemetry/recovery cần biết CHÍNH XÁC vì sao lượt gọi kết thúc: hết token, hết thời gian,
+// bị người dùng hủy, provider lỗi, hay stream đứt sau khi đã phát delta. Trước đây mọi thứ không
+// phải 'stop'/'length' đều rơi vào 'other' -> recovery không phân biệt được "đổi provider" (stream
+// đứt) với "cấp thêm token" (hết max_tokens) với "dừng hẳn" (bị hủy).
+const FINISH = Object.freeze({
+  STOP: 'STOP',
+  MAX_TOKENS: 'MAX_TOKENS',
+  TIMEOUT: 'TIMEOUT',
+  ABORT: 'ABORT',
+  PROVIDER_ERROR: 'PROVIDER_ERROR',
+  STREAM_INTERRUPTED: 'STREAM_INTERRUPTED',
+  CONTENT_FILTER: 'CONTENT_FILTER',
+  UNKNOWN: 'UNKNOWN'
+});
+
+/**
+ * classifyFinish() — gộp MỌI tín hiệu sẵn có thành đúng 1 mã nguyên nhân.
+ * Thứ tự ưu tiên phản ánh độ TIN CẬY của tín hiệu: tín hiệu tầng vận chuyển (hủy/đứt kết nối) luôn
+ * thắng tín hiệu nội dung, vì khi stream đứt provider KHÔNG kịp gửi stop_reason nào cả.
+ *
+ * @param {{raw?:string, interrupted?:boolean, cancelled?:boolean, timedOut?:boolean,
+ *   error?:Error, producedText?:boolean}} sig
+ * @returns {string} một trong FINISH.*
+ */
+function classifyFinish(sig = {}) {
+  const { raw, interrupted, cancelled, timedOut, error, producedText } = sig;
+  if (cancelled) return FINISH.ABORT;
+  if (timedOut) return FINISH.TIMEOUT;
+  if (interrupted) return FINISH.STREAM_INTERRUPTED;
+  if (error) {
+    if (error.cancelled) return FINISH.ABORT;
+    if (error.status === 504 || /timeout|quá chậm/i.test(error.message || '')) return FINISH.TIMEOUT;
+    return producedText ? FINISH.STREAM_INTERRUPTED : FINISH.PROVIDER_ERROR;
+  }
+  const norm = normalizeFinishReason(raw);
+  if (norm === 'stop') return FINISH.STOP;
+  if (norm === 'length') return FINISH.MAX_TOKENS;
+  if (raw && /safety|content_filter|recitation|blocked/i.test(String(raw))) return FINISH.CONTENT_FILTER;
+  return raw ? FINISH.UNKNOWN : FINISH.UNKNOWN;
+}
+
+/** Nguyên nhân nào ĐÁNG tiếp tục bằng cách cấp thêm token (thay vì đổi provider/dừng hẳn). */
+function needsMoreTokens(code) { return code === FINISH.MAX_TOKENS; }
+/** Nguyên nhân nào ĐÁNG failover sang provider khác (giữ nguyên phần text đã có). */
+function needsFailover(code) {
+  return code === FINISH.STREAM_INTERRUPTED || code === FINISH.PROVIDER_ERROR || code === FINISH.TIMEOUT;
+}
+/** Nguyên nhân nào PHẢI dừng hẳn, không recovery. */
+function isTerminal(code) { return code === FINISH.ABORT; }
+
+module.exports.FINISH = FINISH;
+module.exports.classifyFinish = classifyFinish;
+module.exports.needsMoreTokens = needsMoreTokens;
+module.exports.needsFailover = needsFailover;
+module.exports.isTerminal = isTerminal;

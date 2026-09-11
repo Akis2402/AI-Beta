@@ -5,6 +5,43 @@ const { createLinkedAbort, makeCancelledError } = require('./abortLink');
 const { nativeThinkingBudget } = require('./thinkingRouter');
 const { normalizeFinishReason } = require('./finishReason');
 
+
+// ============================================================================================
+// PHẦN 1/2 ROOT-CAUSE FIX — `max_tokens` của Anthropic BAO GỒM CẢ thinking token
+// ============================================================================================
+// TRƯỚC ĐÂY: body.max_tokens = maxTokens (= coreBudget, tức 70% ngân sách đã tính) VÀ
+// thinking.budget_tokens = 0.6 * maxTokens. Phần văn bản NGƯỜI DÙNG ĐỌC chỉ còn 40% của 70%
+// = 28% ngân sách dự kiến -> model gần như LUÔN chạm max_tokens -> stop_reason='max_tokens' ->
+// completenessCheck gắn HARD 'finish_reason_length' -> recovery -> lượt recovery lại bị chia 60/40
+// tiếp -> reserve cạn -> lỗi "Câu trả lời chưa đầy đủ sau khi đã thử khôi phục".
+//
+// NAY: `maxTokens` có ngữ nghĩa DUY NHẤT là NGÂN SÁCH CHO VĂN BẢN HIỂN THỊ (answerBudget).
+// `reasoningBudget` (nếu caller truyền — xem budget/requestBudgetPlanner.js) được CỘNG THÊM vào
+// max_tokens, không bao giờ trừ vào phần trả lời.
+//
+// Tương thích ngược: caller CŨ không truyền reasoningBudget -> giữ nguyên hành vi cũ
+// (nativeThinkingBudget(maxTokens)) để mọi test/đường gọi legacy không đổi kết quả.
+function applyAnthropicThinking(body, { maxTokens, reasoningBudget, deepThinking, fast, capabilities, temperature }) {
+  const capsKnown = capabilities && typeof capabilities === 'object';
+  const nativeCapable = capsKnown ? !!(capabilities.supportsThinking || capabilities.supportsAdaptiveThinking) : true;
+  const explicit = Number.isFinite(reasoningBudget) && reasoningBudget > 0;
+  const useNativeThinking = !!deepThinking && !fast && nativeCapable && (explicit || maxTokens >= 1500);
+  if (!useNativeThinking) {
+    if (typeof temperature === 'number') body.temperature = temperature;
+    return body;
+  }
+  const budget = Math.max(1024, explicit ? Math.round(reasoningBudget) : nativeThinkingBudget(maxTokens));
+  if (explicit) {
+    // answerBudget được BẢO TOÀN nguyên vẹn: max_tokens = answer + reasoning.
+    body.max_tokens = Math.round(maxTokens) + budget;
+    body.thinking = { type: 'enabled', budget_tokens: budget };
+  } else {
+    body.thinking = { type: 'enabled', budget_tokens: Math.min(budget, Math.max(1024, maxTokens - 200)) };
+  }
+  // Khi thinking bật, Anthropic KHÔNG cho truyền temperature/top_p/top_k tùy chỉnh -> bỏ qua.
+  return body;
+}
+
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 // ---------- mục 2/12/24: KHÔNG còn hard-code model mặc định ở đây ----------
@@ -51,7 +88,7 @@ if (!API_KEY) {
  *   trước (tương thích ngược 100% với cấu hình chỉ có 1 khóa/1 model).
  * @returns {Promise<string>} nội dung text trả lời (đã gộp mọi khối "text", bỏ qua khối tool_use/tool_result)
  */
-async function callClaude({ system, messages, maxTokens = 1000, tools, temperature, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+async function callClaude({ system, messages, maxTokens = 1000, reasoningBudget, tools, temperature, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
   const key = apiKeyOverride || API_KEY;
   if (!key) {
     const err = new Error('Máy chủ chưa được cấu hình ANTHROPIC_API_KEY. Vui lòng liên hệ quản trị viên.');
@@ -82,14 +119,7 @@ async function callClaude({ system, messages, maxTokens = 1000, tools, temperatu
   // supportsAdaptiveThinking; `capabilities` HOÀN TOÀN vắng mặt (undefined, không phải {}) nghĩa là
   // caller gọi callClaude() trực tiếp ngoài executionTargets (vd test thuần/legacy) và chưa biết gì
   // về capability model — giữ hành vi cũ (permissive) để không phá tương thích ngược.
-  const capsKnown = capabilities && typeof capabilities === 'object';
-  const nativeCapable = capsKnown ? !!(capabilities.supportsThinking || capabilities.supportsAdaptiveThinking) : true;
-  const useNativeThinking = !!deepThinking && !fast && maxTokens >= 1500 && nativeCapable;
-  if (useNativeThinking) {
-    body.thinking = { type: 'enabled', budget_tokens: nativeThinkingBudget(maxTokens) };
-  } else if (typeof temperature === 'number') {
-    body.temperature = temperature;
-  }
+  applyAnthropicThinking(body, { maxTokens, reasoningBudget, deepThinking, fast, capabilities, temperature });
 
   const linked = createLinkedAbort(timeoutMs, signal);
 
@@ -165,7 +195,7 @@ async function callClaude({ system, messages, maxTokens = 1000, tools, temperatu
  * @param {{system:string, messages:Array, maxTokens?:number, tools?:Array, temperature?:number, fast?:boolean, timeoutMs?:number, onDelta?:Function}} opts
  * @returns {Promise<string>}
  */
-async function callClaudeStream({ system, messages, maxTokens = 1000, tools, temperature, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+async function callClaudeStream({ system, messages, maxTokens = 1000, reasoningBudget, tools, temperature, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
   const key = apiKeyOverride || API_KEY;
   if (!key) {
     const err = new Error('Máy chủ chưa được cấu hình ANTHROPIC_API_KEY. Vui lòng liên hệ quản trị viên.');
@@ -181,14 +211,7 @@ async function callClaudeStream({ system, messages, maxTokens = 1000, tools, tem
     stream: true
   };
   if (Array.isArray(tools) && tools.length) body.tools = tools;
-  const capsKnown = capabilities && typeof capabilities === 'object';
-  const nativeCapable = capsKnown ? !!(capabilities.supportsThinking || capabilities.supportsAdaptiveThinking) : true;
-  const useNativeThinking = !!deepThinking && !fast && maxTokens >= 1500 && nativeCapable;
-  if (useNativeThinking) {
-    body.thinking = { type: 'enabled', budget_tokens: nativeThinkingBudget(maxTokens) };
-  } else if (typeof temperature === 'number') {
-    body.temperature = temperature;
-  }
+  applyAnthropicThinking(body, { maxTokens, reasoningBudget, deepThinking, fast, capabilities, temperature });
 
   const linked = createLinkedAbort(timeoutMs, signal);
 

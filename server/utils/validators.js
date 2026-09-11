@@ -19,6 +19,8 @@ const MAX_GENERATE_CONTENT = 6000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB sau khi giải mã base64
 const MAX_APPROACH_LEN = 3000;
 const ALLOWED_STAGES = ['approach', 'detail'];
+// PHẦN 27: chế độ hình minh hoạ do người dùng chọn (đi vào cache key — xem routes/chat.js).
+const ALLOWED_VISUAL_MODES = ['auto', 'always', 'never'];
 
 const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const ALLOWED_LANGS = ['Tiếng Việt', 'English', 'tự động theo câu hỏi'];
@@ -156,7 +158,10 @@ function validateChatBody(body) {
     detail: normalizeDetail(bodySettings.detail),
     school,
     grade,
-    subject: normalizeSubject(bodySettings.subject)
+    subject: normalizeSubject(bodySettings.subject),
+    // PHẦN 27: "Visual explanations" — Auto (mặc định) | Always when useful | Never.
+    // Giá trị lạ/thiếu (client cũ) -> 'auto', KHÔNG bao giờ throw để không phá tương thích ngược.
+    visual: ALLOWED_VISUAL_MODES.includes(bodySettings.visual) ? bodySettings.visual : 'auto'
   };
 
   const history = Array.isArray(body.history)

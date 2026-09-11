@@ -41,6 +41,10 @@ const { analyzeSourceCoverage } = require('../utils/sourceCoverage');
 const { createRequestLogger } = require('../utils/logger');
 const { extractFinalAnswer, normalizeAnswerString } = require('../utils/studyTasks');
 const { resolveThinkingMode } = require('../utils/thinkingRouter');
+// PHẦN 2/4: kế hoạch ngân sách TÁCH BẠCH reasoning / answer / recovery / visual.
+const { genericReasoningBudget } = require('../utils/budget/requestBudgetPlanner');
+// PHẦN 12-32: hệ thống hình minh hoạ (quyết định -> spec -> renderer -> validate -> cache).
+const visualSystem = require('../utils/visual');
 const tokenEconomy = require('../utils/tokenEconomy');
 const { resolveSubject } = require('../utils/subjects');
 
@@ -272,6 +276,38 @@ function makeRecoveryResolver({ reserveState, recalcTarget, deadline }) {
     if (decision && decision.allow) reserveState.used += decision.amount;
     return decision;
   };
+}
+
+/**
+ * runVisualsFor() — điểm gọi DUY NHẤT của hệ thống hình minh hoạ trong route (PHẦN 20/24/30/32).
+ *
+ * Bất biến bắt buộc:
+ *   - CHỈ chạy SAU KHI text answer đã hoàn tất (PHẦN 24: hình dựng từ FINAL VERIFIED FACTS).
+ *   - KHÔNG BAO GIỜ throw ra ngoài: mọi lỗi ảnh -> trả visuals rỗng, text answer giữ nguyên.
+ *   - KHÔNG BAO GIỜ làm response bị FAILED (PHẦN 32) và không ăn deadline của text (PHẦN 30).
+ */
+async function runVisualsFor(opts) {
+  try {
+    const result = await visualSystem.runVisualPipeline(opts);
+    if (opts.reqLogger) opts.reqLogger.log({ stage: 'visual_pipeline', status: result.status, ...result.telemetry });
+    return result;
+  } catch (e) {
+    // Lớp phòng thủ thứ 2 (visualPipeline đã tự bắt mọi lỗi) — tuyệt đối không để ảnh giết text.
+    if (opts.reqLogger) opts.reqLogger.log({ stage: 'visual_pipeline', status: 'failed', visualError: e && e.message });
+    return { status: 'failed', decision: null, visuals: [], telemetry: { visualError: 'route_guard' } };
+  }
+}
+
+/**
+ * reasoningFor() — ngân sách reasoning kèm theo MỘT lượt gọi cụ thể (PHẦN 2).
+ * `mode` đến từ resumableStream (INITIAL/CONTINUATION/RESUME): lượt tiếp nối KHÔNG cần suy luận lại
+ * từ đầu (ngữ cảnh tối thiểu đã chứa mọi kết quả trung gian) nên dùng phase='recovery'.
+ */
+function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode }) {
+  return genericReasoningBudget({
+    answerBudget, complexityLevel, deepThinking: !!deepThinking,
+    phase: (mode && mode !== 'INITIAL' && mode !== 'initial') ? 'recovery' : 'initial'
+  });
 }
 
 // ---------- Tiện ích SSE (Server-Sent Events) dùng cho phản hồi streaming ----------
@@ -512,7 +548,18 @@ router.post('/', async (req, res, next) => {
         throughputTokensPerSec: throughputStats.getRepresentativeThroughput(activeProviders)
       });
       const { coreBudget, reserveBudget, totalBudget } = tokenEconomy.allocateCoreReserve(base.target);
-      return { ...base, coreBudget, reserveBudget, totalBudget };
+      // ---------- ROOT CAUSE FIX (PHẦN 1/2): reasoning budget TÁCH RIÊNG, KHÔNG ăn vào answer ----------
+      // `coreBudget` từ đây trở đi có ngữ nghĩa DUY NHẤT là NGÂN SÁCH CHO VĂN BẢN HIỂN THỊ.
+      // `reasoningBudget` được CỘNG THÊM ở tầng client (anthropicClient/geminiClient/openaiClient tự
+      // gate theo capability thật của model) — nên bật "Suy nghĩ sâu" KHÔNG còn làm co phần trả lời
+      // xuống 28% ngân sách như trước (xem server/utils/budget/reasoningPolicy.js để biết vì sao con
+      // số 28% đó chính là nguyên nhân của lỗi "chưa đầy đủ sau khi đã thử khôi phục").
+      const reasoningBudget = genericReasoningBudget({
+        answerBudget: coreBudget,
+        complexityLevel: base.complexity.level,
+        deepThinking: !!input.deepThinking
+      });
+      return { ...base, coreBudget, reserveBudget, totalBudget, reasoningBudget, complexityLevel: base.complexity.level };
     };
     // Giữ tên cũ cho các nơi vẫn cần {min,target,max} thô (vd budget hiển thị debug) — KHÔNG còn
     // dùng .target trực tiếp làm maxTokens của lượt gọi model thật (xem trên).
@@ -542,6 +589,9 @@ router.post('/', async (req, res, next) => {
         grade: input.settings.grade,
         subjectId: input.subjectId,
         secondarySubjectId: input.secondarySubjectId,
+        // PHẦN 27: setting hình minh hoạ PHẢI nằm trong cache key — nếu không, người chọn "Never"
+        // sẽ nhận lại response đã cache kèm hình của người chọn "Auto".
+        visualMode: input.settings.visual,
         approachFp: tokenEconomy.fingerprint(input.approachText),
         rulesFp: tokenEconomy.fingerprint(input.rules.join('|')),
         sourceIdsFp: tokenEconomy.fingerprint(sourceIdsFp),
@@ -556,6 +606,32 @@ router.post('/', async (req, res, next) => {
       modelTier: tePlan.modelTier, cacheHit: tePlan.cacheHit, coreBudget: tePlan.budget.coreBudget,
       reserveBudget: tePlan.budget.reserveBudget
     });
+
+    // Ngữ cảnh CỐ ĐỊNH của hệ thống hình cho request này — dựng 1 lần, dùng lại ở cả 4 nhánh.
+    const visualBase = {
+      question: problemText,
+      subject: input.subjectId,
+      language: input.settings.lang,
+      grade: input.settings.grade,
+      complexity: tePlan.budget && tePlan.budget.complexity ? tePlan.budget.complexity.level : 'medium',
+      userPreference: input.settings.visual,
+      deadline: globalDeadline,
+      signal,
+      reqLogger,
+      cacheKeyExtra: {
+        promptVersion: PROMPT_VERSION,
+        sourceFingerprint: tokenEconomy.fingerprint(sourceIdsFp),
+        imageFingerprint: input.image ? tokenEconomy.imageFingerprint(input.image.base64, input.image.mediaType) : ''
+      },
+      // ---------- PHẦN 25 — TẦNG 3: model judge CHỈ cho case borderline ----------
+      // visualPipeline tự gate: nó chỉ gọi `judge` khi decisionEngine.needsModelJudgement() true
+      // (điểm nằm sát ngưỡng). Với bộ chuẩn hiện tại chỉ ~4% câu rơi vào vùng đó, nên chi phí trung
+      // bình gần bằng 0 — đúng tinh thần "không tạo reasoning loop khổng lồ chỉ để quyết định vẽ hay không".
+      judge: visualSystem.judge.createVisualJudge({
+        callFn: (args) => callWithFailover(activeProviders, args, { deadline: globalDeadline }),
+        deadline: globalDeadline, signal, requestId: reqLogger.requestId, logger: reqLogger
+      })
+    };
 
     // ---------- Cache hit: trả thẳng response đã tính trước, KHÔNG gọi lại AI (mục 21.18) ----------
     if (tePlan.cacheHit && tePlan.cachedValue) {
@@ -604,7 +680,9 @@ router.post('/', async (req, res, next) => {
           let candidates;
           try {
             const gathered = await gatherCrossCheckCandidates(activeProviders, {
-              system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget, requestId: reqLogger.requestId,
+              system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget,
+              reasoningBudget: budgetOf('candidate').reasoningBudget,
+              requestId: reqLogger.requestId,
               deepThinking: input.deepThinking,
               onStatus: (message) => sseWrite(res, 'status', { message }),
               deadline: globalDeadline, // mục 4/6: dùng chung 1 đồng hồ với toàn bộ request, không tự tạo riêng
@@ -665,8 +743,12 @@ router.post('/', async (req, res, next) => {
               inputTokens: compressionTelemetry.rawInputTokens,
               compressedInputTokens: compressionTelemetry.compressedInputTokens
             },
-            buildArgs: ({ messages: msgs, maxTokens }) => ({
+            buildArgs: ({ messages: msgs, maxTokens, mode }) => ({
               system: reconcileSystem, messages: msgs, maxTokens,
+              reasoningBudget: reasoningFor({
+                deepThinking: input.deepThinking, answerBudget: maxTokens,
+                complexityLevel: budgetOf(reconcileStage).complexityLevel, mode
+              }),
               webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS,
               requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal
             }),
@@ -728,6 +810,18 @@ router.post('/', async (req, res, next) => {
             resumes: reconcileRun.resumes,
             citationMap: citationIndex.citationMap
           };
+          // ---------- PHẦN 21/24: TEXT xong -> gửi "done" NGAY, hình đi bằng SỰ KIỆN RIÊNG ----------
+          // Người dùng đọc được lời giải đầy đủ trước, hình tới sau (hoặc không bao giờ tới) mà
+          // KHÔNG ảnh hưởng gì. Với cross-check, tới đây candidates đã được reconcile xong nên hình
+          // chắc chắn dựng từ FINAL VERIFIED FACTS, không phải candidate đầu tiên.
+          sseWrite(res, 'done', { ...donePayload, visualPending: true });
+          const visualRun = await runVisualsFor({
+            ...visualBase, finalAnswer: full, answerComplete: !outcome.partial, candidates,
+            onEvent: (ev) => { const { type, ...rest } = ev; sseWrite(res, type, rest); }
+          });
+          donePayload.visuals = visualRun.visuals;
+          donePayload.visualStatus = visualRun.status;
+
           // PHẦN P: KHÔNG BAO GIỜ cache response PARTIAL/interrupted/chưa validate — chỉ cache khi
           // thực sự COMPLETED (partial=false), nếu không lần sau sẽ trả lại đúng câu trả lời bị cắt.
           if (!tePlan.cacheBypassed && !outcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, donePayload);
@@ -735,8 +829,7 @@ router.post('/', async (req, res, next) => {
           teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
           teTelemetry.record('outputTokens', full.length / 3.2);
           teTelemetry.record('continuationTokens', reconcileRun.session.continuationTokens);
-          reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry });
-          sseWrite(res, 'done', donePayload);
+          reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry, ...visualRun.telemetry });
           return res.end();
         }
 
@@ -768,8 +861,12 @@ router.post('/', async (req, res, next) => {
             inputTokens: compressionTelemetry.rawInputTokens,
             compressedInputTokens: compressionTelemetry.compressedInputTokens
           },
-          buildArgs: ({ messages: msgs, maxTokens }) => ({
+          buildArgs: ({ messages: msgs, maxTokens, mode }) => ({
             system, messages: msgs, maxTokens, fast: useFastModel,
+            reasoningBudget: reasoningFor({
+              deepThinking: input.deepThinking, answerBudget: maxTokens,
+              complexityLevel: directBudget.complexityLevel, mode
+            }),
             deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal
           }),
           streamOpts: { requireVision: !!input.image },
@@ -830,14 +927,22 @@ router.post('/', async (req, res, next) => {
           resumes: directRun.resumes,
           citationMap: citationIndex.citationMap
         };
+        // PHẦN 21: text xong -> "done" ngay; hình đi bằng sự kiện riêng, không chèn vào text stream.
+        sseWrite(res, 'done', { ...directDonePayload, visualPending: true });
+        const directVisualRun = await runVisualsFor({
+          ...visualBase, finalAnswer: full, answerComplete: !directOutcome.partial,
+          onEvent: (ev) => { const { type, ...rest } = ev; sseWrite(res, type, rest); }
+        });
+        directDonePayload.visuals = directVisualRun.visuals;
+        directDonePayload.visualStatus = directVisualRun.status;
+
         // PHẦN P: chỉ cache khi COMPLETED thật (không cache partial/interrupted).
         if (!tePlan.cacheBypassed && !directOutcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, directDonePayload);
         if (!directOutcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, directStageName, full.length / 3.2);
         teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
         teTelemetry.record('outputTokens', full.length / 3.2);
         teTelemetry.record('continuationTokens', directRun.session.continuationTokens);
-        reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry });
-        sseWrite(res, 'done', directDonePayload);
+        reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry, ...directVisualRun.telemetry });
         return res.end();
       } catch (streamErr) {
         // Header SSE đã gửi (200 text/event-stream) — không thể chuyển sang next(err) để trả JSON
@@ -879,7 +984,9 @@ router.post('/', async (req, res, next) => {
       // Mục XII/XXII: xem giải thích đầy đủ ở nhánh streaming phía trên — không giảm số candidate
       // theo risk, luôn dùng CROSS_CHECK_MAX_CANDIDATES mặc định.
       const { candidates } = await gatherCrossCheckCandidates(activeProviders, {
-        system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget, requestId: reqLogger.requestId,
+        system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget,
+        reasoningBudget: budgetOf('candidate').reasoningBudget,
+        requestId: reqLogger.requestId,
         deepThinking: input.deepThinking,
         deadline: globalDeadline, // mục 4/6
         requireVision: !!input.image,
@@ -911,7 +1018,7 @@ router.post('/', async (req, res, next) => {
 
       const initial = await callWithFailover(
         activeProviders,
-        { system: reconcileSystem, messages, maxTokens: budgetOf(reconcileStage).coreBudget, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
+        { system: reconcileSystem, messages, maxTokens: budgetOf(reconcileStage).coreBudget, reasoningBudget: budgetOf(reconcileStage).reasoningBudget, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
         { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image } // mục 4/6
       );
 
@@ -925,7 +1032,7 @@ router.post('/', async (req, res, next) => {
       const { text: finalText, completeness, continuations, provider: reconciler, partial: reconcilePartial } = await ensureCompleteNonStream(
         (msgs, _currentCompleteness, grantedMaxTokens) => callWithFailover(
           activeProviders,
-          { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
+          { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: budgetOf(reconcileStage).complexityLevel, mode: 'CONTINUATION' }), webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
           { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image }
         ),
         initial,
@@ -958,6 +1065,13 @@ router.post('/', async (req, res, next) => {
         continuations,
         citationMap: citationIndex.citationMap
       };
+      // Nhánh JSON không có stream nên hình phải sẵn sàng TRƯỚC khi trả về — vẫn bị chặn bởi
+      // VISUAL_DEADLINE_MS riêng, không bao giờ kéo dài quá deadline của text (PHẦN 30).
+      const jsonVisualRun = await runVisualsFor({
+        ...visualBase, finalAnswer: finalText, answerComplete: !reconcilePartial, candidates
+      });
+      jsonDonePayload.visuals = jsonVisualRun.visuals;
+      jsonDonePayload.visualStatus = jsonVisualRun.status;
       if (!tePlan.cacheBypassed && !reconcilePartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
       if (!reconcilePartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, finalText.length / 3.2);
       teTelemetry.record('outputTokens', finalText.length / 3.2);
@@ -982,7 +1096,7 @@ router.post('/', async (req, res, next) => {
     const useFastModel = callMode.fast && tokenEconomy.tierUsesFastModel(tePlan.modelTier);
     const initialDirect = await directCaller(
       activeProviders,
-      { system, messages, maxTokens: directBudget.coreBudget, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
+      { system, messages, maxTokens: directBudget.coreBudget, reasoningBudget: directBudget.reasoningBudget, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
       { deadline: globalDeadline, requireVision: !!input.image } // mục 4/6
     );
 
@@ -996,7 +1110,7 @@ router.post('/', async (req, res, next) => {
     let { text, completeness, continuations, provider, partial: directJsonPartial } = await ensureCompleteNonStream(
       (msgs, _currentCompleteness, grantedMaxTokens) => directCaller(
         activeProviders,
-        { system, messages: msgs, maxTokens: grantedMaxTokens, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
+        { system, messages: msgs, maxTokens: grantedMaxTokens, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: directBudget.complexityLevel, mode: 'CONTINUATION' }), fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
         { deadline: globalDeadline, requireVision: !!input.image }
       ),
       initialDirect,
@@ -1021,6 +1135,11 @@ router.post('/', async (req, res, next) => {
 
     // ensureCompleteNonStream() đã assertFinalResponseComplete() — chắc chắn COMPLETE tới đây.
     const finalJsonPayload = { ...subjectPayload, state: directJsonPartial ? STATES.PARTIAL : STATES.COMPLETED, partial: !!directJsonPartial, text, crossChecked: false, provider: provider.label, completeness: completeness.status, incompleteReasons: directJsonPartial ? (completeness.hardReasons || []) : [], citationValidation: completeness.citationValidation || null, continuations, citationMap: citationIndex.citationMap };
+    const directJsonVisualRun = await runVisualsFor({
+      ...visualBase, finalAnswer: text, answerComplete: !directJsonPartial
+    });
+    finalJsonPayload.visuals = directJsonVisualRun.visuals;
+    finalJsonPayload.visualStatus = directJsonVisualRun.status;
     if (!tePlan.cacheBypassed && !directJsonPartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
     if (!directJsonPartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', text.length / 3.2);
     teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);

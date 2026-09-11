@@ -94,7 +94,7 @@ function createOpenAICompatibleClient(config) {
    *   khóa/model cụ thể của từng "provider ảo" vào đây; bỏ trống = dùng đúng khóa/model đầu tiên đọc
    *   trực tiếp từ .env như trước (tương thích ngược với cấu hình chỉ có 1 khóa/1 model).
    */
-  async function call({ system, messages, maxTokens = 1000, temperature, fast, deepThinking, timeoutMs = 30000, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+  async function call({ system, messages, maxTokens = 1000, reasoningBudget, temperature, fast, deepThinking, timeoutMs = 30000, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
     const key = apiKeyOverride || apiKey();
     if (!key) {
       const err = new Error(`Máy chủ chưa cấu hình ${apiKeyEnv} cho nhà cung cấp ${label}.`);
@@ -115,6 +115,12 @@ function createOpenAICompatibleClient(config) {
     // prompt-based fallback (buildDeepThinkingBlock), không gửi tham số lạ gây lỗi 400.
     if (deepThinking && !fast && config.supportsThinking && config.thinkingBody) {
       Object.assign(body, config.thinkingBody);
+      // PHẦN 2/4: provider OpenAI-compatible thường tách max_tokens (completion) khỏi reasoning, nên
+      // KHÔNG cộng mù. Chỉ cộng khi provider TỰ khai reasoningCountsAgainstOutput:true trong
+      // extraProviders.js — không đoán capability thay hãng (PHẦN 29: không gửi tham số không hỗ trợ).
+      if (config.reasoningCountsAgainstOutput && Number.isFinite(reasoningBudget) && reasoningBudget > 0) {
+        body.max_tokens = Math.round(maxTokens) + Math.round(reasoningBudget);
+      }
     } else if (typeof temperature === 'number') {
       body.temperature = temperature;
     }
@@ -177,7 +183,7 @@ function createOpenAICompatibleClient(config) {
    * văn bản qua onDelta ngay khi nhận được. Trả về Promise<string> = toàn bộ văn bản khi xong.
    * @param {{system:string, messages:Array, maxTokens?:number, temperature?:number, fast?:boolean, timeoutMs?:number, onDelta?:Function}} opts
    */
-  async function callStream({ system, messages, maxTokens = 1000, temperature, fast, deepThinking, timeoutMs = 30000, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+  async function callStream({ system, messages, maxTokens = 1000, reasoningBudget, temperature, fast, deepThinking, timeoutMs = 30000, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
     const key = apiKeyOverride || apiKey();
     if (!key) {
       const err = new Error(`Máy chủ chưa cấu hình ${apiKeyEnv} cho nhà cung cấp ${label}.`);
@@ -194,6 +200,12 @@ function createOpenAICompatibleClient(config) {
     };
     if (deepThinking && !fast && config.supportsThinking && config.thinkingBody) {
       Object.assign(body, config.thinkingBody);
+      // PHẦN 2/4: provider OpenAI-compatible thường tách max_tokens (completion) khỏi reasoning, nên
+      // KHÔNG cộng mù. Chỉ cộng khi provider TỰ khai reasoningCountsAgainstOutput:true trong
+      // extraProviders.js — không đoán capability thay hãng (PHẦN 29: không gửi tham số không hỗ trợ).
+      if (config.reasoningCountsAgainstOutput && Number.isFinite(reasoningBudget) && reasoningBudget > 0) {
+        body.max_tokens = Math.round(maxTokens) + Math.round(reasoningBudget);
+      }
     } else if (typeof temperature === 'number') {
       body.temperature = temperature;
     }
