@@ -2430,6 +2430,25 @@ function renderVisuals(container, visuals, status) {
       cap.textContent = v.title ? (v.caption ? v.title + ' — ' + v.caption : v.title) : v.caption;
       fig.appendChild(cap);
     }
+    // Rủi ro #3: đề cần hình THẬT (lát cắt/giải phẫu/bản đồ) mà hệ thống chỉ dựng được sơ đồ khái
+    // niệm -> nói rõ với người học, đừng để họ tưởng đang nhìn một hình giải phẫu chính xác.
+    if (v.fidelity === 'schematic_only') {
+      const note = document.createElement('p');
+      note.className = 'visual-fidelity-note';
+      note.textContent = 'Đây là sơ đồ khái niệm, không phải hình giải phẫu/bản đồ thực tế — '
+        + 'dùng để nắm cấu trúc và vị trí tương đối, không dùng để nhận dạng chi tiết.';
+      fig.appendChild(note);
+    }
+    // B9.9/A3: hình do người dùng YÊU CẦU TƯỜNG MINH được nêu rõ là theo yêu cầu, tách khỏi hình
+    // hệ thống tự quyết định tạo.
+    if (v.necessity === 'USER_REQUESTED' || v.overrodeNever) {
+      const note = document.createElement('p');
+      note.className = 'visual-origin-note';
+      note.textContent = v.overrodeNever
+        ? 'Đã tạo hình theo yêu cầu của bạn, dù cài đặt đang tắt hình minh hoạ.'
+        : 'Hình được tạo theo yêu cầu của bạn.';
+      fig.appendChild(note);
+    }
     container.appendChild(fig);
   });
 }
