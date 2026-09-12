@@ -33,6 +33,7 @@ const indexHtmlPath = path.join(publicDir, 'index.html');
 // (thứ tự thật đọc trực tiếp từ chính index.html, xem PHẦN 8 của yêu cầu audit).
 const CORE_JS = [
   'boot.js',
+  'speed-insights.js', // Vercel Speed Insights integration
   'storage.js',
   'imageStorage.js',
   'config.js',
