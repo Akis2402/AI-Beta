@@ -65,10 +65,25 @@ test('6. PHẦN 14: hình DƯ THỪA khi câu trả lời đã có khối vẽ s
   assert.strictEqual(withDraw.shouldGenerateImage, false, 'đã có hình rồi, hình thứ hai chỉ lặp lại');
 });
 
-test('7. PHẦN 27: setting "never" -> KHÔNG BAO GIỜ tạo hình', () => {
-  const d = de.evaluateVisualNeed({ question: 'Vẽ đồ thị hàm số y = x^2', subject: 'math', userPreference: 'never' });
-  assert.strictEqual(d.shouldGenerateImage, false);
-  assert.strictEqual(d.reason, 'user_preference_never');
+// ĐỔI CÓ CHỦ ĐÍCH (A3): setting "never" vẫn chặn mặc định, NHƯNG một YÊU CẦU TƯỜNG MINH của người
+// dùng ở chính lượt này phải được ưu tiên cao hơn setting (nguyên tắc USER_REQUESTED). Bản cũ tính
+// nhánh `never` TRƯỚC khi tính explicitRequest nên người dùng gõ thẳng "vẽ hình minh họa cho câu
+// này" vẫn không được vẽ và cũng không được báo gì. Test dưới đây khẳng định CẢ HAI chiều.
+test('7. PHẦN 27 + A3: setting "never" chặn mặc định, nhưng yêu cầu tường minh thì override', () => {
+  const blocked = de.evaluateVisualNeed({ question: 'Tính thể tích khối chóp S.ABCD cạnh a', subject: 'math', userPreference: 'never' });
+  assert.strictEqual(blocked.shouldGenerateImage, false);
+  assert.strictEqual(blocked.reason, 'user_preference_never');
+
+  const overridden = de.evaluateVisualNeed({ question: 'Vẽ đồ thị hàm số y = x^2', subject: 'math', userPreference: 'never' });
+  assert.strictEqual(overridden.shouldGenerateImage, true, 'yêu cầu tường minh phải override setting never');
+  assert.strictEqual(overridden.reason, 'explicit_override_never', 'telemetry phải phân biệt được lượt override');
+  assert.strictEqual(overridden.imageNecessity, 'USER_REQUESTED');
+  assert.strictEqual(overridden.overrodeNever, true);
+});
+
+test('7b. A3.2: HARD_VETO vẫn thắng TUYỆT ĐỐI, kể cả có yêu cầu tường minh', () => {
+  const d = de.evaluateVisualNeed({ question: '2+2 bằng mấy, vẽ hình minh họa giúp tôi', subject: 'math', userPreference: 'never' });
+  assert.strictEqual(d.shouldGenerateImage, false, 'veto không bao giờ bị explicit request phá');
 });
 
 test('8. PHẦN 27: setting "always" hạ ngưỡng NHƯNG không phá veto PHẦN 14', () => {
@@ -320,13 +335,20 @@ test('29. PHẦN 24: candidate đồng thuận -> không có conflict', () => {
       .forEach((k) => assert.ok(k in r.telemetry, 'thiếu telemetry field: ' + k));
   });
 
-  await atest('36. PHẦN 27: userPreference=never đi xuyên suốt pipeline', async () => {
+  await atest('36. PHẦN 27 + A3: userPreference=never đi xuyên suốt pipeline (và override khi có yêu cầu tường minh)', async () => {
     const r = await pipeline.runVisualPipeline({
-      question: 'Vẽ đồ thị hàm số y = x^2', finalAnswer: 'y = x^2',
+      question: 'Tính thể tích khối chóp S.ABCD cạnh a', finalAnswer: 'V = a^3/3',
       subject: 'math', answerComplete: true, userPreference: 'never'
     });
     assert.strictEqual(r.status, 'skipped');
     assert.strictEqual(r.decision.reason, 'user_preference_never');
+
+    const overridden = await pipeline.runVisualPipeline({
+      question: 'Vẽ đồ thị hàm số y = x^2', finalAnswer: 'y = x^2 là parabol, đỉnh O(0,0)',
+      subject: 'math', answerComplete: true, userPreference: 'never'
+    });
+    assert.notStrictEqual(overridden.status, 'skipped', 'yêu cầu tường minh phải đi tiếp vào pipeline dù setting đang tắt hình');
+    assert.strictEqual(overridden.decision.reason, 'explicit_override_never');
   });
 
   await atest('37. PHẦN 24: hình chỉ dùng số của FINAL ANSWER, loại số của candidate bị bác bỏ', async () => {

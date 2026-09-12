@@ -5,8 +5,23 @@
 // ============================================================================================
 // Trọng số heuristic chỉ nguy hiểm khi KHÔNG CÓ CÁCH ĐO. File này là cách đo:
 //
-//   44 câu hỏi thật, mỗi câu có nhãn đúng (`expect: true/false`) suy ra trực tiếp từ PHẦN 13
-//   (nên tạo hình) và PHẦN 14 (không nên tạo hình).
+//   Mỗi câu có nhãn đúng (`expect: true/false`) suy ra trực tiếp từ PHẦN 13 (nên tạo hình) và
+//   PHẦN 14 (không nên tạo hình).
+//
+// ---------- RỦI RO #2 (đã ghi ở CHANGELOG mục G) VÀ CÁCH ĐANG ĐÓNG ----------
+// Bản trước chỉ có 44 câu, gần như toàn bộ thuộc chương trình phổ thông Việt Nam — precision 1.000
+// trên mẫu đó KHÔNG bảo đảm 1.000 trên phân phối thật. Hai việc đã làm:
+//
+//   1. MỞ RỘNG bộ chuẩn sang các vùng phân phối trước đây không có mẫu nào (xem NHÓM 3/4 bên dưới):
+//      đại học/sau phổ thông, đề tiếng Anh, môn xã hội, câu hội thoại ngắn/mơ hồ, câu đã có sẵn hình
+//      trong lời giải, và yêu cầu hình tường minh ở nhiều biến thể diễn đạt.
+//   2. VÒNG PHẢN HỒI TỪ TELEMETRY: `scripts/visual-corpus-report.js` đọc log production
+//      (visualDecision/visualConfidence/visualType/visualNecessity) và xuất ra đúng những câu
+//      BORDERLINE / confidence thấp để người vận hành gán nhãn rồi thêm vào đây. Bộ chuẩn phải LỚN
+//      LÊN theo traffic thật, không phải đứng yên ở một con số đẹp.
+//
+// Ngưỡng chấp nhận CỐ Ý không nâng lên 1.000: mẫu lớn hơn thì precision/recall sẽ dao động, và việc
+// tinh chỉnh trọng số cho khớp 100% bộ chuẩn chính là overfit vào chính bộ chuẩn đó.
 //
 // Mọi lần chỉnh trọng số trong visualScoringConfig.js PHẢI chạy lại file này. Ngưỡng chấp nhận:
 //   - precision >= 0.90  (hình được tạo phải thực sự đáng tạo — tạo hình vô nghĩa là tốn kém + gây nhiễu)
@@ -18,7 +33,7 @@ const de = require('../server/utils/visual/visualDecisionEngine');
 const cfg = require('../server/utils/visual/visualScoringConfig');
 
 // ---------- NHÓM 1: PHẦN 13 — hình thực sự giúp ích (expect: true) ----------
-const SHOULD_DRAW = [
+const SHOULD_DRAW_CORE = [
   ['physics', 'Một vật được ném xiên với vận tốc đầu 20 m/s, góc 30°. Tính tầm xa.'],
   ['physics', 'Vật trượt trên mặt phẳng nghiêng góc 30°, hệ số ma sát 0,2. Phân tích các lực tác dụng.'],
   ['physics', 'Cho mạch điện gồm R1 = 4 Ω mắc nối tiếp R2 = 6 Ω, U = 12 V. Tính cường độ dòng điện.'],
@@ -47,6 +62,35 @@ const SHOULD_DRAW = [
   ['computer-science', 'Giải thích cấu trúc cây nhị phân tìm kiếm và thao tác chèn nút.']
 ];
 
+const SHOULD_DRAW_PLACEHOLDER = null;
+// ---------- NHÓM 3 (MỞ RỘNG): vùng phân phối trước đây KHÔNG có mẫu nào — nên tạo hình ----------
+const SHOULD_DRAW_EXTENDED = [
+  // Đại học / sau phổ thông (bộ cũ chỉ có phổ thông).
+  ['math', 'Cho không gian vector R^3, mô tả hình học tập nghiệm của hệ phương trình tuyến tính Ax = b.'],
+  ['physics', 'Vẽ giản đồ Fresnel cho mạch RLC nối tiếp có Z_L = 100 Ω và Z_C = 60 Ω.'],
+  ['computer-science', 'Mô tả sơ đồ chuyển trạng thái của một tiến trình trong hệ điều hành.'],
+  ['computer-science', 'Trình bày topology mạng hình sao và hình vòng, so sánh đường đi của gói tin.'],
+  ['chemistry', 'Trình bày cơ chế phản ứng thế S_N2 và sự đảo cấu hình không gian ở tâm cacbon.'],
+  // Đề viết bằng tiếng Anh (bộ cũ 100% tiếng Việt).
+  ['math', 'Sketch the graph of the function f(x) = 1/(x-2) and identify its asymptotes.'],
+  ['physics', 'Draw a free body diagram for a block on an inclined plane with friction.'],
+  ['biology', 'Describe the structure of a chloroplast and label the thylakoid membrane.'],
+  ['computer-science', 'Draw a flowchart for the binary search algorithm.'],
+  // Yêu cầu hình tường minh, nhiều biến thể diễn đạt.
+  ['general', 'Tạo infographic tóm tắt các bước của quy trình này giúp mình.'],
+  ['general', 'Cho tôi hình trực quan để dễ hình dung bài này.'],
+  ['general', 'Generate an educational image illustrating this concept.'],
+  ['math', 'Vẽ lại hình này với các điểm được đánh dấu rõ hơn.'],
+  ['physics', 'Tạo hình ảnh mô phỏng chuyển động của vật trong bài toán trên.'],
+  // Quan hệ không gian / quá trình nhiều bước.
+  ['geography', 'So sánh vị trí tương đối của ba vùng kinh tế trọng điểm trên bản đồ Việt Nam.'],
+  ['biology', 'Trình bày các giai đoạn của nguyên phân theo đúng thứ tự.'],
+  ['chemistry', 'Mô tả sơ đồ chuyển hoá giữa các hợp chất của nitơ theo thứ tự phản ứng.']
+];
+
+/** Bộ chuẩn đầy đủ = lõi phổ thông (bản cũ) + phần mở rộng (rủi ro #2). */
+const SHOULD_DRAW = SHOULD_DRAW_CORE.concat(SHOULD_DRAW_EXTENDED);
+
 // ---------- NHÓM 2: PHẦN 14 — KHÔNG nên tạo hình (expect: false) ----------
 // Các câu đánh dấu `veto: true` là ràng buộc CỨNG: sai 1 câu = fail toàn bộ, không tính theo tỉ lệ.
 const SHOULD_NOT_DRAW = [
@@ -67,7 +111,29 @@ const SHOULD_NOT_DRAW = [
   ['economics-civics', 'Nêu vai trò của pháp luật trong đời sống xã hội.', false],
   ['general', 'Nước sôi ở bao nhiêu độ C?', false],
   ['math', 'Một lớp có 40 học sinh, 60% là nữ. Hỏi có bao nhiêu bạn nam?', false],
-  ['physics', 'Đổi 72 km/h sang đơn vị m/s.', false]
+  ['physics', 'Đổi 72 km/h sang đơn vị m/s.', false],
+
+  // ---------- NHÓM 4 (MỞ RỘNG): vùng phân phối trước đây KHÔNG có mẫu nào — không nên tạo hình ----------
+  // Câu hội thoại/meta, không phải bài tập -> CORE_DIRECTIVE từ chối, không có gì để vẽ.
+  ['general', 'Cảm ơn bạn nhé!', true],
+  ['general', 'Bạn có thể giải thích lại bước 2 không?', true],
+  ['general', 'ok', true],
+  // Định nghĩa/lý thuyết thuần — hình chỉ lặp lại chữ.
+  ['computer-science', 'Big-O của thuật toán quicksort trung bình là gì?', true],
+  ['chemistry', 'Nêu định nghĩa của liên kết ion.', true],
+  ['biology', 'Enzyme là gì?', true],
+  // Đề tiếng Anh nhưng KHÔNG cần hình.
+  ['math', 'Solve for x: 3x + 7 = 22.', false],
+  ['english', 'Rewrite the sentence using the passive voice.', false],
+  ['math', 'Simplify the expression (2x + 3)(2x - 3).', false],
+  // Môn xã hội / văn học — bộ cũ chỉ có 2 mẫu.
+  ['literature', 'Nêu giá trị nhân đạo của tác phẩm Vợ nhặt.', false],
+  ['history', 'So sánh chính sách kinh tế của hai giai đoạn 1954-1975 và 1975-1986.', false],
+  ['economics-civics', 'Trình bày quyền và nghĩa vụ của công dân trong hôn nhân.', false],
+  // Số học/tính toán đại học — dài nhưng vẫn không cần hình.
+  ['math', 'Tính tích phân từng phần của tích phân x*e^x dx.', false],
+  ['math', 'Chứng minh bằng quy nạp rằng tổng n số tự nhiên đầu tiên bằng n(n+1)/2.', false],
+  ['chemistry', 'Tính pH của dung dịch HCl 0,01M.', false]
 ];
 
 const results = [];
@@ -119,10 +185,23 @@ test('4. PHẦN 14 (veto tuyệt đối): KHÔNG SAI câu nào — ở cả 3 ch
   });
 });
 
-test('5. setting "never" chặn TOÀN BỘ bộ chuẩn, không ngoại lệ', () => {
+// ĐỔI CÓ CHỦ ĐÍCH (A3): "không ngoại lệ" là SAI về mặt sản phẩm — một yêu cầu TƯỜNG MINH ("vẽ hình
+// minh hoạ...", "vẽ đồ thị...") của chính người dùng ở lượt này phải được ưu tiên trên setting mặc
+// định (nguyên tắc USER_REQUESTED). Ngoại lệ DUY NHẤT là explicit request; mọi câu còn lại vẫn bị
+// chặn tuyệt đối, và HARD_VETO thì không bao giờ bị phá (xem test 4).
+test('5. setting "never" chặn toàn bộ bộ chuẩn, NGOẠI LỆ DUY NHẤT là yêu cầu tường minh (A3)', () => {
+  let overrides = 0;
   SHOULD_DRAW.concat(SHOULD_NOT_DRAW.map((c) => [c[0], c[1]])).forEach(([subject, q]) => {
-    assert.strictEqual(decide(subject, q, 'never').shouldGenerateImage, false, q);
+    const d = decide(subject, q, 'never');
+    if (d.explicitRequest) {
+      overrides++;
+      assert.strictEqual(d.reason === 'explicit_override_never' || d.shouldGenerateImage === false, true, q);
+      if (d.shouldGenerateImage) assert.strictEqual(d.imageNecessity, 'USER_REQUESTED', q);
+      return;
+    }
+    assert.strictEqual(d.shouldGenerateImage, false, q);
   });
+  assert.ok(overrides > 0, 'bộ chuẩn phải có ít nhất 1 câu yêu cầu hình tường minh để kiểm chứng A3');
 });
 
 test('6. setting "always" KHÔNG làm giảm recall (chỉ hạ ngưỡng, không đảo chiều)', () => {
