@@ -3,7 +3,10 @@
 const { iterateSSELines } = require('./sseParse');
 const { createLinkedAbort, makeCancelledError } = require('./abortLink');
 const { nativeThinkingBudget } = require('./thinkingRouter');
+const { maxReasoningForModel } = require('./budget/reasoningPolicy');
 const { normalizeFinishReason } = require('./finishReason');
+// A1: system có thể là string (nhánh cũ) hoặc PromptParts (nhánh mới, có cache breakpoint).
+const { toAnthropicSystemBlocks, systemToString } = require('./systemPromptParts');
 
 
 // ============================================================================================
@@ -30,7 +33,14 @@ function applyAnthropicThinking(body, { maxTokens, reasoningBudget, deepThinking
     if (typeof temperature === 'number') body.temperature = temperature;
     return body;
   }
-  const budget = Math.max(1024, explicit ? Math.round(reasoningBudget) : nativeThinkingBudget(maxTokens));
+  // A2: trần CUỐI CÙNG theo model thật. chat.js tính reasoningBudget khi CHƯA biết target nào sẽ
+  // thắng rotation (genericReasoningBudget), nên điểm gate đúng nhất là ĐÂY — nơi đã biết chắc model.
+  // capabilities.maxOutputTokens vắng mặt -> không kẹp (giữ hành vi cũ).
+  const modelCap = maxReasoningForModel(capsKnown ? capabilities : null);
+  const budget = Math.min(
+    modelCap,
+    Math.max(1024, explicit ? Math.round(reasoningBudget) : nativeThinkingBudget(maxTokens))
+  );
   if (explicit) {
     // answerBudget được BẢO TOÀN nguyên vẹn: max_tokens = answer + reasoning.
     body.max_tokens = Math.round(maxTokens) + budget;
@@ -99,7 +109,9 @@ async function callClaude({ system, messages, maxTokens = 1000, reasoningBudget,
   const body = {
     model: assertModel(fast ? (fastModelOverride || MODEL_FAST || MODEL) : (modelOverride || MODEL)),
     max_tokens: maxTokens,
-    system,
+    // A1: caller truyền PromptParts -> system thành MẢNG content block, có cache_control ở cuối khối
+    // tĩnh (và khối ngữ cảnh nguồn nếu đủ lớn). Caller cũ truyền string -> giữ NGUYÊN nhánh cũ.
+    system: toAnthropicSystemBlocks(system) || system,
     messages
   };
   if (Array.isArray(tools) && tools.length) body.tools = tools;
@@ -181,7 +193,16 @@ async function callClaude({ system, messages, maxTokens = 1000, reasoningBudget,
   if (meta) {
     meta.finishReason = normalizeFinishReason(data.stop_reason);
     // Vấn đề #4: số token THẬT do provider báo — dùng để hiệu chỉnh tokenCounter (xem tokenCounter.js).
-    if (data.usage) meta.usage = { inputTokens: data.usage.input_tokens, outputTokens: data.usage.output_tokens };
+    // B10/A1.8: Anthropic trả breakdown cache trong `usage` — ĐỌC và lưu lại thay vì bỏ qua như
+    // trước, để đo hiệu quả THẬT của prompt caching (MEASURED, không phải ESTIMATED).
+    if (data.usage) {
+      meta.usage = {
+        inputTokens: data.usage.input_tokens,
+        outputTokens: data.usage.output_tokens,
+        cachedTokens: Number(data.usage.cache_read_input_tokens) || 0,
+        cacheCreationTokens: Number(data.usage.cache_creation_input_tokens) || 0
+      };
+    }
   }
 
   return text;
@@ -206,7 +227,7 @@ async function callClaudeStream({ system, messages, maxTokens = 1000, reasoningB
   const body = {
     model: assertModel(fast ? (fastModelOverride || MODEL_FAST || MODEL) : (modelOverride || MODEL)),
     max_tokens: maxTokens,
-    system,
+    system: toAnthropicSystemBlocks(system) || system,
     messages,
     stream: true
   };
@@ -271,6 +292,16 @@ async function callClaudeStream({ system, messages, maxTokens = 1000, reasoningB
       // mục 1: sự kiện "message_delta" mang stop_reason THẬT ngay trước khi stream đóng —
       // đây là tín hiệu completion-first đáng tin nhất (model tự quyết định dừng vs bị cắt vì hết
       // max_tokens), forward ra ngoài qua `meta` giống hệt bản không-streaming ở trên.
+      // Cache breakdown chỉ xuất hiện ở `message_start` (usage đầu vào), không có ở message_delta.
+      if (evt.type === 'message_start' && meta && evt.message && evt.message.usage) {
+        const u = evt.message.usage;
+        meta.usage = {
+          ...(meta.usage || {}),
+          inputTokens: u.input_tokens,
+          cachedTokens: Number(u.cache_read_input_tokens) || 0,
+          cacheCreationTokens: Number(u.cache_creation_input_tokens) || 0
+        };
+      }
       if (evt.type === 'message_delta' && evt.delta && evt.delta.stop_reason && meta) {
         meta.finishReason = normalizeFinishReason(evt.delta.stop_reason);
         if (evt.usage) meta.usage = { ...(meta.usage || {}), outputTokens: evt.usage.output_tokens };
@@ -309,7 +340,7 @@ async function callClaudeWebSearch({ system, messages, maxTokens = 1200, timeout
   const body = {
     model: assertModel(modelOverride || MODEL_FAST || MODEL), // đủ dùng cho tác vụ tìm + tóm tắt link, không cần model mạnh/đắt nhất
     max_tokens: maxTokens,
-    system,
+    system: systemToString(system),
     messages,
     tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }]
   };

@@ -1,5 +1,10 @@
 'use strict';
 
+// A1: chấp nhận cả string lẫn PromptParts — Gemini 2.5+ có implicit caching cho prefix trùng nên
+// chỉ cần ghép đúng thứ tự TĨNH -> CONTEXT -> ĐỘNG (systemToString làm đúng việc đó).
+const { systemToString } = require('./systemPromptParts');
+const { maxReasoningForModel } = require('./budget/reasoningPolicy');
+
 const { iterateSSELines } = require('./sseParse');
 const { createLinkedAbort, makeCancelledError } = require('./abortLink');
 const { thinkingLevelFromBudget } = require('./budget/reasoningPolicy');
@@ -83,7 +88,12 @@ function resolveGeminiThinkingConfig({ modelId, capabilities, deepThinking, fast
   // — đúng triệu chứng "Suy nghĩ sâu thường lỗi" trong khi "Suy nghĩ nhanh" (không bật thinking)
   // hoạt động ổn định. Khi caller truyền `reasoningBudget` tường minh (budget/requestBudgetPlanner.js
   // đã CỘNG THÊM phần này vào maxOutputTokens), dùng đúng con số đó -> phần trả lời luôn còn chỗ.
-  const explicit = Number.isFinite(reasoningBudget) && reasoningBudget > 0;
+  // A2: kẹp theo trần output THẬT của model (maxOutputTokens từ discovery — Gemini trả
+  // outputTokenLimit tường minh). Không biết -> không kẹp, giữ hành vi cũ.
+  const modelCap = maxReasoningForModel(capsKnown ? capabilities : null);
+  const explicitRaw = Number.isFinite(reasoningBudget) && reasoningBudget > 0;
+  if (explicitRaw) reasoningBudget = Math.min(Math.round(reasoningBudget), modelCap);
+  const explicit = explicitRaw;
   // includeThoughts:false vì đã có lớp lọc `thought:true` riêng bên dưới — xin luôn từ nguồn để đỡ
   // tốn băng thông/response size thay vì xin về rồi mới lọc bỏ.
   if (/gemini-3/i.test(id)) {
@@ -137,7 +147,8 @@ async function callGemini({ system, messages, maxTokens = 1000, reasoningBudget,
       body.generationConfig.maxOutputTokens = Math.round(maxTokens) + Math.round(reasoningBudget);
     }
   }
-  if (system) body.systemInstruction = { parts: [{ text: system }] };
+  const systemText = systemToString(system);
+  if (systemText) body.systemInstruction = { parts: [{ text: systemText }] };
   if (webSearch) body.tools = [{ google_search: {} }];
 
   const linked = createLinkedAbort(timeoutMs, signal);
@@ -235,7 +246,8 @@ async function callGeminiStream({ system, messages, maxTokens = 1000, reasoningB
       body.generationConfig.maxOutputTokens = Math.round(maxTokens) + Math.round(reasoningBudget);
     }
   }
-  if (system) body.systemInstruction = { parts: [{ text: system }] };
+  const systemText = systemToString(system);
+  if (systemText) body.systemInstruction = { parts: [{ text: systemText }] };
   if (webSearch) body.tools = [{ google_search: {} }];
 
   const linked = createLinkedAbort(timeoutMs, signal);

@@ -67,12 +67,24 @@ function chooseVisualRenderer(spec, env = {}) {
   }
 
   if (CONCEPTUAL.has(type)) {
+    // Rủi ro #3: đề đòi hình THẬT (lát cắt, giải phẫu, tiêu bản, bản đồ địa hình) mà không có image
+    // provider -> sơ đồ SVG vẫn được dựng nhưng phải được đánh dấu là SƠ ĐỒ, không giả vờ là hình
+    // thật. `fidelity` đi thẳng vào caption + telemetry.
+    const realism = !!(spec && spec.realismRequired);
     return {
       renderer: imageAvailable ? 'generated_image' : 'svg_diagram',
       primary: imageAvailable ? 'image_generation' : 'deterministic',
       fallbacks: imageAvailable ? ['deterministic', 'concept_card', 'no_visual'] : ['concept_card', 'no_visual'],
       accuracyCritical: false,
-      reason: imageAvailable ? 'conceptual_with_image_provider' : 'conceptual_no_image_provider'
+      realismRequired: realism,
+      fidelity: imageAvailable ? 'illustrative' : (realism ? 'schematic_only' : 'schematic'),
+      upgradeHint: realism && !imageAvailable
+        ? 'Đề này cần hình thực tế (lát cắt/giải phẫu/bản đồ thật). Renderer deterministic chỉ dựng '
+          + 'được sơ đồ khái niệm — cấu hình GEMINI_IMAGE_API_KEY hoặc OPENAI_IMAGE_API_KEY để có hình '
+          + 'minh hoạ đúng mức. KHÔNG khắc phục bằng cách để renderer tự đoán hình.'
+        : null,
+      reason: imageAvailable ? 'conceptual_with_image_provider'
+        : (realism ? 'conceptual_realism_needed_no_provider' : 'conceptual_no_image_provider')
     };
   }
 

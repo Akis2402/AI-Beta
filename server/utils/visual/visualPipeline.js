@@ -28,6 +28,32 @@ const VISUAL_DEADLINE_MS = Number(process.env.VISUAL_DEADLINE_MS) || 12000;
 // Nếu deadline chung của request còn ít hơn mức này, KHÔNG bắt đầu tạo hình (defer/bỏ).
 const MIN_REMAINING_FOR_VISUAL_MS = Number(process.env.MIN_REMAINING_FOR_VISUAL_MS) || 3000;
 
+// ============================================================================================
+// B9.3 — IMAGE BUDGET GUARD: DEGRADE THEO MỨC, KHÔNG PHẢI NHỊ PHÂN CÓ/KHÔNG
+// ============================================================================================
+// requestBudgetPlanner.js đã tách `visualBudget` riêng (không lấn answerBudget). Bổ sung ở đây:
+// khi deadline TỔNG của request sắp cạn tại đúng thời điểm quyết định tạo hình, hệ thống hạ cấp
+// dần thay vì hoặc-làm-đầy-đủ-hoặc-bỏ:
+//   HIGH      : full visual (deterministic hoặc image gen theo router).
+//   MEDIUM    : prompt gọn hơn + hình đơn giản hơn (bỏ annotation phụ trong spec).
+//   LOW       : KHÔNG gọi image API, chỉ còn đường deterministic (0 token, 0 mạng).
+//   EMERGENCY : bỏ hoàn toàn (ngưỡng MIN_REMAINING_FOR_VISUAL_MS đã có sẵn, giữ nguyên 3000ms).
+const DEGRADE_MEDIUM_MS = Number(process.env.VISUAL_DEGRADE_MEDIUM_MS) || 8000;
+const DEGRADE_LOW_MS = Number(process.env.VISUAL_DEGRADE_LOW_MS) || 5000;
+
+/**
+ * resolveVisualDegradeLevel() — mức hạ cấp theo thời gian còn lại của request.
+ * @param {number} remainingMs Infinity khi không có deadline (chạy ngoài request thật/test).
+ * @returns {'high'|'medium'|'low'|'emergency'}
+ */
+function resolveVisualDegradeLevel(remainingMs) {
+  if (!Number.isFinite(remainingMs)) return 'high';
+  if (remainingMs < MIN_REMAINING_FOR_VISUAL_MS) return 'emergency';
+  if (remainingMs < DEGRADE_LOW_MS) return 'low';
+  if (remainingMs < DEGRADE_MEDIUM_MS) return 'medium';
+  return 'high';
+}
+
 let visualSeq = 0;
 function nextVisualId() { visualSeq = (visualSeq + 1) % 1e9; return `vz_${Date.now().toString(36)}_${visualSeq}`; }
 
@@ -90,13 +116,22 @@ async function runVisualPipeline(args) {
     visualDecision: false, visualConfidence: 0, visualType: 'no_visual', visualRenderer: 'none',
     visualGenerated: false, visualCacheHit: false, visualGenerationLatency: 0,
     visualPromptTokens: 0, visualValidation: null, visualRepairCount: 0, visualError: null,
-    visualConflicts: [], visualJudgeUsed: false
+    visualConflicts: [], visualJudgeUsed: false,
+    // B9.3/B9.15/A4: quan sát được mức hạ cấp, chi phí ảnh, và các provider đã thử.
+    visualDegradeLevel: 'high', visualCostClass: null, visualProvidersTried: [],
+    visualNecessity: 'NONE',
+    // Rủi ro #3: mức TRUNG THỰC của hình. 'schematic_only' = đề cần hình thật nhưng hệ thống chỉ
+    // dựng được sơ đồ (chưa cấu hình image provider) — người vận hành cần thấy con số này, nếu
+    // không sẽ tưởng hệ thống đang phục vụ tốt trong khi hình chỉ hữu ích hạn chế.
+    visualFidelity: 'schematic', visualRealismRequired: false, visualUpgradeHint: null
   };
 
   try {
     // ---------- PHẦN 30: kiểm tra ngân sách thời gian TRƯỚC KHI làm bất cứ gì ----------
     const remaining = deadline && typeof deadline.remaining === 'function' ? deadline.remaining() : Infinity;
-    if (Number.isFinite(remaining) && remaining < MIN_REMAINING_FOR_VISUAL_MS) {
+    const degrade = resolveVisualDegradeLevel(remaining);
+    telemetry.visualDegradeLevel = degrade;
+    if (degrade === 'emergency') {
       telemetry.visualError = 'deferred_deadline';
       return { status: 'skipped', decision: null, visuals: [], telemetry };
     }
@@ -115,6 +150,7 @@ async function runVisualPipeline(args) {
       } catch (e) { /* judge lỗi -> giữ nguyên quyết định heuristic, không ảnh hưởng text */ }
     }
 
+    telemetry.visualNecessity = decision.imageNecessity || 'NONE';
     telemetry.visualDecision = decision.shouldGenerateImage;
     telemetry.visualConfidence = decision.confidence;
     telemetry.visualType = decision.visualType;
@@ -132,6 +168,11 @@ async function runVisualPipeline(args) {
 
     // ---------- Dựng SPEC có cấu trúc (PHẦN 16) ----------
     const spec = specBuilder.buildVisualSpec({ decision, finalAnswer, question, subject, language, grade });
+    // B9.3 mức MEDIUM: bỏ bớt annotation phụ để prompt/hình gọn hơn — KHÔNG bỏ nhãn/entity chính
+    // (chúng là thứ visualValidator kiểm tra, bỏ đi là hình sai).
+    if (degrade === 'medium' && Array.isArray(spec.annotations) && spec.annotations.length > 2) {
+      spec.annotations = spec.annotations.slice(0, 2);
+    }
     if (conflict.conflicts.length) {
       spec.objects = spec.objects.filter((o) => !conflict.conflicts.includes(o.symbol)
         || String(finalAnswer).includes(`${o.symbol} = ${o.value}`));
@@ -141,19 +182,26 @@ async function runVisualPipeline(args) {
     const imageProviderAvailable = imageClient.isConfigured();
     const route = router.chooseVisualRenderer(spec, { imageProviderAvailable });
     telemetry.visualRenderer = route.renderer;
+    telemetry.visualRealismRequired = !!route.realismRequired;
+    telemetry.visualFidelity = route.fidelity || 'schematic';
+    telemetry.visualUpgradeHint = route.upgradeHint || null;
 
     // ---------- PHẦN 22: cache ----------
     const keyParts = {
       promptVersion: cacheKeyExtra.promptVersion || '',
       specFingerprint: specBuilder.specFingerprint(spec),
       answerStructureHash: cache.answerStructureHash(finalAnswer),
-      subject, language: spec.language, style: spec.style, renderer: route.renderer,
+      subject, language: spec.language, renderer: route.renderer,
       model: route.primary === 'image_generation' ? (imageClient.activeProviderName() || '') : 'deterministic',
       sourceFingerprint: cacheKeyExtra.sourceFingerprint || '',
       imageFingerprint: cacheKeyExtra.imageFingerprint || '',
+      // Rủi ro #3: `renderer` đã nằm trong key, nhưng thêm fidelity để một bản sơ đồ "schematic_only"
+      // không bao giờ được trả lại sau khi image provider đã được cấu hình.
+      style: `${spec.style}#${route.fidelity || 'schematic'}`,
       userPreference
     };
-    const cached = cache.get(keyParts);
+    // A5: bản async -> cache hit được CẢ khi hình do một serverless instance KHÁC tạo ra.
+    const cached = await cache.getAsync(keyParts);
     if (cached) {
       telemetry.visualCacheHit = true;
       telemetry.visualGenerated = true;
@@ -183,11 +231,26 @@ async function runVisualPipeline(args) {
       } else if (attempt === 'image_generation') {
         // PHẦN 18: KHÔNG BAO GIỜ dùng image generation cho loại accuracy-critical.
         if (route.accuracyCritical) continue;
+        // B9.3 mức LOW: hết thời gian cho một lượt gọi mạng — chỉ giữ đường deterministic.
+        if (degrade === 'low') { telemetry.visualError = 'degraded_no_image_gen'; continue; }
+        // B9.15: visual benefit THẤP (OPTIONAL, không phải USER_REQUESTED/NECESSARY) mà chi phí ảnh
+        // CAO -> không đốt tiền cho một hình "có cũng được". Yêu cầu tường minh vẫn được ưu tiên,
+        // nhưng vẫn chịu deadline/budget guard ở trên (không bypass hoàn toàn).
+        const costClass = imageClient.classifyImageCost({ provider: imageClient.activeProviderName(), size: '1024x1024' });
+        telemetry.visualCostClass = costClass;
+        const necessity = decision.imageNecessity || 'NONE';
+        if (costClass === 'IMAGE_COST_HIGH' && (necessity === 'OPTIONAL' || necessity === 'NONE')) {
+          telemetry.visualError = 'cost_gate_low_benefit';
+          continue;
+        }
         const prompt = specBuilder.buildImagePrompt(spec);
         telemetry.visualPromptTokens = Math.ceil(prompt.length / 3.2);
         const img = await imageClient.generateImage({
-          prompt, signal, timeoutMs: Math.max(2000, visualDeadlineAt - Date.now())
+          prompt, signal, timeoutMs: Math.max(2000, visualDeadlineAt - Date.now()),
+          deadlineAt: visualDeadlineAt // A4: failover sang provider 2 chỉ khi còn đủ thời gian
         });
+        telemetry.visualProvidersTried = img.providersTried || [];
+        if (img.costClass) telemetry.visualCostClass = img.costClass;
         if (img.ok) out = { format: img.format, url: img.url, renderer: 'generated_image', model: img.model };
         else telemetry.visualError = img.reason;
       }
@@ -212,6 +275,14 @@ async function runVisualPipeline(args) {
       return { status: 'failed', decision, visuals: [], telemetry };
     }
 
+    // Rủi ro #3: nói THẲNG mức trung thực trong caption khi đề cần hình thật mà chỉ có sơ đồ. Người
+    // học phải biết đây là sơ đồ khái niệm, không phải hình giải phẫu/bản đồ thật — im lặng ở đây là
+    // để họ hiểu nhầm về thứ đang nhìn.
+    const schematicOnly = route.realismRequired && produced.renderer !== 'generated_image';
+    const schematicNote = spec.language === 'en'
+      ? ' (conceptual schematic — not a true anatomical/topographic figure)'
+      : ' (sơ đồ khái niệm — không phải hình giải phẫu/bản đồ thực tế)';
+
     const visual = {
       visualId: nextVisualId(),
       type: spec.type,
@@ -220,16 +291,23 @@ async function runVisualPipeline(args) {
       content: produced.content,
       url: produced.url,
       title: spec.title,
-      caption: spec.purpose,
+      caption: (spec.purpose || '') + (schematicOnly ? schematicNote : ''),
+      fidelity: schematicOnly ? 'schematic_only' : (route.fidelity || 'schematic'),
+      // B9.9: UI cần phân biệt hình TỰ ĐỘNG sinh với hình do người dùng yêu cầu tường minh (và
+      // trường hợp override setting "never" thì phải nói rõ vì sao vẫn có hình).
+      necessity: decision.imageNecessity || 'NONE',
+      overrodeNever: !!decision.overrodeNever,
       placement: decision.placement,
       fromCache: false
     };
+    if (schematicOnly) telemetry.visualFidelity = 'schematic_only';
 
     // PHẦN 22: chỉ cache khi VALIDATED + COMPLETED.
-    cache.set(keyParts, {
+    await cache.setAsync(keyParts, {
       type: visual.type, renderer: visual.renderer, format: visual.format,
       content: visual.content, url: visual.url, title: visual.title,
-      caption: visual.caption, placement: visual.placement
+      caption: visual.caption, placement: visual.placement,
+      fidelity: visual.fidelity, necessity: visual.necessity, overrodeNever: visual.overrodeNever
     }, { validated: true, answerComplete });
 
     telemetry.visualGenerated = true;
@@ -243,4 +321,7 @@ async function runVisualPipeline(args) {
   }
 }
 
-module.exports = { runVisualPipeline, detectVisualFactConflicts, VISUAL_DEADLINE_MS, MIN_REMAINING_FOR_VISUAL_MS };
+module.exports = {
+  runVisualPipeline, detectVisualFactConflicts, resolveVisualDegradeLevel,
+  VISUAL_DEADLINE_MS, MIN_REMAINING_FOR_VISUAL_MS, DEGRADE_MEDIUM_MS, DEGRADE_LOW_MS
+};

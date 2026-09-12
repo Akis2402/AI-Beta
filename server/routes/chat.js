@@ -4,7 +4,7 @@ const express = require('express');
 const router = express.Router();
 const {
   getActiveProviders, ensureProvidersReady, callWithFailover, callFastest, streamWithFailover,
-  gatherCrossCheckCandidates
+  gatherCrossCheckCandidates, emptyUsageAccumulator, accumulateUsage
 } = require('../utils/aiProviders');
 // Timeout riêng cho LƯỢT TỔNG HỢP cuối (sau khi đã có candidates) — tách khỏi CROSS_CHECK_BUDGET_MS
 // (ngân sách đó chỉ tính cho bước THU THẬP lượt giải). Có timeout riêng, rõ ràng để lượt tổng hợp
@@ -12,11 +12,35 @@ const {
 const RECONCILE_TIMEOUT_MS = Number(process.env.RECONCILE_TIMEOUT_MS) || 25000;
 const {
   buildChatSystemPrompt,
+  buildChatSystemPromptParts,
   buildVariantAddendum,
   buildReconcileSystemPrompt,
+  buildReconcileSystemPromptParts,
   PROMPT_VERSION
 } = require('../utils/promptBuilder');
+// A1: system prompt đi xuống provider dưới dạng PromptParts để khối TĨNH thực sự được prompt-cache
+// (Anthropic: cache_control tường minh; OpenAI/Gemini: prefix trùng => implicit cache).
+const { appendToSystem, systemToString, estimatePromptTokens } = require('../utils/systemPromptParts');
+
+/**
+ * B10 — các field telemetry token MỚI, phẳng hoá để đi thẳng vào log (không lồng object).
+ * `cachedTokens`/`cacheSavedTokens` là số THẬT provider báo về (Anthropic: cache_read_input_tokens),
+ * không phải ước lượng — nhờ vậy báo cáo hiệu quả A1 là MEASURED chứ không phải ESTIMATED.
+ */
+function usageTelemetryFields(usage) {
+  if (!usage) return {};
+  return {
+    providerInputTokens: usage.inputTokens,
+    providerOutputTokens: usage.outputTokens,
+    cachedTokens: usage.cachedTokens,
+    cacheCreationTokens: usage.cacheCreationTokens,
+    cacheSavedTokens: usage.cacheSavedTokens,
+    providerCalls: usage.calls
+  };
+}
 const { validateChatBody } = require('../utils/validators');
+// B5: nén representation của candidate cho lượt reconcile (dedup prose, GIỮ NGUYÊN mọi dữ kiện).
+const { compactCandidatesForReconcile } = require('../utils/verificationPacket');
 // Mục II master spec: "Hướng giải" (approach) phải ngắn/compact, độc lập với "Lời giải" — validator
 // + repair NGẮN (KHÔNG regenerate toàn bộ, KHÔNG retry vô hạn) khi model lỡ sinh approach quá dài/
 // leak đáp số/tính toán chi tiết.
@@ -481,8 +505,22 @@ router.post('/', async (req, res, next) => {
     const rawSystemPrompt = buildChatSystemPrompt({
       ...input, problemText, contexts: citationIndex.effectiveContexts
     });
-    const preSystemPrompt = buildChatSystemPrompt({ ...input, problemText });
-    const systemPack = contextCompressor.compressSystemPrompt(preSystemPrompt);
+    // ---------- A1: NÉN CHỈ PHẦN ĐỘNG, GIỮ NGUYÊN TỪNG KÝ TỰ PHẦN TĨNH ----------
+    // compressSystemPrompt() chuẩn hoá khoảng trắng + dedupe dòng lặp. Nếu cho nó chạm vào khối
+    // TĨNH, khối đó sẽ khác nhau tuỳ nội dung xung quanh -> cache key KHÔNG ổn định -> toàn bộ lợi
+    // ích prompt caching biến mất. Khối tĩnh vốn không có dòng lặp nên cũng chẳng nén được gì.
+    const preParts = buildChatSystemPromptParts({ ...input, problemText });
+    const dynamicPack = contextCompressor.compressSystemPrompt(preParts.dynamicPart);
+    const staticTokens = estimatePromptTokens(preParts.staticPart);
+    const systemPack = {
+      // Telemetry nén phải cộng CẢ phần tĩnh vào raw lẫn compressed, nếu không tỷ lệ nén báo cáo sẽ
+      // bị thổi phồng (raw có tĩnh, compressed thì không).
+      rawTokens: dynamicPack.rawTokens + staticTokens,
+      compressedTokens: dynamicPack.compressedTokens + staticTokens,
+      rolledBack: dynamicPack.rolledBack,
+      text: preParts.staticPart + dynamicPack.text,
+      parts: { staticPart: preParts.staticPart, dynamicPart: dynamicPack.text }
+    };
     const historyItems = contextCompressor.assignTiers(compressedHistory);
 
     const rawHistoryTokens = historyItems.reduce((acc, it) => acc + Math.ceil(String(it.text).length / 3.2), 0);
@@ -574,6 +612,9 @@ router.post('/', async (req, res, next) => {
     // có thể trả NHẦM kết quả đã cache của nhau). Ảnh: bypass hẳn L1 (xem tokenEconomy.js).
     const requirementsList = extractCoverageList(problemText);
     const teTelemetry = new tokenEconomy.TelemetryRecorder();
+    // B10/A1.8: usage THẬT cộng dồn cho CẢ request (candidate + reconcile + continuation), gồm
+    // cachedTokens/cacheSavedTokens do provider báo về — đo hiệu quả prompt caching (MEASURED).
+    const requestUsage = emptyUsageAccumulator();
     const sourceIdsFp = effectiveContexts.map((c) => `${c.doc}#${c.id}#${c.citeNo}`).sort().join(',');
     const tePlan = tokenEconomy.runTokenEconomyPipeline({
       problemText, historyText, contextsText, approachText: input.approachText,
@@ -661,8 +702,8 @@ router.post('/', async (req, res, next) => {
         if (input.crossCheck && input.stage === 'detail') {
           // PHẦN D (TIER 4): dùng system prompt ĐÃ nén boilerplate (systemPack) thay vì dựng lại —
           // vừa hiện thực hoá phần token tiết kiệm được, vừa bỏ 1 lần build prompt trùng lặp.
-          const system = systemPack.text;
-          const variantSystem = system + buildVariantAddendum();
+          const system = systemPack.parts;
+          const variantSystem = appendToSystem(system, buildVariantAddendum());
 
           // Mục XII/XXII (spec token-compression v2): KHÔNG được giảm SỐ LƯỢNG candidate cross-check
           // chỉ vì risk thấp — token saving CHỈ được đến từ nén representation/context, không phải
@@ -690,6 +731,7 @@ router.post('/', async (req, res, next) => {
               signal
             });
             candidates = gathered.candidates;
+            accumulateUsage(requestUsage, gathered.usage && { ...gathered.usage });
           } finally {
             clearInterval(heartbeat);
           }
@@ -708,10 +750,15 @@ router.post('/', async (req, res, next) => {
           const hasWebSearch = sourceCoverage.webRequired;
           const agreement = candidatesAgree(candidates);
           const reconcileStage = agreement ? 'reconcileLight' : 'reconcile';
-          const reconcileSystem = buildReconcileSystemPrompt({
+          // B5: candidate DÀI được thay bằng VERIFICATION PACKET (đáp số/công thức/bước/điều kiện/
+          // dữ kiện — giữ nguyên văn), bỏ prose không phục vụ verification. Candidate ngắn giữ
+          // nguyên văn. Đây là token saving bằng DEDUP, không phải cắt suy luận.
+          const packed = compactCandidatesForReconcile(candidates);
+          reqLogger.log({ stage: 'verification_packet', ...packed.stats });
+          const reconcileSystem = buildReconcileSystemPromptParts({
             // candidates ở đây đã được strip <thinking>/<think> ngay từ gatherCrossCheckCandidates()
             // (xem server/utils/aiProviders.js) — không cần strip lại ở đây.
-            candidates,
+            candidates: packed.candidates,
             contexts: input.contexts,
             settings: input.settings,
             hasWebSearch,
@@ -829,12 +876,12 @@ router.post('/', async (req, res, next) => {
           teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
           teTelemetry.record('outputTokens', full.length / 3.2);
           teTelemetry.record('continuationTokens', reconcileRun.session.continuationTokens);
-          reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry, ...visualRun.telemetry });
+          reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...compressionTelemetry, ...visualRun.telemetry });
           return res.end();
         }
 
         // ---------- Giai đoạn "hướng giải" hoặc chế độ "Nhanh": stream trực tiếp 1 lượt duy nhất ----------
-        const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
+        const system = systemPack.parts; // PHẦN D (TIER 4): bản đã nén boilerplate (A1: dạng PromptParts)
         // LỖI GỐC (ảnh người dùng gửi): giai đoạn "hướng giải" (approach) bị cắt ngang giữa
         // câu ("- Khai thác tính") vì maxTokens cố định 700 bất kể độ dài đề bài/deepThinking. FIX:
         // dùng ADAPTIVE TOKEN BUDGET (mục III, xem adaptiveBudget.js) thay vì hằng số cố định.
@@ -942,7 +989,7 @@ router.post('/', async (req, res, next) => {
         teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
         teTelemetry.record('outputTokens', full.length / 3.2);
         teTelemetry.record('continuationTokens', directRun.session.continuationTokens);
-        reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry, ...directVisualRun.telemetry });
+        reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...compressionTelemetry, ...directVisualRun.telemetry });
         return res.end();
       } catch (streamErr) {
         // Header SSE đã gửi (200 text/event-stream) — không thể chuyển sang next(err) để trả JSON
@@ -978,12 +1025,12 @@ router.post('/', async (req, res, next) => {
     // ngân sách thời gian tổng + thử lại provider lỗi SONG SONG) để tránh lặp logic và tránh cộng
     // dồn thời gian chờ tuần tự — xem giải thích chi tiết ở đầu server/utils/aiProviders.js.
     if (input.crossCheck && input.stage === 'detail') {
-      const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
-      const variantSystem = system + buildVariantAddendum();
+      const system = systemPack.parts; // PHẦN D (TIER 4): bản đã nén boilerplate (A1: dạng PromptParts)
+      const variantSystem = appendToSystem(system, buildVariantAddendum());
 
       // Mục XII/XXII: xem giải thích đầy đủ ở nhánh streaming phía trên — không giảm số candidate
       // theo risk, luôn dùng CROSS_CHECK_MAX_CANDIDATES mặc định.
-      const { candidates } = await gatherCrossCheckCandidates(activeProviders, {
+      const { candidates, usage: crossCheckUsage } = await gatherCrossCheckCandidates(activeProviders, {
         system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget,
         reasoningBudget: budgetOf('candidate').reasoningBudget,
         requestId: reqLogger.requestId,
@@ -992,6 +1039,7 @@ router.post('/', async (req, res, next) => {
         requireVision: !!input.image,
         signal
       });
+      accumulateUsage(requestUsage, crossCheckUsage && { ...crossCheckUsage });
 
       if (!candidates.length) {
         const err = new Error('Tất cả nhà cung cấp AI đã cấu hình đều gặp lỗi khi giải bài. Vui lòng kiểm tra lại API key trong .env.');
@@ -1004,10 +1052,12 @@ router.post('/', async (req, res, next) => {
       const hasWebSearch = sourceCoverage.webRequired;
       const agreement = candidatesAgree(candidates);
       const reconcileStage = agreement ? 'reconcileLight' : 'reconcile';
-      const reconcileSystem = buildReconcileSystemPrompt({
+      const packed = compactCandidatesForReconcile(candidates); // B5 — xem nhánh streaming ở trên
+      reqLogger.log({ stage: 'verification_packet', ...packed.stats });
+      const reconcileSystem = buildReconcileSystemPromptParts({
         // candidates ở đây đã được strip <thinking>/<think> ngay từ gatherCrossCheckCandidates()
         // (xem server/utils/aiProviders.js) — không cần strip lại ở đây.
-        candidates,
+        candidates: packed.candidates,
         contexts: input.contexts,
         settings: input.settings,
         hasWebSearch,
@@ -1075,7 +1125,7 @@ router.post('/', async (req, res, next) => {
       if (!tePlan.cacheBypassed && !reconcilePartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
       if (!reconcilePartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, finalText.length / 3.2);
       teTelemetry.record('outputTokens', finalText.length / 3.2);
-      reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot() });
+      reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot() });
       return res.json(jsonDonePayload);
     }
 
@@ -1089,7 +1139,7 @@ router.post('/', async (req, res, next) => {
     // nhưng SAI tinh thần "Suy nghĩ sâu" (ưu tiên capability, không phải tốc độ). deepThinking=true
     // chuyển sang callWithFailover() — vẫn tự động failover khi lỗi, nhưng thử TUẦN TỰ theo rotation
     // công bằng với model ĐẦY ĐỦ (fast:false) thay vì đua nhiều target bằng model nhẹ.
-    const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
+    const system = systemPack.parts; // PHẦN D (TIER 4): bản đã nén boilerplate (A1: dạng PromptParts)
     const directBudget = budgetOf(input.stage === 'approach' ? 'approach' : 'detail');
     const directCaller = callMode.fast ? callFastest : callWithFailover;
     // PHẦN 8 FIX: modelTier THỰC SỰ ảnh hưởng lựa chọn model (trước đây chỉ log — dead optimization).
@@ -1144,7 +1194,7 @@ router.post('/', async (req, res, next) => {
     if (!directJsonPartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', text.length / 3.2);
     teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
     teTelemetry.record('outputTokens', text.length / 3.2);
-    reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot() });
+    reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot() });
     res.json(finalJsonPayload);
   } catch (err) {
     // mục 4: lỗi (bao gồm err.cancelled từ abortLink.js khi bị hủy) xảy ra SAU KHI client đã ngắt

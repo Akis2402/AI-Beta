@@ -39,6 +39,36 @@ const MIN_ANSWER_TOKENS = 700;
 const ANTHROPIC_MIN_THINKING = 1024;
 /** Trần reasoning mặc định — giữ reasoning SÂU nhưng không để 1 request ăn vô hạn ngân sách. */
 const DEFAULT_MAX_REASONING = Number(process.env.MAX_REASONING_TOKENS) || 12000;
+// ============================================================================================
+// A2 — TRẦN REASONING PHẢI THEO ĐÚNG MODEL, KHÔNG DÙNG 1 HẰNG SỐ GLOBAL
+// ============================================================================================
+// RỦI RO ĐÃ TỰ GHI NHẬN trong CHANGELOG-THINKING-VISUAL.md mục G.4 nhưng chưa xử lý:
+// DEFAULT_MAX_REASONING áp dụng y hệt cho MỌI model. Với 1 model nhỏ có trần output thật chỉ
+// 4096 token, việc xin 12000 token reasoning là vô nghĩa (providerMaxTokens = answer + reasoning
+// vượt xa max output của model -> hoặc bị API từ chối, hoặc bị cắt ngang giữa chừng).
+//
+// NAY: nếu capabilities (merge từ model-discovery qua executionTargets.js) biết `maxOutputTokens`
+// THẬT của model, trần reasoning bị KẸP theo model. KHÔNG biết -> giữ nguyên DEFAULT_MAX_REASONING
+// (không đổi hành vi mặc định khi thiếu thông tin — A2.4).
+//
+// Đây KHÔNG phải "cắt suy luận để tiết kiệm token": nó chỉ ngăn việc xin một ngân sách mà model
+// VẬT LÝ không thể cấp. Tỷ lệ 0.5 để phần answer luôn còn ít nhất nửa trần output của model.
+const MODEL_REASONING_SHARE = Number(process.env.MODEL_REASONING_SHARE) || 0.5;
+
+/**
+ * maxReasoningForModel() — trần reasoning THẬT cho 1 model cụ thể.
+ * @param {{maxOutputTokens?:number}} [capabilities]
+ * @param {number} [defaultCap]
+ * @returns {number}
+ */
+function maxReasoningForModel(capabilities, defaultCap = DEFAULT_MAX_REASONING) {
+  const maxOut = capabilities && Number(capabilities.maxOutputTokens);
+  if (!Number.isFinite(maxOut) || maxOut <= 0) return defaultCap;
+  const capped = Math.floor(maxOut * MODEL_REASONING_SHARE);
+  // Sàn ANTHROPIC_MIN_THINKING: không bao giờ trả về trần NHỎ HƠN mức tối thiểu hợp lệ của API,
+  // nếu không sẽ sinh ra budget vô lệ (max < min) ở requestBudgetPlanner.
+  return Math.max(ANTHROPIC_MIN_THINKING, Math.min(defaultCap, capped));
+}
 
 /**
  * Tỉ lệ reasoning/answer theo độ phức tạp. KHÔNG giảm theo token pressure — token saving phải đến
@@ -90,6 +120,8 @@ function getReasoningBudgetPolicy(provider, model, capabilities, context = {}) {
   if (!deepThinking || fast) return base;
 
   const capsKnown = capabilities && typeof capabilities === 'object';
+  // A2: trần reasoning của ĐÚNG model này (kẹp theo maxOutputTokens thật nếu discovery biết).
+  const modelCap = maxReasoningForModel(capsKnown ? capabilities : null);
   const nativeCapable = capsKnown
     ? !!(capabilities.supportsThinking || capabilities.supportsAdaptiveThinking)
     : true; // legacy direct call: giữ hành vi permissive cũ
@@ -106,7 +138,7 @@ function getReasoningBudgetPolicy(provider, model, capabilities, context = {}) {
       countsAgainstOutput: true,     // max_tokens bao gồm cả thinking -> PHẢI cộng thêm
       supportsExplicitBudget: true,
       minReasoningTokens: ANTHROPIC_MIN_THINKING,
-      maxReasoningTokens: DEFAULT_MAX_REASONING
+      maxReasoningTokens: modelCap
     };
   }
 
@@ -118,7 +150,7 @@ function getReasoningBudgetPolicy(provider, model, capabilities, context = {}) {
       countsAgainstOutput: true,     // reasoning token tính vào max_output_tokens
       supportsExplicitBudget: false, // chỉ có 'effort', không có số token cụ thể
       minReasoningTokens: 1024,
-      maxReasoningTokens: DEFAULT_MAX_REASONING
+      maxReasoningTokens: modelCap
     };
   }
 
@@ -129,13 +161,13 @@ function getReasoningBudgetPolicy(provider, model, capabilities, context = {}) {
     if (isGen3) {
       return {
         ...base, mechanism: 'gemini_level', native: true, countsAgainstOutput: true,
-        supportsExplicitBudget: false, minReasoningTokens: 1024, maxReasoningTokens: DEFAULT_MAX_REASONING
+        supportsExplicitBudget: false, minReasoningTokens: 1024, maxReasoningTokens: modelCap
       };
     }
     if (is25 || !capsKnown) {
       return {
         ...base, mechanism: 'gemini_budget', native: true, countsAgainstOutput: true,
-        supportsExplicitBudget: true, minReasoningTokens: 1024, maxReasoningTokens: DEFAULT_MAX_REASONING
+        supportsExplicitBudget: true, minReasoningTokens: 1024, maxReasoningTokens: modelCap
       };
     }
     // Thế hệ không xác định: fail-safe, không gửi cấu hình native mù (PHẦN 4).
@@ -150,7 +182,7 @@ function getReasoningBudgetPolicy(provider, model, capabilities, context = {}) {
     countsAgainstOutput: false, // đa số dùng max_tokens riêng cho completion; không cộng mù
     supportsExplicitBudget: false,
     minReasoningTokens: 0,
-    maxReasoningTokens: DEFAULT_MAX_REASONING
+    maxReasoningTokens: modelCap
   };
 }
 
@@ -173,6 +205,8 @@ function thinkingLevelFromBudget(reasoningBudget) {
 
 module.exports = {
   getReasoningBudgetPolicy,
+  maxReasoningForModel,
+  MODEL_REASONING_SHARE,
   effortFromBudget,
   thinkingLevelFromBudget,
   REASONING_RATIO,

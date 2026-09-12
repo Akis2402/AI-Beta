@@ -19,7 +19,28 @@
 
 // Toàn bộ bảng trọng số/ngưỡng/veto nằm ở visualScoringConfig.js — xem lý do tách ở đầu file đó.
 const CFG = require('./visualScoringConfig');
-const { SETTING, THRESHOLD, BORDERLINE_BAND, SUBJECT_SIGNALS, GENERIC_SIGNALS, HARD_VETO, LOW_VALUE_SUBJECTS, MODIFIERS, SPATIAL_RE, PROCESS_RE } = CFG;
+const { SETTING, THRESHOLD, BORDERLINE_BAND, SUBJECT_SIGNALS, GENERIC_SIGNALS, ENGLISH_SIGNALS, ADVANCED_SIGNALS, HARD_VETO, LOW_VALUE_SUBJECTS, MODIFIERS, SPATIAL_RE, PROCESS_RE } = CFG;
+
+// ---------- B9.1: 5 mức nhu cầu hình, theo đúng ngữ nghĩa sản phẩm ----------
+// USER_REQUESTED luôn nằm TRÊN CÙNG trong image routing priority (B9.6) — kể cả khi score thấp.
+const NECESSITY = {
+  NONE: 'NONE',
+  OPTIONAL: 'OPTIONAL',
+  HELPFUL: 'HELPFUL',
+  NECESSARY: 'NECESSARY',
+  USER_REQUESTED: 'USER_REQUESTED'
+};
+
+function classifyNecessity({ explicitRequest, score, threshold, borderline, should }) {
+  // USER_REQUESTED chỉ có nghĩa khi hình THỰC SỰ được tạo. Nếu quyết định cuối vẫn là KHÔNG vẽ
+  // (bị HARD_VETO chặn, hoặc hình sẽ dư thừa vì câu trả lời đã có sẵn khối vẽ), gán USER_REQUESTED
+  // sẽ nói dối tầng routing/telemetry rằng đây là hình ưu tiên cao nhất.
+  if (explicitRequest && should) return NECESSITY.USER_REQUESTED;
+  if (!should) return borderline ? NECESSITY.OPTIONAL : NECESSITY.NONE;
+  if (Number.isFinite(threshold) && score >= threshold + 0.2) return NECESSITY.NECESSARY;
+  if (Number.isFinite(threshold) && score >= threshold) return NECESSITY.HELPFUL;
+  return borderline ? NECESSITY.OPTIONAL : NECESSITY.NONE;
+}
 
 /**
  * Ước lượng "độ dư thừa" — hình chỉ lặp lại điều text đã nói rõ thì KHÔNG đáng tạo (PHẦN 14).
@@ -57,29 +78,45 @@ function evaluateVisualNeed(input = {}) {
   } = input;
 
   const pref = [SETTING.AUTO, SETTING.ALWAYS, SETTING.NEVER].includes(userPreference) ? userPreference : SETTING.AUTO;
-  const threshold = THRESHOLD[pref];
+  // A3: khi override setting "never" bằng yêu cầu tường minh, THRESHOLD[never] (vô cực/không dùng
+  // được) sẽ chặn mọi score — nên chấm điểm theo ngưỡng AUTO, đúng như khi người dùng để mặc định.
+  const explicitOverrideNever = pref === SETTING.NEVER
+    && GENERIC_SIGNALS.some((s) => s.explicit && s.re.test(String(question || '')));
+  const threshold = explicitOverrideNever ? THRESHOLD[SETTING.AUTO] : THRESHOLD[pref];
 
   const noVisual = (reason, extra = {}) => ({
     shouldGenerateImage: false, confidence: 0, visualType: 'no_visual',
     visualPurpose: '', suggestedCount: 0, placement: 'none', generationPriority: 'low',
-    score: 0, threshold, borderline: false, reason, signals: {}, ...extra
+    score: 0, threshold, borderline: false, reason, imageNecessity: NECESSITY.NONE, signals: {}, ...extra
   });
-
-  // ---------- PHẦN 27: người dùng chọn "Never" ----------
-  if (pref === SETTING.NEVER) return noVisual('user_preference_never');
 
   const q = String(question || '').trim();
   if (!q) return noVisual('empty_question');
 
-  // ---------- TẦNG 1: HARD VETO (PHẦN 14) ----------
-  const veto = HARD_VETO.find((v) => v.re.test(q));
-  // Ngoại lệ: người dùng YÊU CẦU TƯỜNG MINH ("minh hoạ", "vẽ hình") thì tôn trọng yêu cầu đó.
+  // ---------- A3: YÊU CẦU TƯỜNG MINH phải được tính TRƯỚC mọi nhánh chặn ----------
+  // BUG CŨ: `if (pref === NEVER) return noVisual(...)` chạy TRƯỚC khi tính explicitRequest, nên
+  // người dùng đã tắt hình trong settings mà gõ thẳng "vẽ hình minh họa cho câu này" vẫn KHÔNG
+  // được vẽ và cũng không được báo gì — ngược đúng nguyên tắc USER_REQUESTED (yêu cầu tường minh
+  // của người dùng luôn ở ưu tiên cao nhất, trên cả setting mặc định).
   const explicitRequest = GENERIC_SIGNALS.some((s) => s.explicit && s.re.test(q));
-  if (veto && !explicitRequest) return noVisual(veto.reason);
+
+  // ---------- PHẦN 27 + A3: "Never" vẫn thắng, TRỪ khi có yêu cầu tường minh ----------
+  // Override CHỈ áp dụng cho LƯỢT NÀY — không đụng tới setting global của người dùng.
+  if (pref === SETTING.NEVER && !explicitRequest) return noVisual('user_preference_never');
+  const overrodeNever = pref === SETTING.NEVER && explicitRequest;
+
+  // ---------- TẦNG 1: HARD VETO (PHẦN 14) ----------
+  // HARD_VETO vẫn THẮNG TUYỆT ĐỐI kể cả khi có explicit request (A3.2) — giữ nguyên dòng cũ.
+  const veto = HARD_VETO.find((v) => v.re.test(q));
+  // Veto hạng `absolute` (không có gì để vẽ) thắng cả yêu cầu tường minh; veto hạng thường (giá trị
+  // thấp, không phải bằng không) thì người dùng được quyền override — xem chú thích ở HARD_VETO.
+  if (veto && (veto.absolute || !explicitRequest)) return noVisual(veto.reason);
   if (LOW_VALUE_SUBJECTS.has(subject) && !explicitRequest) return noVisual('low_value_subject');
 
   // ---------- TẦNG 2: SCORING ----------
-  const signalList = (SUBJECT_SIGNALS[subject] || []).concat(GENERIC_SIGNALS);
+  // Tín hiệu tiếng Anh và tín hiệu bậc đại học áp dụng cho MỌI môn: một đề bài tiếng Anh không
+  // thay đổi subjectId, và khái niệm đại học có thể xuất hiện ở bất kỳ môn nào (rủi ro #2).
+  const signalList = (SUBJECT_SIGNALS[subject] || []).concat(GENERIC_SIGNALS, ENGLISH_SIGNALS, ADVANCED_SIGNALS);
   const haystack = q + '\n' + String(answerPlan || '').slice(0, 4000);
   const matched = [];
   let educationalValue = 0;
@@ -107,7 +144,13 @@ function evaluateVisualNeed(input = {}) {
   const redundancy = estimateRedundancy(answerPlan);
   // Chi phí: hình cần render/gọi model; ambiguity: đề mơ hồ thì hình dễ vẽ sai (PHẦN 14).
   const ambiguity = q.length < 25 && !explicitRequest ? MODIFIERS.ambiguityPenalty : 0;
-  const cost = MODIFIERS.costPenalty;
+  // Bộ chuẩn mở rộng (rủi ro #2) phát hiện: "Cho tôi hình trực quan…", "Vẽ lại hình này…",
+  // "Generate an educational image…" đều ghi đúng 0.45 rồi bị costPenalty kéo xuống 0.39 — trượt
+  // ngưỡng 0.40 trong gang tấc. Tức là một YÊU CẦU TƯỜNG MINH bị từ chối vì… chi phí render. Sai
+  // về thứ tự ưu tiên: chi phí đã có cửa gác riêng và đúng chỗ hơn ở B9.15 (cost gate theo
+  // imageNecessity, nơi USER_REQUESTED được miễn), còn ở tầng QUYẾT ĐỊNH thì ý muốn tường minh của
+  // người dùng không nên bị một hệ số chi phí phủ quyết.
+  const cost = explicitRequest ? 0 : MODIFIERS.costPenalty;
 
   const score = Math.max(0, Math.min(1,
     educationalValue + spatialRelationship + processVisibility + complexityBonus
@@ -115,6 +158,11 @@ function evaluateVisualNeed(input = {}) {
   ));
 
   const borderline = Number.isFinite(threshold) && Math.abs(score - threshold) <= BORDERLINE_BAND;
+  // A3: yêu cầu tường minh KHÔNG ép `should=true` một cách mù quáng — nó chỉ đưa lượt này vào
+  // SCORING BÌNH THƯỜNG (ngưỡng AUTO) thay vì bị chặn ngay ở nhánh "never"/veto. Nhờ vậy các cơ
+  // chế chống hình VÔ ÍCH vẫn còn hiệu lực: hình DƯ THỪA (câu trả lời đã có sẵn khối ```shape),
+  // đề quá mơ hồ, môn low-value... Đề bài có chữ "vẽ" (vd "cho tam giác ABC, vẽ đường cao AH")
+  // KHÔNG đồng nghĩa người dùng yêu cầu ảnh minh hoạ thứ hai khi hình đã có.
   const should = score >= threshold && bestType !== 'no_visual';
 
   // PHẦN 23.9/23.10: một câu trả lời nhiều ví dụ tương tự KHÔNG mặc định tạo nhiều hình —
@@ -129,11 +177,20 @@ function evaluateVisualNeed(input = {}) {
     visualPurpose: should ? purposeFor(bestType) : '',
     suggestedCount,
     placement: should ? placementFor(bestType) : 'none',
-    generationPriority: score >= threshold + 0.2 ? 'high' : score >= threshold ? 'medium' : 'low',
+    generationPriority: explicitRequest ? 'high'
+      : score >= threshold + 0.2 ? 'high' : score >= threshold ? 'medium' : 'low',
     score: Number(score.toFixed(3)),
     threshold,
     borderline,
-    reason: should ? 'above_threshold' : (borderline ? 'borderline' : 'below_threshold'),
+    // B9.1: phân loại 5 mức TƯỜNG MINH, map từ score/threshold/explicitRequest ĐÃ TÍNH ở trên
+    // (không tính lại từ đầu, 0 token).
+    imageNecessity: classifyNecessity({ explicitRequest, score, threshold, borderline, should }),
+    // A3.3: telemetry phân biệt được lượt nào là override setting "never".
+    reason: overrodeNever ? 'explicit_override_never'
+      : should ? (explicitRequest ? 'explicit_request' : 'above_threshold')
+      : (borderline ? 'borderline' : 'below_threshold'),
+    explicitRequest,
+    overrodeNever,
     signals: {
       educationalValue: Number(educationalValue.toFixed(3)),
       spatialRelationship, processVisibility, complexityBonus,
@@ -209,12 +266,17 @@ function applyModelJudgement(decision, judgement) {
       : decision.visualType,
     suggestedCount: shouldGenerateImage ? Math.max(1, decision.suggestedCount) : 0,
     confidence: Number(Math.min(1, (decision.confidence + (judgement.confidence || 0.5)) / 2).toFixed(3)),
-    reason: shouldGenerateImage ? 'model_judgement_yes' : 'model_judgement_no'
+    reason: shouldGenerateImage ? 'model_judgement_yes' : 'model_judgement_no',
+    imageNecessity: shouldGenerateImage
+      ? (decision.imageNecessity === NECESSITY.USER_REQUESTED ? NECESSITY.USER_REQUESTED : NECESSITY.HELPFUL)
+      : NECESSITY.NONE
   };
 }
 
 module.exports = {
   evaluateVisualNeed,
+  NECESSITY,
+  classifyNecessity,
   needsModelJudgement,
   applyModelJudgement,
   estimateRedundancy,

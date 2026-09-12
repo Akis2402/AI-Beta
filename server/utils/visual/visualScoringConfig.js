@@ -81,20 +81,80 @@ const SUBJECT_SIGNALS = {
   ]
 };
 
+// ============================================================================================
+// RỦI RO #2 — MỞ RỘNG PHÂN PHỐI: tín hiệu TIẾNG ANH và tín hiệu ĐẠI HỌC
+// ============================================================================================
+// Bộ chuẩn cũ 100% tiếng Việt phổ thông, nên toàn bộ bảng tín hiệu cũng chỉ có regex tiếng Việt —
+// một đề bài tiếng Anh ("Draw a free body diagram...") ghi 0 điểm và bị bỏ qua hoàn toàn, dù
+// LANG=auto là chế độ được hỗ trợ chính thức của sản phẩm. Đây là lỗ hổng THẬT, chỉ lộ ra khi bộ
+// chuẩn được mở rộng sang vùng phân phối đó.
+//
+// Trọng số đặt NGANG BẰNG bản tiếng Việt tương ứng: cùng một khái niệm thì cùng một mức tín hiệu,
+// không thiên vị ngôn ngữ.
+const ENGLISH_SIGNALS = [
+  { id: 'en.plot', re: /\b(graph of|sketch the graph|plot the|asymptote|parabola|hyperbola)\b/i, type: 'mathematical_plot', w: 0.56 },
+  { id: 'en.geometry', re: /\b(triangle|quadrilateral|rectangle|rhombus|trapezoid|circle|tangent line)\b/i, type: 'geometry_diagram', w: 0.52 },
+  { id: 'en.solid', re: /\b(pyramid|prism|cuboid|sphere|cone|cylinder|polyhedron)\b/i, type: 'geometry_3d', w: 0.54 },
+  { id: 'en.forces', re: /\b(free[- ]body diagram|friction|normal force|resultant force|torque|inclined plane)\b/i, type: 'physics_diagram', w: 0.5 },
+  { id: 'en.circuit', re: /\b(circuit|resistor|capacitor|inductor|in series|in parallel)\b/i, type: 'circuit_diagram', w: 0.5 },
+  { id: 'en.optics', re: /\b(ray of light|refraction|reflection|lens|mirror)\b/i, type: 'optics_diagram', w: 0.5 },
+  { id: 'en.biology', re: /\b(cell|chloroplast|mitochondri(?:on|a)|membrane|organelle|anatomy)\b/i, type: 'biology_diagram', w: 0.5 },
+  { id: 'en.chemistry', re: /\b(molecular structure|structural formula|isomer|orbital|reaction mechanism)\b/i, type: 'chemistry_structure', w: 0.5 },
+  { id: 'en.flowchart', re: /\b(flowchart|state machine|state diagram|pipeline|workflow)\b/i, type: 'flowchart', w: 0.5 },
+  { id: 'en.architecture', re: /\b(architecture diagram|system diagram|client[- ]server|topology)\b/i, type: 'architecture_diagram', w: 0.48 },
+  { id: 'en.datastructure', re: /\b(binary (search )?tree|linked list|hash table|adjacency (list|matrix))\b/i, type: 'data_structure_diagram', w: 0.5 },
+  { id: 'en.map', re: /\b(map of|region|terrain|cross[- ]section)\b/i, type: 'map_diagram', w: 0.46 }
+];
+
+// Tín hiệu bậc ĐẠI HỌC/sau phổ thông — bộ chuẩn cũ không có mẫu nào nên các khái niệm này chưa từng
+// được tính điểm, dù chúng hiển nhiên cần hình.
+const ADVANCED_SIGNALS = [
+  { id: 'adv.phasor', re: /(giản đồ (fresnel|vector|véc ?tơ)|phasor|giản đồ pha)/i, type: 'physics_diagram', w: 0.52 },
+  { id: 'adv.linalg', re: /(không gian vector|hệ phương trình tuyến tính|ánh xạ tuyến tính|không gian con)/i, type: 'geometry_diagram', w: 0.44 },
+  { id: 'adv.mechanism', re: /(cơ chế phản ứng|s_?n1|s_?n2|đảo cấu hình|chuyển vị)/i, type: 'chemistry_structure', w: 0.5 },
+  { id: 'adv.state', re: /(chuyển trạng thái|máy trạng thái|sơ đồ trạng thái|vòng đời (tiến trình|tiến trình|đối tượng))/i, type: 'flowchart', w: 0.5 },
+  { id: 'adv.transform', re: /(chuyển ho[áa] giữa|chuỗi chuyển ho[áa]|sơ đồ chuyển ho[áa])/i, type: 'flowchart', w: 0.48 }
+];
+
 const GENERIC_SIGNALS = [
   // "vẽ ..." / "đồ thị" là YÊU CẦU TƯỜNG MINH của người dùng — bộ chuẩn
   // (test/visual-decision-corpus.test.js) phát hiện bản đầu bỏ sót "Vẽ đồ thị y=x^2" vì câu quá
   // ngắn nên bị phạt ambiguity. Yêu cầu tường minh luôn miễn phạt ambiguity (xem decision engine).
-  { id: 'generic.explicit', re: /(minh hoạ|minh họa|vẽ\s+\S|hình vẽ|sơ đồ|biểu đồ|đồ thị|mô tả bằng hình)/i, type: 'auto', w: 0.45, explicit: true },
+  // B9.10: bổ sung các biến thể diễn đạt mà bộ chuẩn mở rộng phát hiện bị bỏ sót — "tạo infographic",
+  // "cho tôi hình trực quan", "tạo hình ảnh mô phỏng", và toàn bộ nhánh TIẾNG ANH ("draw", "sketch",
+  // "generate an educational image", "illustrate", "label the..."). Thiếu chúng thì một yêu cầu
+  // tường minh hiển nhiên của người dùng vẫn bị chấm 0 điểm.
+  {
+    id: 'generic.explicit',
+    re: /(minh hoạ|minh họa|vẽ\s+\S|vẽ lại|hình vẽ|sơ đồ|biểu đồ|đồ thị|mô tả bằng hình|infographic|hình trực quan|hình ảnh mô phỏng|tạo hình|hình minh)|\b(draw|sketch|illustrate|diagram|plot|visuali[sz]e|generate an? (educational )?image|label the)\b/i,
+    type: 'auto', w: 0.45, explicit: true
+  },
   { id: 'generic.process', re: /(so sánh .{0,40}(giữa|với)|các giai đoạn|các bước .{0,20}(quá trình|quy trình))/i, type: 'flowchart', w: 0.2 }
 ];
 
-// ---------- PHẦN 14: veto TUYỆT ĐỐI — KHÔNG override được bằng env ----------
+// ---------- PHẦN 14: veto — KHÔNG override được bằng env ----------
+// A3.2 (làm rõ sau khi bộ chuẩn mở rộng lộ ra mâu thuẫn): "veto tuyệt đối" và "yêu cầu tường minh
+// của người dùng luôn thắng" xung đột nhau ở đúng một điểm. Tách làm 2 hạng:
+//
+//   absolute:true  — KHÔNG CÓ GÌ ĐỂ VẼ. Phép tính tầm thường, câu hỏi định nghĩa. Người dùng có nhờ
+//                    cách mấy thì một hình cho "2+2" vẫn vô nghĩa. Explicit request KHÔNG phá được.
+//   absolute:false — giá trị THẤP chứ không phải bằng không (đề văn/ngoại ngữ). Ở đây người dùng
+//                    hiểu rõ bài của mình hơn heuristic: "vẽ sơ đồ tư duy cho bài thơ này" là yêu
+//                    cầu chính đáng, nên explicit request được phép override.
 const HARD_VETO = [
-  { re: /^\s*[-+(]?\s*\d[\d\s.,+\-*/^%():=]*\s*(bằng bao nhiêu|bằng mấy|là bao nhiêu|=)?\s*\?*\s*$/i, reason: 'pure_arithmetic' },
-  { re: /^\s*(tính|tinh)\s+[\d\s.,+\-*/^%():=]+\s*$/i, reason: 'pure_arithmetic' },
-  { re: /^\s*(định nghĩa|khái niệm|thế nào là|là gì)\b/i, reason: 'definition_only' },
-  { re: /\b(nêu|trình bày|phát biểu)\s+(định nghĩa|khái niệm|định luật|quy tắc)\b/i, reason: 'definition_only' },
+  { re: /^\s*[-+(]?\s*\d[\d\s.,+\-*/^%():=]*\s*(bằng bao nhiêu|bằng mấy|là bao nhiêu|=)?\s*\?*\s*$/i, reason: 'pure_arithmetic', absolute: true },
+  { re: /^\s*(tính|tinh)\s+[\d\s.,+\-*/^%():=]+\s*$/i, reason: 'pure_arithmetic', absolute: true },
+  // Phép tính tầm thường KÈM một lời nhờ vẽ hình ("2+2 bằng mấy, vẽ hình minh hoạ giúp tôi") — bản
+  // cũ chỉ khớp khi TOÀN BỘ câu là số, nên mệnh đề phụ phía sau làm veto trượt. Veto phải bám vào
+  // MỆNH ĐỀ CHÍNH: không có gì để vẽ cho 2+2, dù người dùng có nhờ cách mấy.
+  { re: /^\s*[-+(]?\s*\d[\d\s.,+\-*/^%():=]{0,24}(bằng bao nhiêu|bằng mấy|là bao nhiêu|=)?\s*\??\s*[,;.]/i, reason: 'pure_arithmetic', absolute: true },
+  { re: /^\s*(định nghĩa|khái niệm|thế nào là|là gì)\b/i, reason: 'definition_only', absolute: true },
+  // Bộ chuẩn mở rộng phát hiện: "Big-O của quicksort trung bình LÀ GÌ?" không khớp regex trên (vì
+  // "là gì" không đứng đầu câu) nên lọt xuống scoring và trúng tín hiệu "thuật toán" -> vẽ thừa.
+  // Câu hỏi định nghĩa/giá trị đơn lẻ kết thúc bằng "là gì?" KHÔNG có gì để vẽ, bất kể môn.
+  { re: /\blà\s+(gì|bao nhiêu)\s*\??\s*$/i, reason: 'definition_only', absolute: true },
+  { re: /^\s*(what is|what are|define)\b/i, reason: 'definition_only', absolute: true },
+  { re: /\b(nêu|trình bày|phát biểu)\s+(định nghĩa|khái niệm|định luật|quy tắc)\b/i, reason: 'definition_only', absolute: true },
   { re: /\b(dịch|translate|chia động từ|thì hiện tại|phân tích (câu|khổ thơ|bài thơ)|nghị luận)\b/i, reason: 'language_or_literature' }
 ];
 
@@ -138,7 +198,7 @@ applyEnvWeightOverrides();
 
 module.exports = {
   SETTING, THRESHOLD, BORDERLINE_BAND,
-  SUBJECT_SIGNALS, GENERIC_SIGNALS, HARD_VETO, LOW_VALUE_SUBJECTS,
+  SUBJECT_SIGNALS, GENERIC_SIGNALS, ENGLISH_SIGNALS, ADVANCED_SIGNALS, HARD_VETO, LOW_VALUE_SUBJECTS,
   MODIFIERS, SPATIAL_RE, PROCESS_RE,
   applyEnvWeightOverrides
 };

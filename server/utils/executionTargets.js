@@ -92,7 +92,12 @@ function buildTargetsForDef({ baseKey, baseLabel, apiKeyEnv, modelEnv, fastModel
         ...(modelCaps ? {
           supportsVision: !!(modelCaps.inputCapabilities && modelCaps.inputCapabilities.vision),
           supportsThinking: !!modelCaps.supportsReasoning,
-          supportsWebSearch: !!modelCaps.supportsWebSearch && !!(capabilities && capabilities.supportsWebSearch)
+          supportsWebSearch: !!modelCaps.supportsWebSearch && !!(capabilities && capabilities.supportsWebSearch),
+          // A2/B3: giới hạn THẬT của model đi kèm capability, để reasoningPolicy.js kẹp trần
+          // reasoning theo đúng model thay vì 1 hằng số global. Model discovery không biết ->
+          // field vắng mặt -> giữ nguyên hành vi mặc định.
+          ...(Number(modelCaps.maxOutputTokens) > 0 ? { maxOutputTokens: Number(modelCaps.maxOutputTokens) } : {}),
+          ...(Number(modelCaps.contextWindow) > 0 ? { contextWindow: Number(modelCaps.contextWindow) } : {})
         } : {})
       };
 

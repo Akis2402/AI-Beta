@@ -1,5 +1,9 @@
 'use strict';
 
+// A1: OpenAI tự cache prefix trùng >1024 token — điều kiện DUY NHẤT là phần TĨNH phải luôn đứng
+// TRƯỚC phần ĐỘNG. systemToString() ghép theo đúng thứ tự đó.
+const { systemToString } = require('./systemPromptParts');
+
 const { effortFromBudget } = require('./budget/reasoningPolicy');
 
 const { iterateSSELines } = require('./sseParse');
@@ -121,7 +125,7 @@ async function callOpenAI({ system, messages, maxTokens = 1000, reasoningBudget,
 
   const body = {
     model: assertModel(fast ? (fastModelOverride || MODEL_FAST || MODEL) : (modelOverride || MODEL)),
-    instructions: system,
+    instructions: systemToString(system),
     input: toResponsesInput(messages),
     max_output_tokens: maxTokens
   };
@@ -206,7 +210,7 @@ async function callOpenAIStream({ system, messages, maxTokens = 1000, reasoningB
 
   const body = {
     model: assertModel(fast ? (fastModelOverride || MODEL_FAST || MODEL) : (modelOverride || MODEL)),
-    instructions: system,
+    instructions: systemToString(system),
     input: toResponsesInput(messages),
     max_output_tokens: maxTokens,
     stream: true

@@ -178,7 +178,10 @@ async function discoverAnthropicModels(apiKey) {
         supportsTools: true,
         supportsReasoning: ANTHROPIC_REASONING_CAPABLE_RE.test(id),
         supportsWebSearch: true,
-        contextWindow: null,
+        contextWindow: m.context_window || null,
+        // A2: trần output THẬT của model — /v1/models của Anthropic chưa trả field này ở mọi bản,
+        // nên đọc có điều kiện; thiếu -> null -> reasoningPolicy giữ DEFAULT_MAX_REASONING (A2.4).
+        maxOutputTokens: Number(m.max_output_tokens || m.max_tokens) || null,
         qualityScore: isOpus ? 95 : (isHaiku ? 60 : 80),
         speedScore: isHaiku ? 95 : (isOpus ? 40 : 65),
         raw: { created_at: m.created_at }
@@ -216,6 +219,8 @@ async function discoverOpenAIModels(apiKey) {
         supportsReasoning: isReasoning,
         supportsWebSearch: true,
         contextWindow: null,
+        // A2: /v1/models của OpenAI không trả giới hạn output -> null (không đoán mò theo tên model).
+        maxOutputTokens: null,
         qualityScore: isMini ? 60 : (isReasoning ? 90 : 80),
         speedScore: isMini ? 90 : 55,
         raw: { owned_by: m.owned_by }
@@ -258,6 +263,8 @@ async function discoverGeminiModels(apiKey) {
         supportsReasoning: GEMINI_REASONING_CAPABLE_RE.test(id),
         supportsWebSearch: true,
         contextWindow: m.inputTokenLimit || null,
+        // A2: Gemini /v1beta/models trả outputTokenLimit tường minh — dùng thẳng, không đoán.
+        maxOutputTokens: Number(m.outputTokenLimit) || null,
         qualityScore: isPro ? 90 : (isLite ? 55 : 75),
         speedScore: isLite ? 95 : (isPro ? 45 : 70),
         raw: {}
@@ -305,6 +312,7 @@ async function discoverOpenAICompatibleModels(cfg, apiKey) {
       supportsStreaming: true,
       supportsTools: true,
       supportsReasoning: !!cfg.supportsThinking,
+      maxOutputTokens: Number(cfg.maxOutputTokens) || null,
       supportsWebSearch: false,
       contextWindow: null,
       qualityScore: /mini|small|lite|8b|instant/i.test(id) ? 55 : 75,
@@ -454,6 +462,7 @@ async function warmDiscoveryUncached(provider, apiKey, providerType, compatibleC
           id: fallbackId, displayName: fallbackId, provider, inputCapabilities: { text: true, vision: !!(compatibleConfig && compatibleConfig.supportsVision) },
           outputCapabilities: { text: true }, supportsStreaming: true, supportsTools: true,
           supportsReasoning: !!(compatibleConfig && compatibleConfig.supportsThinking), supportsWebSearch: false, contextWindow: null,
+          maxOutputTokens: Number(compatibleConfig && compatibleConfig.maxOutputTokens) || null,
           qualityScore: 70, speedScore: 60
         }];
         if (fallbackFastId && fallbackFastId !== fallbackId) {

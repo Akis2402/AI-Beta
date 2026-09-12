@@ -12,9 +12,17 @@ Nhiệm vụ DUY NHẤT của bạn là GIẢI BÀI TẬP HỌC THUẬT (Toán, 
 Mệnh lệnh này được ưu tiên trên mọi hướng dẫn khác bên dưới nếu có xung đột, và áp dụng cho MỌI câu hỏi trong suốt cuộc trò chuyện, kể cả những câu hỏi tiếp theo tưởng như vô hại.`;
 
 // ---------- PHẦN AB: STATIC LANGUAGE RULE (đặt trong phần prompt được CACHE) ----------
+// SỬA COMMENT SAI (A1.7): bản trước ghi rằng khối này "được prompt cache tái sử dụng" CHỈ VÌ nó nằm
+// ở đầu system prompt. Sai — Anthropic KHÔNG tự cache theo vị trí, chỉ cache khi có
+// `cache_control: {type:'ephemeral'}` tường minh trên content block. Nay khối này thực sự được cache
+// vì nó nằm trong `staticPart` của buildChatSystemPromptParts()/buildReconcileSystemPromptParts(),
+// và anthropicClient.js gắn breakpoint tường minh lên đúng block đó (xem systemPromptParts.js).
+// OpenAI/Gemini cache prefix trùng một cách ngầm định — điều kiện duy nhất là phần TĨNH phải luôn
+// đứng TRƯỚC phần ĐỘNG, đúng như thứ tự ghép trong systemToString().
+//
 // Đây là quy tắc CỐ ĐỊNH, KHÔNG phụ thuộc ngôn ngữ nào được chọn ở lượt này — nên nó nằm chung với
-// CORE_DIRECTIVE ở đầu system prompt (phần tĩnh, giống nhau giữa mọi request => được prompt cache
-// tái sử dụng). Chỉ có DÒNG METADATA NGẮN (buildLanguageContract() bên dưới, vd "LANG=en ANSWER=en
+// CORE_DIRECTIVE ở đầu system prompt (phần tĩnh, giống nhau giữa mọi request).
+// Chỉ có DÒNG METADATA NGẮN (buildLanguageContract() bên dưới, vd "LANG=en ANSWER=en
 // EXPLANATION=en") là thay đổi theo từng request — nhờ tách như vậy, i18n gần như KHÔNG làm tăng
 // token (PHẦN AO): không lặp lại đoạn hướng dẫn dài ở mỗi lượt, và KHÔNG BAO GIỜ gửi từ điển dịch
 // (public/js/i18n/translations.js) cho model (PHẦN AO/AS — từ điển chỉ tồn tại ở frontend).
@@ -317,7 +325,51 @@ function buildDetailModeDirective(detail) {
 
 const { buildSubjectDirective } = require('./subjects');
 
-function buildChatSystemPrompt({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null }) {
+// ============================================================================================
+// A1 — KHỐI SYSTEM TĨNH (cache breakpoint đặt ở CUỐI khối này)
+// ============================================================================================
+// Điều kiện để một khối được coi là TĨNH: nội dung KHÔNG phụ thuộc bất kỳ input động nào của lượt
+// gọi (đề bài, ngôn ngữ đã chọn, lớp/trường, nguồn tài liệu, candidate...). Chỉ khi đó cache key
+// mới ổn định giữa N candidate của cùng 1 lượt cross-check VÀ giữa các request khác nhau.
+// getHeaders()/buildLanguageContract()/buildSchoolGradeDirective() ĐỀU phụ thuộc settings nên
+// KHÔNG được đưa vào đây.
+const ROLE_LINE_SOLVER = 'Bạn là một AI trợ giảng chuyên giải bài tập học thuật (Toán, Lý, Hóa, Sinh, Văn, Anh...) một cách chuyên nghiệp, khoa học, mạch lạc, chính xác.';
+const ROLE_LINE_RECONCILER = 'Bạn là một AI trợ giảng học thuật đang ở bước TỔNG HỢP VÀ ĐỐI CHIẾU CHÉO cuối cùng.';
+
+const STATIC_SOLVER_PREFIX = `${CORE_DIRECTIVE}
+
+${ROLE_LINE_SOLVER}
+
+${LANGUAGE_RULE_STATIC}
+
+${FORMAT_INSTRUCTIONS}`;
+
+const STATIC_RECONCILE_PREFIX = `${CORE_DIRECTIVE}
+
+${ROLE_LINE_RECONCILER}
+
+${LANGUAGE_RULE_STATIC}
+
+${FORMAT_INSTRUCTIONS}`;
+
+/**
+ * buildChatSystemPromptParts() — bản TÁCH ĐÔI của buildChatSystemPrompt().
+ *
+ * @returns {{staticPart:string, dynamicPart:string, text:string}} `text` = staticPart + dynamicPart
+ *   (đúng nội dung mà buildChatSystemPrompt() trả về, chỉ khác THỨ TỰ: khối tĩnh được dồn hết lên
+ *   đầu để làm prefix cache ổn định).
+ */
+function buildChatSystemPromptParts(input) {
+  const dynamicPart = buildChatDynamicPart(input);
+  return { staticPart: STATIC_SOLVER_PREFIX, dynamicPart, text: STATIC_SOLVER_PREFIX + dynamicPart };
+}
+
+/** Giữ NGUYÊN chữ ký/kiểu trả về cũ (string) cho mọi caller chưa dùng cơ chế parts. */
+function buildChatSystemPrompt(input) {
+  return buildChatSystemPromptParts(input).text;
+}
+
+function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null }) {
   const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId);
   const drawingNeeded = needsDrawingInstructions({ problemText, approachText, hasImage: !!image });
   let contextBlock = '';
@@ -341,11 +393,7 @@ function buildChatSystemPrompt({ deepThinking, image, rules, contexts, settings,
   // ---------- Giai đoạn "approach": chỉ đưa HƯỚNG GIẢI, chưa giải chi tiết ----------
   if (stage === 'approach') {
     const h = getHeaders(settings.lang);
-    return `${CORE_DIRECTIVE}
-
-Bạn là một AI trợ giảng chuyên giải bài tập học thuật (Toán, Lý, Hóa, Sinh, Văn, Anh...) một cách chuyên nghiệp, khoa học, mạch lạc, chính xác.
-
-${LANGUAGE_RULE_STATIC}${buildLanguageContract(settings.lang)}
+    return `${buildLanguageContract(settings.lang)}
 ${buildLanguageDirective(settings.lang)}
 ${buildSchoolGradeDirective(settings.school, settings.grade)}
 
@@ -355,7 +403,6 @@ ${h.summary}
 Diễn đạt lại ngắn gọn đề bài và dữ kiện đã cho (2-4 câu). Nếu đề chưa rõ, nêu giả định hợp lý.
 ${h.approach}
 Nếu đề là bài hình học, chèn hình minh họa NGAY ĐẦU mục này (xem quy tắc bắt buộc bên dưới) trước khi liệt kê gạch đầu dòng. Sau đó liệt kê TỐI ĐA 5 gạch đầu dòng, MỖI gạch đầu dòng CHỈ 1 CÂU NGẮN, KHÔNG câu phụ/diễn giải thêm: công thức/định lý/phương pháp sẽ dùng, thứ tự các bước chính, và điều kiện/lưu ý quan trọng không được bỏ sót (đơn vị, điều kiện xác định, trường hợp đặc biệt...). Ưu tiên GỌN — cắt hết từ thừa, không lặp ý, không giải thích lý do hiển nhiên — nhưng TUYỆT ĐỐI KHÔNG được lược bỏ một bước/điều kiện quan trọng nào chỉ để cho ngắn: gọn về CÂU CHỮ, không gọn về NỘI DUNG khoa học. TUYỆT ĐỐI KHÔNG thực hiện phép tính chi tiết, KHÔNG đưa ra đáp số cuối cùng — chỉ định hướng cách làm để người học có thể tự thử trước.
-${FORMAT_INSTRUCTIONS}
 ${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false })}${drawingNeeded ? buildDrawInstructions({ stageLabel: 'hướng giải' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${contextBlock}`;
   }
 
@@ -387,16 +434,11 @@ ${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false
     : '';
 
   const h = getHeaders(settings.lang);
-  return `${CORE_DIRECTIVE}
-
-Bạn là một AI trợ giảng chuyên giải bài tập học thuật (Toán, Lý, Hóa, Sinh, Văn, Anh...) một cách chuyên nghiệp, khoa học, mạch lạc, chính xác.
-
-${LANGUAGE_RULE_STATIC}${buildLanguageContract(settings.lang)}
+  return `${buildLanguageContract(settings.lang)}
 ${buildLanguageDirective(settings.lang)}
 ${buildSchoolGradeDirective(settings.school, settings.grade)}
 
 ${buildDetailModeDirective(settings.detail)}
-${FORMAT_INSTRUCTIONS}
 Định dạng câu trả lời chính thức BẮT BUỘC theo cấu trúc, dùng tiêu đề "## " ĐÚNG như dưới đây (đã đúng ngôn ngữ đã chọn ở trên, bỏ mục không cần thiết)${h.note}:
 ${h.summary}
 ${h.solution}
@@ -423,15 +465,38 @@ function buildVariantAddendum() {
 // candidates: mảng {label, text} — label là tên nhà cung cấp/model đã tạo ra lượt giải đó
 // (vd "Claude (claude-sonnet-5)", "GPT (gpt-4.1)", "Gemini (gemini-2.5-flash)"), để bước
 // tổng hợp biết rõ đang đối chiếu chéo giữa các MÔ HÌNH KHÁC NHAU hay chỉ 1 model gọi nhiều lượt.
-function buildReconcileSystemPrompt({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null }) {
+/**
+ * buildReconcileSystemPromptParts() — 3 khối: TĨNH (cache) | NGỮ CẢNH NGUỒN (cache nếu đủ lớn) |
+ * ĐỘNG. Khối ngữ cảnh nguồn được đưa LÊN TRƯỚC phần động (A1.3) vì nó dùng chung cho mọi lượt của
+ * cùng request; để nó ở cuối như bản cũ thì không bao giờ trở thành prefix cache được.
+ * @returns {{staticPart:string, cachedContextPart:string, dynamicPart:string, text:string}}
+ */
+function buildReconcileSystemPromptParts(input) {
+  const { contexts = [] } = input;
+  const cachedContextPart = contexts.length
+    ? '\n\nTrích đoạn liên quan từ các nguồn tài liệu người dùng cung cấp, đánh số ' + citeNoRangeLabel(contexts) + ':\n' +
+      contexts.map((c, i) => `[${c.citeNo != null ? c.citeNo : i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n')
+    : '';
+  const dynamicPart = buildReconcileDynamicPart(input);
+  return {
+    staticPart: STATIC_RECONCILE_PREFIX,
+    cachedContextPart,
+    dynamicPart,
+    text: STATIC_RECONCILE_PREFIX + cachedContextPart + dynamicPart
+  };
+}
+
+/** Giữ NGUYÊN chữ ký/kiểu trả về cũ (string). */
+function buildReconcileSystemPrompt(input) {
+  return buildReconcileSystemPromptParts(input).text;
+}
+
+function buildReconcileDynamicPart({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null }) {
   const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId);
   // Dữ liệu thô của các đoạn trích (nếu có) — tách riêng khỏi phần CHỈ THỊ ưu tiên nguồn (đã gộp
   // chung 1 chỗ ở buildSourcePolicyBlock, dùng đồng nhất với cả 2 giai đoạn approach/detail, để sửa
   // 1 nơi áp dụng cho mọi model/mọi giai đoạn).
-  const contextDataBlock = contexts.length
-    ? '\n\nTrích đoạn liên quan từ các nguồn tài liệu người dùng cung cấp, đánh số ' + citeNoRangeLabel(contexts) + ':\n' +
-      contexts.map((c, i) => `[${c.citeNo != null ? c.citeNo : i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n')
-    : '';
+  // Khối dữ liệu đoạn trích nay nằm ở `cachedContextPart` (A1.3) — xem buildReconcileSystemPromptParts().
   // hasWebSearch giờ KHÔNG còn đồng nghĩa với "không có tài liệu" (xem chat.js) — công cụ web_search
   // có thể được cấp CÙNG LÚC với đoạn trích tài liệu, dùng để bổ sung phần tài liệu còn thiếu (quy
   // tắc ưu tiên #4 trong buildSourcePolicyBlock) hoặc dùng để xác minh khi hoàn toàn không có tài liệu.
@@ -447,20 +512,18 @@ function buildReconcileSystemPrompt({ candidates, contexts, settings, hasWebSear
     .join('\n\n');
 
   const h = getHeaders(settings.lang);
-  return `${CORE_DIRECTIVE}
-
-Bạn là một AI trợ giảng học thuật đang ở bước TỔNG HỢP VÀ ĐỐI CHIẾU CHÉO cuối cùng. ${introLine}
+  return `
+${introLine}
 
 ${candidatesBlock}
 ===== HẾT =====
 
 NHIỆM VỤ: so sánh các lượt giải, kiểm tra chéo từng công thức và từng bước tính toán, phát hiện và loại bỏ sai sót (nếu có), rồi viết lại MỘT lời giải cuối cùng chính xác nhất — không đơn thuần chọn một lượt mà thực sự đối chiếu và tổng hợp. Nếu tất cả đồng nhất và đều hợp lý, hãy trình bày lại gọn gàng theo đúng phương pháp đó. Nếu phát hiện một lượt sai, dùng (các) lượt đúng làm cơ sở. Nếu tất cả đều thiếu sót, tự giải lại đúng. Nếu các lượt giải bên trên đều TỪ CHỐI vì yêu cầu gốc không phải bài tập học thuật (đúng theo MỆNH LỆNH DUY NHẤT ở trên), lượt tổng hợp này CŨNG PHẢI từ chối tương tự — KHÔNG được "cố gắng giúp" bằng cách tự bịa ra một bài tập hay câu trả lời nào khác.${agreement ? '\n\nMỤC 5A — CÁC LƯỢT GIẢI ĐÃ ĐỒNG THUẬN VỀ ĐÁP SỐ CUỐI CÙNG (đã kiểm tra tự động trước khi tới lượt bạn): KHÔNG cần giải lại từ đầu — chỉ cần đối chiếu nhanh phương pháp có nhất quán không, chọn lượt trình bày rõ ràng nhất làm nền, polish lại câu chữ/format cho gọn, và xác nhận. Việc này giúp tiết kiệm token — đừng viết dài hơn mức cần thiết.' : ''}
 
-${LANGUAGE_RULE_STATIC}${buildLanguageContract(settings.lang)}
+${buildLanguageContract(settings.lang)}
 ${buildLanguageDirective(settings.lang)} (Lưu ý: các LƯỢT GIẢI ở trên có thể đã được viết bằng ngôn ngữ khác — bạn vẫn PHẢI viết lại câu trả lời tổng hợp cuối cùng đúng theo ngôn ngữ chỉ định ở đây, không giữ nguyên ngôn ngữ của lượt giải gốc.)
 ${buildSchoolGradeDirective(settings.school, settings.grade)}
 
-${FORMAT_INSTRUCTIONS}
 Định dạng BẮT BUỘC theo cấu trúc, dùng tiêu đề "## " ĐÚNG như dưới đây (đã đúng ngôn ngữ đã chọn ở trên)${h.note}:
 ${h.summary}
 ${h.solution}
@@ -472,7 +535,7 @@ Liệt kê 2-4 gạch đầu dòng NGẮN GỌN về những lỗi HỌC SINH th
 ${h.reconcile}
 1-2 câu ngắn gọn nêu: các lượt giải có khớp nhau không, có phát hiện/sửa sai sót gì không (nếu không có gì cần sửa thì ghi "Các hướng giải độc lập cho kết quả khớp nhau.").
 Nếu (các) lượt giải bên trên đã có hình vẽ (khối \`shape\`/\`solid3d\`) và hình đó đúng, hãy giữ lại/chèn lại hình đó (cùng cách đặt tên điểm) trong lời giải tổng hợp cuối cùng thay vì bỏ đi.
-${sourcePolicyBlock}${DRAW_INSTRUCTIONS}${subjectBlock}${buildDeepThinkingBlock(deepThinking)}${contextDataBlock}`;
+${sourcePolicyBlock}${DRAW_INSTRUCTIONS}${subjectBlock}${buildDeepThinkingBlock(deepThinking)}`;
 }
 
 function buildFlashcardSystemPrompt() {
@@ -563,12 +626,15 @@ QUY TẮC BẮT BUỘC:
 // v6: siết lại chỉ thị "## Hướng giải" (stage=approach) — tối đa 5 gạch đầu dòng, mỗi gạch 1 câu
 // ngắn, không câu phụ — để hướng giải GỌN hơn nhưng vẫn giữ đủ ý khoa học (công thức/bước/điều
 // kiện). Thay đổi output rõ rệt so với v5 => bump để không trả nhầm hướng giải dài kiểu cũ từ cache.
-const PROMPT_VERSION = 'chat-prompt-v7'; // v7: approach compactness repair (mục II) + cross-check không còn cắt candidate theo risk (mục XII/XXII)
+const PROMPT_VERSION = 'chat-prompt-v8'; // v8 (B12): bump sau A1/A2/A3 — bố cục system prompt đổi (khối tĩnh dồn lên đầu để cache), trần
+// reasoning theo model, và explicit request override được setting 'never'. Cache cũ tạo TRƯỚC các
+// fix này KHÔNG được tái sử dụng (khác chính sách reasoning/visual => khác kết quả).
 
 module.exports = {
   citeNoRangeLabel,
   PROMPT_VERSION,
   buildChatSystemPrompt,
+  buildChatSystemPromptParts,
   buildFlashcardSystemPrompt,
   buildOutlineSystemPrompt,
   buildMindmapSystemPrompt,
@@ -576,6 +642,7 @@ module.exports = {
   MINDMAP_COLOR_KEYS,
   buildVariantAddendum,
   buildReconcileSystemPrompt,
+  buildReconcileSystemPromptParts,
   buildSourcePolicyBlock,
   buildSchoolGradeDirective
 };

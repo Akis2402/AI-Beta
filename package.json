@@ -15,7 +15,9 @@
     "smoke-test": "node scripts/smoke-test.js",
     "check-static-assets": "node scripts/check-static-assets.js",
     "live-smoke": "node scripts/live-smoke.js",
-    "measure-tokens": "node scripts/measure-tokens.js"
+    "measure-tokens": "node scripts/measure-tokens.js",
+    "live-image-check": "node scripts/live-image-check.js",
+    "visual-corpus-report": "node scripts/visual-corpus-report.js"
   },
   "dependencies": {
     "compression": "^1.7.4",

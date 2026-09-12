@@ -180,6 +180,28 @@ function extractRegions(text, limit = 6) {
  *   relationships:string[], requiredEquations:string[], visualConstraints:string[],
  *   style:string, language:string, data:object}}
  */
+// ============================================================================================
+// RỦI RO #3 — RENDERER SINH HỌC/ĐỊA LÝ CHỈ Ở MỨC SƠ ĐỒ
+// ============================================================================================
+// deterministicRenderer dựng sơ đồ khối có nhãn — đủ cho "kể tên các bào quan", KHÔNG đủ cho "nhận
+// dạng cấu trúc lá cắt ngang" hay "đọc lát cắt địa hình thật". Hướng xử lý ĐÚNG là thừa nhận giới
+// hạn và định tuyến, KHÔNG phải làm renderer đoán hình giải phẫu (hình sai còn tệ hơn không hình —
+// PHẦN 26).
+//
+// `realismRequired` là tín hiệu đó: đề cần hình THẬT, không phải sơ đồ khái niệm.
+//   - Có image provider  -> ưu tiên image generation (router).
+//   - Không có           -> vẫn dựng sơ đồ, nhưng caption nói THẲNG đây là sơ đồ khái niệm, và
+//                           telemetry ghi `visualFidelity='schematic'` để người vận hành thấy nhu
+//                           cầu cấu hình image provider thay vì tưởng hệ thống đang chạy tốt.
+const REALISM_REQUIRED_RE = /(cắt ngang|lát cắt|giải phẫu|tiêu bản|vi thể|kính hiển vi|hình thái|nhận dạng|quan sát thực tế|ảnh chụp|ảnh vệ tinh|bản đồ (địa hình|tự nhiên|hành chính)|micrograph|cross[- ]section|anatomy|histolog)/i;
+
+/** @returns {boolean} đề đòi hình THẬT chứ không phải sơ đồ khái niệm. */
+function needsRealism(text, subject) {
+  if (!REALISM_REQUIRED_RE.test(String(text || ''))) return false;
+  // Chỉ có nghĩa với các môn mà renderer deterministic vốn chỉ đạt mức sơ đồ.
+  return ['biology', 'geography', 'chemistry', 'general'].includes(subject);
+}
+
 function buildVisualSpec({ decision, finalAnswer = '', question = '', subject = 'general', language = 'vi', grade = '' }) {
   const type = (decision && decision.visualType) || 'concept_illustration';
   // Chỉ đọc phần đầu của lời giải: dữ kiện/hình luôn được thiết lập ở đầu, phần sau là tính toán.
@@ -217,6 +239,8 @@ function buildVisualSpec({ decision, finalAnswer = '', question = '', subject = 
     requiredEquations,
     visualConstraints,
     style: 'educational_scientific',
+    // Rủi ro #3: đánh dấu tường minh những đề mà sơ đồ SVG không đủ trung thực.
+    realismRequired: needsRealism(source, subject),
     language: language === 'English' || language === 'en' ? 'en' : 'vi',
     grade: grade || '',
     subject,
@@ -278,6 +302,8 @@ function specFingerprint(spec) {
 }
 
 module.exports = {
+  needsRealism,
+  REALISM_REQUIRED_RE,
   buildVisualSpec, buildImagePrompt, specFingerprint,
   extractPointLabels, extractQuantities, extractEquations, extractSteps, extractPlottableFunction,
   extractNamedParts, extractMolecularFormula, extractRegions

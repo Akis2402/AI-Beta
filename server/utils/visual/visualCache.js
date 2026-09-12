@@ -11,11 +11,13 @@
 // CHỈ cache khi: VALIDATED + COMPLETED.
 
 const crypto = require('crypto');
+// A5: tầng LƯU TRỮ tách hẳn ra visualCacheStore.js (in-memory mặc định, external store khi có cấu
+// hình) — TOÀN BỘ logic buildKey/answerStructureHash/TTL/LRU/quality gate ở file này giữ NGUYÊN.
+const store = require('./visualCacheStore');
 
-const MAX_ENTRIES = Number(process.env.VISUAL_CACHE_MAX) || 200;
-const TTL_MS = Number(process.env.VISUAL_CACHE_TTL_MS) || 6 * 60 * 60 * 1000;
+const MAX_ENTRIES = store.MAX_ENTRIES;
+const TTL_MS = store.TTL_MS;
 
-const store = new Map(); // key -> {value, expiresAt}
 const stats = { hits: 0, misses: 0, writes: 0, rejected: 0 };
 
 function hash(obj) {
@@ -49,38 +51,72 @@ function buildKey(parts) {
   });
 }
 
+/**
+ * get() — ĐỒNG BỘ, chỉ tra in-memory. Giữ nguyên chữ ký cũ cho mọi caller/test hiện có.
+ */
 function get(parts) {
-  const key = buildKey(parts);
-  const hit = store.get(key);
-  if (!hit) { stats.misses++; return null; }
-  if (hit.expiresAt < Date.now()) { store.delete(key); stats.misses++; return null; }
+  const value = store.getSync(buildKey(parts));
+  if (!value) { stats.misses++; return null; }
   stats.hits++;
-  // LRU: chạm lại để đẩy xuống cuối.
-  store.delete(key); store.set(key, hit);
-  return hit.value;
+  return value;
+}
+
+/**
+ * getAsync() — A5: tra in-memory TRƯỚC, miss mới hỏi store dùng chung (sống qua nhiều serverless
+ * instance). Dùng ở visualPipeline.js (đã async sẵn). Store lỗi -> cache-miss êm, không throw.
+ * @returns {Promise<object|null>}
+ */
+async function getAsync(parts) {
+  const value = await store.get(buildKey(parts));
+  if (!value) { stats.misses++; return null; }
+  stats.hits++;
+  return value;
 }
 
 /**
  * set() — CHỈ ghi khi hình đã VALIDATED và câu trả lời đã COMPLETED (PHẦN 22).
  * @returns {boolean} true nếu thực sự được ghi.
  */
-function set(parts, value, { validated, answerComplete } = {}) {
-  if (!validated || !answerComplete) { stats.rejected++; return false; }
-  if (!value || (!value.content && !value.url)) { stats.rejected++; return false; }
-  const key = buildKey(parts);
-  if (store.size >= MAX_ENTRIES) {
-    const oldest = store.keys().next().value;
-    if (oldest !== undefined) store.delete(oldest);
-  }
-  store.set(key, { value, expiresAt: Date.now() + TTL_MS });
+function acceptable(value, { validated, answerComplete }) {
+  if (!validated || !answerComplete) return false;
+  if (!value || (!value.content && !value.url)) return false;
+  return true;
+}
+
+function set(parts, value, opts = {}) {
+  if (!acceptable(value, opts)) { stats.rejected++; return false; }
+  store.setSync(buildKey(parts), value, TTL_MS);
+  stats.writes++;
+  return true;
+}
+
+/**
+ * setAsync() — A5: ghi in-memory NGAY + ghi store dùng chung. Cùng quality gate với set()
+ * (VALIDATED + COMPLETED), chỉ khác tầng lưu trữ.
+ * @returns {Promise<boolean>}
+ */
+async function setAsync(parts, value, opts = {}) {
+  if (!acceptable(value, opts)) { stats.rejected++; return false; }
+  await store.set(buildKey(parts), value, TTL_MS);
   stats.writes++;
   return true;
 }
 
 function snapshot() {
   const total = stats.hits + stats.misses;
-  return { ...stats, size: store.size, hitRate: total ? Number((stats.hits / total).toFixed(3)) : 0 };
+  const st = store.snapshot();
+  return {
+    ...stats, size: st.size, storeEnabled: st.enabled,
+    storeExternalHits: st.externalHits, storeErrors: st.errors,
+    hitRate: total ? Number((stats.hits / total).toFixed(3)) : 0
+  };
 }
-function _resetForTest() { store.clear(); stats.hits = stats.misses = stats.writes = stats.rejected = 0; }
+function _resetForTest() {
+  store._resetForTest();
+  stats.hits = stats.misses = stats.writes = stats.rejected = 0;
+}
 
-module.exports = { get, set, buildKey, answerStructureHash, hash, snapshot, _resetForTest, MAX_ENTRIES, TTL_MS };
+module.exports = {
+  get, getAsync, set, setAsync, buildKey, answerStructureHash, hash, snapshot,
+  _resetForTest, MAX_ENTRIES, TTL_MS, store
+};

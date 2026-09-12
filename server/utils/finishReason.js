@@ -68,6 +68,11 @@ const FINISH = Object.freeze({
   PROVIDER_ERROR: 'PROVIDER_ERROR',
   STREAM_INTERRUPTED: 'STREAM_INTERRUPTED',
   CONTENT_FILTER: 'CONTENT_FILTER',
+  // B11: mã RIÊNG cho lỗi hệ thống HÌNH. CỐ Ý tách khỏi nhóm lỗi TEXT ở trên vì image failure
+  // KHÔNG BAO GIỜ là lý do continuation của TEXT answer: nếu core answer đã xong, chỉ có phần hình
+  // được retry (A4), tuyệt đối không sinh thêm 1 lượt gọi model text nào. needsMoreTokens/
+  // needsFailover/isTerminal đều trả false cho mã này — xem isImageFailure().
+  IMAGE_FAILURE: 'IMAGE_FAILURE',
   UNKNOWN: 'UNKNOWN'
 });
 
@@ -97,10 +102,14 @@ function classifyFinish(sig = {}) {
   return raw ? FINISH.UNKNOWN : FINISH.UNKNOWN;
 }
 
+/** B11: đây có phải lỗi của hệ thống HÌNH (không được ảnh hưởng tới vòng đời text answer) không. */
+function isImageFailure(code) { return code === FINISH.IMAGE_FAILURE; }
+
 /** Nguyên nhân nào ĐÁNG tiếp tục bằng cách cấp thêm token (thay vì đổi provider/dừng hẳn). */
 function needsMoreTokens(code) { return code === FINISH.MAX_TOKENS; }
 /** Nguyên nhân nào ĐÁNG failover sang provider khác (giữ nguyên phần text đã có). */
 function needsFailover(code) {
+  if (code === FINISH.IMAGE_FAILURE) return false; // B11: không failover TEXT vì hình hỏng
   return code === FINISH.STREAM_INTERRUPTED || code === FINISH.PROVIDER_ERROR || code === FINISH.TIMEOUT;
 }
 /** Nguyên nhân nào PHẢI dừng hẳn, không recovery. */
@@ -111,3 +120,4 @@ module.exports.classifyFinish = classifyFinish;
 module.exports.needsMoreTokens = needsMoreTokens;
 module.exports.needsFailover = needsFailover;
 module.exports.isTerminal = isTerminal;
+module.exports.isImageFailure = isImageFailure;

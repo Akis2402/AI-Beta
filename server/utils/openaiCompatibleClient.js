@@ -1,5 +1,8 @@
 'use strict';
 
+// A1: chấp nhận cả string lẫn PromptParts (ghép tĩnh -> context -> động).
+const { systemToString } = require('./systemPromptParts');
+
 const { iterateSSELines } = require('./sseParse');
 const { createLinkedAbort, makeCancelledError } = require('./abortLink');
 const { normalizeFinishReason } = require('./finishReason');
@@ -17,7 +20,8 @@ const { normalizeFinishReason } = require('./finishReason');
 // Chuyển "messages" nội bộ (kiểu Anthropic: content là chuỗi HOẶC mảng block {type:'text',text} /
 // {type:'image',source:{type:'base64',media_type,data}}) sang định dạng Chat Completions chuẩn
 // (content là chuỗi HOẶC mảng {type:'text'} / {type:'image_url'}).
-function toOpenAICompatibleMessages(system, messages) {
+function toOpenAICompatibleMessages(rawSystem, messages) {
+  const system = systemToString(rawSystem);
   const out = [];
   if (system) out.push({ role: 'system', content: system });
   for (const m of messages) {
