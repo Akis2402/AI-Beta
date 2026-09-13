@@ -1,0 +1,23 @@
+{
+  "generatedAt": "2026-09-13T14:10:44.137Z",
+  "assets": {
+    "boot.js": "/js/boot.29aa9029e5.js",
+    "storage.js": "/js/storage.1d27028cd0.js",
+    "imageStorage.js": "/js/imageStorage.2a4331b36c.js",
+    "config.js": "/js/config.7dce3170d3.js",
+    "formulas.js": "/js/formulas.8bbbb162bb.js",
+    "subjects.js": "/js/subjects.aa5a680318.js",
+    "solid3d.js": "/js/solid3d.b9cfced17e.js",
+    "scene3d.js": "/js/scene3d.9ace739f98.js",
+    "voiceInput.js": "/js/voiceInput.66463c87c2.js",
+    "geo2d-engine.js": "/js/geo2d-engine.b1cd4669fc.js",
+    "app.js": "/js/app.cb9bcfd99a.js",
+    "translations.js": "/js/i18n/translations.e11956bf52.js",
+    "languageStore.js": "/js/i18n/languageStore.763a541496.js",
+    "i18n.js": "/js/i18n/i18n.bcc564c301.js",
+    "puterAdapter.js": "/js/providers/puterAdapter.836f50da9e.js",
+    "providerRouter.js": "/js/providers/providerRouter.bcdbb977c7.js",
+    "conversationTaskManager.js": "/js/tasks/conversationTaskManager.d85a7b02e0.js",
+    "styles.css": "/css/styles.1bfde1a281.css"
+  }
+}
