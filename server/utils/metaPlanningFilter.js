@@ -71,6 +71,38 @@ const META_OBJECT_RE = new RegExp(
 // SAU một dòng nháp đã bị loại (xử lý ở stripMetaPlanning/bộ lọc stream), không bao giờ bỏ vô điều
 // kiện — "---" là cú pháp markdown hợp lệ trong câu trả lời thật.
 const SEPARATOR_ONLY_RE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+// Dòng chỉ có đúng 1 dấu chấm/gạch đầu dòng rỗng — mảnh vỡ hay gặp NGAY TRƯỚC/SAU 1 checklist bị
+// cắt (bullet marker in ra trước khi có nội dung, hoặc câu bị cắt chỉ còn dấu câu). Áp dụng CÙNG
+// điều kiện với SEPARATOR_ONLY_RE: chỉ bỏ khi đứng cạnh 1 dòng vừa bị loại, không bao giờ vô điều
+// kiện — "." một mình có thể là nội dung thật (rất hiếm nhưng không loại trừ).
+const STRAY_PUNCT_ONLY_RE = /^\s*[-*]?\s*[.]\s*$/;
+
+// ============================================================================================
+// LỚP PHÒNG VỆ THỨ 4 — CHECKLIST TỰ-KIỂM (self-check) VỀ ĐỊNH DẠNG BỊ LỘ RA CÂU TRẢ LỜI
+// ============================================================================================
+// NGUYÊN NHÂN GỐC (quan sát được trên ảnh người dùng gửi): ngay dưới "Lời giải chi tiết" xuất hiện
+//     "* No titles/headers? Yes."
+//     "* No extra text?"
+// Đây là model tự trả lời lại CHÍNH RÀNG BUỘC ĐỊNH DẠNG trong system prompt (dạng "không tiêu đề?
+// không có chữ thừa?") như một checklist tự kiểm tra ngôi thứ ba dạng câu hỏi/trả lời ngắn — khác
+// với LỚP 3 ở trên (vốn bắt câu văn xuôi ngôi thứ nhất kiểu "We need to..."). Không có thẻ bao
+// quanh nên thinkingFilter/safetyLeakFilter không bắt được; PLANNING_OPENER_RE cũng không khớp vì
+// không mở đầu bằng "We/I/Let's...".
+//
+// Một dòng CHỈ bị loại khi hội đủ CẢ HAI điều kiện (đúng nguyên tắc chống dương tính giả như LỚP 3):
+//   (1) ĐÚNG HÌNH DẠNG một mục checklist ngắn: bullet + cụm ngắn kết thúc bằng dấu "?" (có thể kèm
+//       Yes/No/Có/Không ngay sau), KHÔNG phải một câu hỏi học thuật dài có ngữ cảnh.
+//   (2) CHỨA danh từ META nói về ĐỊNH DẠNG ĐẦU RA (tiêu đề, chữ thừa, markdown, footer...), không
+//       phải nội dung môn học — một câu hỏi ôn tập thật như "Có bao nhiêu proton?" không khớp (2).
+const SELF_CHECK_LINE_RE = /^\s*[-*]\s*(?:no|not|have|has|is|are|include[sd]?|avoid|ensure|did|does|any)\b[^?\n]{0,80}\?\s*(?:yes|no|đúng|không|có|chưa)?\.?\s*$/i;
+const SELF_CHECK_META_RE = /\b(?:titles?|headers?|heading|extra\s+text|extra\s+content|markdown|footer|disclaimer|placeholder|format(?:ting)?|word\s+count)\b/i;
+
+function isSelfCheckLine(line) {
+  const t = String(line == null ? '' : line).trim();
+  if (!t || t.length > 120) return false;
+  if (!SELF_CHECK_LINE_RE.test(t)) return false;
+  return SELF_CHECK_META_RE.test(t);
+}
 
 /**
  * @param {string} line Một dòng văn bản.
@@ -81,6 +113,7 @@ function isMetaPlanningLine(line) {
   if (!t) return false;
   if (t.length > 600) return false;               // đoạn rất dài gần như chắc chắn là nội dung thật
   if (/^\s*(?:#{1,6}\s|\|)/.test(t)) return false; // tiêu đề markdown / hàng bảng: nội dung thật
+  if (isSelfCheckLine(t)) return true;             // LỚP 4: checklist tự-kiểm về định dạng
   if (!PLANNING_OPENER_RE.test(t)) return false;
   return META_OBJECT_RE.test(t);
 }
@@ -102,7 +135,7 @@ function stripMetaPlanning(text) {
     if (/^\s*```/.test(line)) { insideFence = !insideFence; kept.push(line); lastWasDropped = false; continue; }
     if (insideFence) { kept.push(line); lastWasDropped = false; continue; }
     if (isMetaPlanningLine(line)) { lastWasDropped = true; continue; }
-    if (lastWasDropped && SEPARATOR_ONLY_RE.test(line)) { continue; }
+    if (lastWasDropped && (SEPARATOR_ONLY_RE.test(line) || STRAY_PUNCT_ONLY_RE.test(line))) { continue; }
     if (lastWasDropped && !line.trim()) { continue; } // không để lại khoảng trống lạ ở chỗ vừa cắt
     lastWasDropped = false;
     kept.push(line);
@@ -138,7 +171,7 @@ function createMetaPlanningFilter(onVisible) {
     if (/^\s*```/.test(line)) { insideFence = !insideFence; lastWasDropped = false; onVisible(line); return; }
     if (insideFence) { lastWasDropped = false; onVisible(line); return; }
     if (isMetaPlanningLine(line)) { lastWasDropped = true; return; }
-    if (lastWasDropped && (SEPARATOR_ONLY_RE.test(line) || !line.trim())) return;
+    if (lastWasDropped && (SEPARATOR_ONLY_RE.test(line) || STRAY_PUNCT_ONLY_RE.test(line) || !line.trim())) return;
     lastWasDropped = false;
     onVisible(line);
   }
@@ -165,5 +198,8 @@ module.exports = {
   isOnlyMetaPlanning,
   createMetaPlanningFilter,
   PLANNING_OPENER_RE,
-  META_OBJECT_RE
+  META_OBJECT_RE,
+  isSelfCheckLine,
+  SELF_CHECK_LINE_RE,
+  SELF_CHECK_META_RE
 };

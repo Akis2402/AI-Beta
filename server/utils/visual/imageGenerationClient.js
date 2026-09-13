@@ -280,6 +280,59 @@ async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, siz
 //
 // Khi có khóa thật, chạy `npm run live-image-check` để đối chiếu shape thực tế với parser này.
 
+/**
+ * ROOT CAUSE (mục 34/25) — VALIDATE MIME + MAGIC BYTES.
+ * Không được tin field `mimeType` mù quáng: nếu provider (hoặc 1 shape lạ chưa tài liệu hoá) nhét
+ * text/JSON/HTML vào field đáng lẽ chứa ảnh mà field mime bị thiếu, hệ thống cũ sẽ MẶC ĐỊNH
+ * 'image/png' rồi coi là thành công. Nay: (a) nếu CÓ mime, nó phải bắt đầu bằng 'image/'; (b) luôn
+ * đối chiếu vài byte đầu (đã decode) với signature nhị phân thật của PNG/JPEG/WEBP/GIF — đây là
+ * bằng chứng không thể giả mạo bằng cách gắn nhãn mime sai.
+ */
+const MAGIC_SIGNATURES = [
+  { mime: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] },
+  { mime: 'image/jpeg', bytes: [0xff, 0xd8, 0xff] },
+  { mime: 'image/gif', bytes: [0x47, 0x49, 0x46, 0x38] },
+  // WEBP: 'RIFF' ở byte 0-3, 'WEBP' ở byte 8-11 — kiểm cả hai đoạn.
+  { mime: 'image/webp', bytes: [0x52, 0x49, 0x46, 0x46], webp: true }
+];
+
+/**
+ * detectImageSignature() — giải mã TỐI THIỂU (12 byte đầu) rồi so khớp magic bytes.
+ * @param {string} b64
+ * @returns {string|null} mime THỰC TẾ suy ra từ byte, hoặc null nếu không khớp signature nào.
+ */
+function detectImageSignature(b64) {
+  try {
+    const head = Buffer.from(String(b64 || '').slice(0, 32), 'base64');
+    if (head.length < 4) return null;
+    for (const sig of MAGIC_SIGNATURES) {
+      const matches = sig.bytes.every((byte, i) => head[i] === byte);
+      if (!matches) continue;
+      if (sig.webp) {
+        // Cần thêm 'WEBP' ở offset 8..11 để phân biệt với RIFF/WAV hay RIFF/AVI khác.
+        if (head.length < 12 || head.toString('ascii', 8, 12) !== 'WEBP') continue;
+      }
+      return sig.mime;
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Kiểm chứng b64 CÓ THẬT SỰ LÀ ẢNH không, bất kể provider gắn nhãn mime là gì.
+ * @returns {string|null} mime đáng tin (ưu tiên chữ ký byte thật), null nếu không phải ảnh.
+ */
+function verifyImageBytes(b64, claimedMime) {
+  if (!isLikelyBase64(b64)) return null;
+  const real = detectImageSignature(b64);
+  if (real) return real; // chữ ký byte thắng tuyệt đối — không tin nhãn mime nếu byte không khớp.
+  // Không nhận diện được chữ ký (vd ảnh hợp lệ nhưng hiếm/không nằm trong bảng) -> chỉ chấp nhận
+  // khi provider ít nhất tự nhận đúng là 'image/*'; KHÔNG bao giờ mặc định image/png khi mù mờ.
+  return claimedMime && /^image\//i.test(claimedMime) ? claimedMime : null;
+}
+
 /** Trích base64 + mime từ MỌI biến thể inline-data của Gemini đã biết. */
 function extractGeminiInline(data) {
   const candidates = Array.isArray(data && data.candidates) ? data.candidates : [];
@@ -289,14 +342,21 @@ function extractGeminiInline(data) {
     for (const part of parts) {
       const inline = part && (part.inlineData || part.inline_data);
       const b64 = inline && (inline.data || inline.bytesBase64Encoded);
-      if (b64) return { b64, mime: inline.mimeType || inline.mime_type || 'image/png' };
+      if (!b64) continue;
+      const claimed = inline.mimeType || inline.mime_type || null;
+      const verifiedMime = verifyImageBytes(b64, claimed);
+      if (!verifiedMime) continue; // field tồn tại nhưng KHÔNG PHẢI ảnh thật -> bỏ qua, thử part khác.
+      return { b64, mime: verifiedMime };
     }
   }
   // Một số bản trả thẳng ở cấp gốc (predictions[] của Vertex-style endpoint).
   const preds = Array.isArray(data && data.predictions) ? data.predictions : [];
   for (const pr of preds) {
     const b64 = pr && (pr.bytesBase64Encoded || pr.b64_json);
-    if (b64) return { b64, mime: pr.mimeType || 'image/png' };
+    if (!b64) continue;
+    const verifiedMime = verifyImageBytes(b64, pr.mimeType || null);
+    if (!verifiedMime) continue;
+    return { b64, mime: verifiedMime };
   }
   return null;
 }
@@ -315,10 +375,25 @@ async function callGeminiImage({ prompt, timeoutMs, signal, apiKey, model }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const linked = createLinkedAbort(timeoutMs, signal);
   try {
+    // ==========================================================================================
+    // ROOT CAUSE (mục 34) — request CŨ gửi ĐÚNG NHƯ một lệnh gọi TEXT-GENERATION bình thường rồi
+    // chờ một field ảnh xuất hiện "may ra". Model image-preview của Gemini (gemini-2.5-flash-image
+    // và họ *-image-generation) đòi hỏi contract yêu cầu IMAGE MODALITY tường minh trong
+    // `generationConfig.responseModalities`; thiếu trường này, model có xu hướng trả lời bằng TEXT
+    // (từ chối/giải thích) thay vì sinh ảnh — đúng triệu chứng người dùng báo: "UI có khung, có nút
+    // Tải PNG, nhưng không có ảnh thật". Đây LÀ request payload bug, không phải lỗi parser.
+    //
+    // Luôn xin CẢ 'TEXT' lẫn 'IMAGE': một số version model bắt buộc phải có TEXT trong danh sách
+    // modality được yêu cầu (chỉ xin IMAGE đơn độc bị model từ chối ở một số backend), và code parser
+    // (extractGeminiInline) đã bỏ qua mọi phần TEXT để chỉ lấy phần ảnh nên không ảnh hưởng output.
+    const body = {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
+    };
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }] }),
+      body: JSON.stringify(body),
       signal: linked.signal
     });
     if (!res.ok) return { ok: false, reason: 'http_' + res.status };
@@ -369,9 +444,11 @@ async function callOpenAICompatibleImage({ prompt, timeoutMs, signal, size, apiK
     const item = (Array.isArray(data && data.data) ? data.data : [])[0];
     if (!item) return { ok: false, reason: 'no_image_in_response' };
     const b64 = item.b64_json || item.b64Json;
-    if (b64 && isLikelyBase64(b64)) {
-      const mime = item.output_format ? `image/${item.output_format}` : 'image/png';
-      return { ok: true, format: 'data_url', url: `data:${mime};base64,${b64}`, model };
+    if (b64) {
+      const claimed = item.output_format ? `image/${item.output_format}` : 'image/png';
+      const verifiedMime = verifyImageBytes(b64, claimed);
+      if (verifiedMime) return { ok: true, format: 'data_url', url: `data:${verifiedMime};base64,${b64}`, model };
+      return { ok: false, reason: 'invalid_image_bytes' };
     }
     // URL phải là http(s) thật — không nhận data:/javascript:/chuỗi rác (ranh giới an toàn).
     if (typeof item.url === 'string' && /^https?:\/\//i.test(item.url)) {
@@ -391,7 +468,7 @@ function callOpenAIImage(opts) {
 module.exports = {
   generateImage, isConfigured, activeProviderName, IMAGE_TIMEOUT_MS,
   listImageProviders, classifyImageCost, isRetryableReason, IMAGE_COST, activePromptCharLimit,
-  extractGeminiInline, geminiBlockReason, isLikelyBase64,
+  extractGeminiInline, geminiBlockReason, isLikelyBase64, detectImageSignature, verifyImageBytes,
   // Mục 2.1a: registry mở rộng + phân giải khóa — export để test kiểm chứng trực tiếp.
   IMAGE_PROVIDER_DEFS, resolveImageKey, callOpenAICompatibleImage, callOpenAIImage, callGeminiImage
 };

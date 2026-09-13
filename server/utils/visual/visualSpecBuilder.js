@@ -27,7 +27,12 @@ const MAX_EQUATIONS = 4;
 // KHÔNG BAO GIỜ được trả lại sau khi prompt đã sửa.
 //   v1: prompt gốc (có nhét số liệu + công thức — SAI).
 //   v2: bỏ hẳn số liệu/công thức khỏi prompt ảnh, thêm style theo môn, cắt theo hạn mức provider.
-const VISUAL_PROMPT_VERSION = 'visual-prompt-v2';
+// Bump v2 -> v3: sửa ROOT CAUSE ở imageGenerationClient.callGeminiImage() (request nay yêu cầu
+// generationConfig.responseModalities tường minh + parser xác thực magic bytes thay vì tin mù mờ
+// vào field mimeType). Cache cũ (nếu có) hoàn toàn có thể chứa kết quả từ contract SAI trước đó
+// (model trả text bị hiểu nhầm/không có ảnh) nên phải invalidate, không được để cache che mất hình
+// đúng mà pipeline giờ đã có khả năng tạo ra.
+const VISUAL_PROMPT_VERSION = 'visual-prompt-v3';
 
 // ============================================================================================
 // PHẦN 6 — STYLE THEO MÔN (không còn 1 chuỗi 'educational_scientific' dùng chung cho mọi môn)

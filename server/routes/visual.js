@@ -138,6 +138,54 @@ router.post('/hq', express.json({ limit: '4kb' }), async (req, res) => {
   });
 });
 
+// ============================================================================================
+// MỤC 7 — GET /api/visual/status : DEBUG/OBSERVABILITY AN TOÀN (KHÔNG BAO GIỜ LỘ API KEY)
+// ============================================================================================
+router.get('/status', (req, res) => {
+  const providers = imageClient.listImageProviders().map((p) => ({
+    name: p.name,
+    configured: true,
+    model: p.model,
+    keySource: p.keySource, // 'image_specific' | 'text_reuse' — không phải khóa, chỉ nguồn gốc.
+    capability: 'text-to-image',
+    costClass: p.costClass,
+    status: 'ready'
+  }));
+  res.json({
+    imageGenerationEnabled: imageClient.isConfigured(),
+    activeProvider: imageClient.activeProviderName(),
+    providers
+  });
+});
+
+// ============================================================================================
+// MỤC 17 — POST /api/visual/retry : TẠO LẠI ĐÚNG 1 HÌNH ĐÃ THẤT BẠI, KHÔNG ĐỘNG VÀO TEXT ANSWER
+// ============================================================================================
+// Dùng lại visualHqStore (visualPipeline.js đã `remember()` prompt/necessity/title/subject của
+// đúng hình vừa fail, kể cả khi generation KHÔNG thành công — xem mục 16/17 trong visualPipeline.js).
+// Ở mức 1024x1024 (mặc định), khác /hq (2048x2048, chỉ khi bấm tường minh "Tải chất lượng cao").
+// Failover giữa các provider ảnh đã có sẵn trong imageClient.generateImage() — không cần lặp ở đây.
+router.post('/retry', express.json({ limit: '4kb' }), async (req, res) => {
+  const visualId = req.body && req.body.visualId;
+  const ctx = hqStore.get(visualId);
+  if (!ctx) return res.status(404).json({ error: 'visual_context_expired' });
+  if (!imageClient.isConfigured()) return res.status(503).json({ error: 'no_image_provider' });
+
+  const img = await imageClient.generateImage({ prompt: ctx.prompt, size: '1024x1024', timeoutMs: 20000 });
+  if (!img.ok) {
+    return res.status(502).json({ error: img.reason || 'image_generation_failed', providersTried: img.providersTried || [] });
+  }
+  // Ghi lại ngữ cảnh dưới CHÍNH visualId cũ: nếu client bấm "Thử tạo lại" hoặc "Tải chất lượng cao"
+  // lần nữa sau khi đã thành công, ngữ cảnh vẫn còn (TTL được làm mới).
+  hqStore.remember(visualId, ctx);
+  return res.json({
+    ok: true, visualId,
+    format: img.format, url: img.url, model: img.model,
+    renderer: 'generated_image', origin: 'ai_generated', fidelity: 'illustrative',
+    necessity: ctx.necessity, subject: ctx.subject, title: ctx.title
+  });
+});
+
 module.exports = router;
 module.exports.isAllowedHost = isAllowedHost;
 module.exports.parseAllowedUrl = parseAllowedUrl;

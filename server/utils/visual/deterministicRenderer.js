@@ -343,15 +343,17 @@ function renderConceptCard(spec) {
     const purpose = String(spec.purpose || spec.visualPurpose || '').trim();
     const title = String(spec.title || '').trim();
     if (!purpose && !title) return null; // thật sự không có gì để hiển thị
+    // KHÔNG lặp lại `title` làm nội dung thân card: svgShell() đã vẽ `title` làm heading ngay bên
+    // trên (dòng bên dưới). Card cũ, khi thiếu `purpose`, in lại NGUYÊN VĂN `title` làm dòng thân —
+    // kết quả là header ngoài card (app.js) + heading trong SVG + dòng thân trong SVG + caption
+    // (app.js fallback về title khi caption rỗng) cùng hiển thị Y HỆT MỘT CHUỖI 4 lần — trông như
+    // lỗi hỏng dữ liệu dù kỹ thuật không sai. Khi thật sự không có `purpose`, chỉ vẽ khung rỗng.
     const lines = wrapText(purpose, 64, 4);
     const minHeight = 96 + Math.max(1, lines.length) * 20;
     let card = `<rect x="${PAD - 16}" y="46" width="${W - 2 * PAD + 32}" height="${minHeight - 70}" rx="12" stroke-width="1.6" fill="currentColor" fill-opacity="0.04"/>`;
     lines.forEach((ln, k) => {
       card += `<text x="${PAD}" y="${86 + k * 20}" stroke="none" fill="currentColor" font-size="13">${esc(ln)}</text>`;
     });
-    if (!lines.length) {
-      card += `<text x="${PAD}" y="86" stroke="none" fill="currentColor" font-size="13" opacity="0.75">${esc(truncate(title, 64))}</text>`;
-    }
     return svgShell(card, { title, height: minHeight });
   }
   const height = 72 + rows.length * 34;

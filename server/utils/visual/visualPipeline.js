@@ -234,6 +234,7 @@ async function runVisualPipeline(args) {
     let produced = null;
     let lastValidation = null;
     let lastImagePrompt = null;
+    let lastAttemptedImagePrompt = null;
 
     for (const attempt of attempts) {
       if (signal && signal.aborted) { telemetry.visualError = 'aborted'; break; }
@@ -287,10 +288,14 @@ async function runVisualPipeline(args) {
           deadlineAt: visualDeadlineAt // A4: failover sang provider 2 chỉ khi còn đủ thời gian
         });
         telemetry.visualProvidersTried = img.providersTried || [];
-        // MỤC 2.2: nhớ prompt + necessity của đúng hình này để nút "Tải PNG chất lượng cao" (nếu
-        // người dùng bấm tường minh) dựng lại ở 2048 mà VẪN đi qua cost-gate. Không lưu câu hỏi/
-        // lời giải/số liệu.
-        if (img.ok) lastImagePrompt = { prompt, necessity: decision.imageNecessity || 'NONE', subject };
+        // MỤC 2.2 + 17: nhớ prompt + necessity + title/type của đúng hình này. Trước đây CHỈ được
+        // nhớ khi thành công (phục vụ nút "Tải PNG chất lượng cao"). BUG: khi image generation THẤT
+        // BẠI — đúng ca cần nút "Thử tạo lại" nhất — không có gì được nhớ, nên retry endpoint không
+        // có prompt nào để gọi lại. Nay LUÔN nhớ (kể cả khi fail), để nhánh !produced bên dưới có
+        // thể phát cho client một stub kèm visualId dùng được cho POST /api/visual/retry.
+        const promptCtx = { prompt, necessity: decision.imageNecessity || 'NONE', subject, title: spec.title, type: spec.type };
+        lastAttemptedImagePrompt = promptCtx;
+        if (img.ok) lastImagePrompt = promptCtx;
         if (img.costClass) telemetry.visualCostClass = img.costClass;
         if (img.ok) out = { format: img.format, url: img.url, renderer: 'generated_image', model: img.model };
         else telemetry.visualError = img.reason;
@@ -311,9 +316,31 @@ async function runVisualPipeline(args) {
     telemetry.visualGenerationLatency = Date.now() - t0;
 
     if (!produced) {
-      // PHẦN 20/32: KHÔNG đánh dấu response failed chỉ vì hình thất bại.
+      // PHẦN 20/32: KHÔNG đánh dấu response failed chỉ vì hình thất bại — text answer giữ nguyên.
       onEvent({ type: 'visual:error', recoverable: true, reason: telemetry.visualError || 'render_failed' });
-      return { status: 'failed', decision, visuals: [], telemetry };
+
+      // ==========================================================================================
+      // MỤC 16/17/36 CASE C — TOÀN BỘ đường ảnh THẤT BẠI (kể cả deterministic/concept_card, vốn
+      // gần như không bao giờ hỏng) mà đây là hình NGƯỜI DÙNG YÊU CẦU TƯỜNG MINH hoặc NECESSARY:
+      // KHÔNG được lặng lẽ trả visuals rỗng, vì UI sẽ chỉ còn 1 dòng "không thể tạo hình" và người
+      // dùng không có cách nào yêu cầu thử lại mà không phải hỏi lại toàn bộ câu hỏi. Phát ra 1 stub
+      // {visualId, renderFailed:true} kèm ngữ cảnh đã lưu vào visualHqStore để POST /api/visual/retry
+      // gọi lại ĐÚNG prompt này mà không cần dựng lại lời giải.
+      const necessity = decision.imageNecessity || 'NONE';
+      const imageWasIntended = route.primary === 'image_generation';
+      const worthRetry = imageWasIntended && (necessity === 'NECESSARY' || necessity === 'USER_REQUESTED') && lastAttemptedImagePrompt;
+      if (!worthRetry) return { status: 'failed', decision, visuals: [], telemetry };
+
+      const visualId = nextVisualId();
+      hqStore.remember(visualId, lastAttemptedImagePrompt);
+      const failedVisual = {
+        visualId, renderFailed: true, necessity,
+        title: lastAttemptedImagePrompt.title || spec.title,
+        subject: lastAttemptedImagePrompt.subject || subject,
+        reason: telemetry.visualError || 'image_generation_failed'
+      };
+      onEvent({ ...failedVisual, type: 'visual:error', recoverable: true });
+      return { status: 'failed', decision, visuals: [failedVisual], telemetry };
     }
 
     // Rủi ro #3: nói THẲNG mức trung thực trong caption khi đề cần hình thật mà chỉ có sơ đồ. Người
@@ -346,7 +373,11 @@ async function runVisualPipeline(args) {
       content: produced.content,
       url: produced.url,
       title: spec.title,
-      caption: (spec.purpose || '') + (schematicOnly ? schematicNote : ''),
+      // Phòng thủ 2 lớp: nếu vì lý do gì đó spec.purpose trùng y hệt spec.title (vd fallback cũ,
+      // hoặc case chưa lường hết), KHÔNG gửi nó làm caption — client (renderVisualCaption) đã hiển
+      // thị title ở header rồi, gửi trùng xuống chỉ tạo ra chuỗi lặp lại vô nghĩa trong 1 card.
+      caption: ((spec.purpose || '').trim() === (spec.title || '').trim() ? '' : (spec.purpose || ''))
+        + (schematicOnly ? schematicNote : ''),
       fidelity: schematicOnly ? 'schematic_only' : (isFallbackSchematic ? 'fallback_schematic' : (route.fidelity || 'schematic')),
       // B9.9: UI cần phân biệt hình TỰ ĐỘNG sinh với hình do người dùng yêu cầu tường minh (và
       // trường hợp override setting "never" thì phải nói rõ vì sao vẫn có hình).

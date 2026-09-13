@@ -26,9 +26,10 @@ function prune(now) {
 }
 
 /**
- * remember() — ghi ngữ cảnh của 1 hình ảnh AI vừa sinh.
+ * remember() — ghi ngữ cảnh của 1 hình ảnh AI vừa sinh (thành công) HOẶC vừa thất bại (mục 17: cần
+ * ngữ cảnh này để nút "Thử tạo lại" gọi lại đúng prompt mà không phải dựng lại lời giải).
  * @param {string} visualId
- * @param {{prompt:string, necessity:string, subject:string}} ctx
+ * @param {{prompt:string, necessity:string, subject:string, title?:string, type?:string}} ctx
  */
 function remember(visualId, ctx) {
   if (!visualId || !ctx || !ctx.prompt) return;
@@ -38,16 +39,18 @@ function remember(visualId, ctx) {
     prompt: String(ctx.prompt),
     necessity: String(ctx.necessity || 'NONE'),
     subject: String(ctx.subject || ''),
+    title: String(ctx.title || ''),
+    type: String(ctx.type || ''),
     expiresAt: now + TTL_MS
   });
 }
 
-/** @returns {{prompt:string, necessity:string, subject:string}|null} */
+/** @returns {{prompt:string, necessity:string, subject:string, title:string, type:string}|null} */
 function get(visualId) {
   const hit = store.get(String(visualId || ''));
   if (!hit) return null;
   if (hit.expiresAt <= Date.now()) { store.delete(String(visualId)); return null; }
-  return { prompt: hit.prompt, necessity: hit.necessity, subject: hit.subject };
+  return { prompt: hit.prompt, necessity: hit.necessity, subject: hit.subject, title: hit.title || '', type: hit.type || '' };
 }
 
 function _resetForTest() { store.clear(); }
