@@ -525,7 +525,12 @@ async function proxyTests() {
 
   await test('MỤC 2.2: mặc định vẫn 1024x1024, 2048 chỉ tồn tại ở endpoint /hq', () => {
     const pipelineSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'utils', 'visual', 'visualPipeline.js'), 'utf8');
-    assert.ok(pipelineSrc.includes("size: '1024x1024'"), 'pipeline phải giữ mốc 1024x1024');
+    // MỤC 2.4a: kích thước mặc định vẫn là 1024x1024, nhưng ở mức degrade 'low' với hình
+    // NECESSARY/USER_REQUESTED pipeline được phép hạ xuống 512x512 để vẫn kịp tạo ảnh thật thay vì
+    // bỏ hẳn ảnh. Vì vậy assertion kiểm tra MỐC 1024x1024 có mặt, không ép đúng một cách viết.
+    assert.ok(pipelineSrc.includes("'1024x1024'"), 'pipeline phải giữ mốc 1024x1024');
+    assert.ok(/degrade === 'low' \? '512x512' : '1024x1024'/.test(pipelineSrc),
+      'chỉ được hạ kích thước ở mức degrade low, mặc định vẫn 1024x1024');
     const codeOnly = pipelineSrc.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
     assert.ok(!/2048/.test(codeOnly), 'luồng mặc định KHÔNG được đụng tới 2048');
     const routeSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'visual.js'), 'utf8');

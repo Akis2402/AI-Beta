@@ -30,6 +30,8 @@ function mockFetch(plan) {
     if (r === 'http500') return { ok: false, status: 500, text: async () => '', json: async () => ({}) };
     if (r === 'notext') return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: 'xin lỗi tôi không vẽ được' }] } }], data: [] }) };
     if (r === 'badrequest') return { ok: false, status: 400, text: async () => '', json: async () => ({}) };
+    if (r === 'blocked') return { ok: true, status: 200, json: async () => ({ promptFeedback: { blockReason: 'SAFETY' } }) };
+    if (r === 'malformed') return { ok: true, status: 200, json: async () => { throw new Error('invalid json'); } };
     return {
       ok: true, status: 200,
       json: async () => (host === 'gemini'
@@ -65,11 +67,28 @@ const PROMPT = 'Vẽ tam giác ABC vuông tại A với đường cao AH, ghi r�
     assert.strictEqual(calls.length, 2);
   });
 
-  await test('A4. Lỗi INPUT (http 4xx) KHÔNG được failover — lỗi chắc chắn lặp lại y hệt', async () => {
+  await test('A4. Lỗi 4xX KỸ THUẬT riêng của provider (vd 400 sai model) PHẢI failover sang provider khác', async () => {
     mockFetch({ gemini: 'badrequest', openai: 'ok' });
     const r = await client.generateImage({ prompt: PROMPT });
+    assert.strictEqual(r.ok, true, 'lỗi 400 của Gemini không có nghĩa OpenAI cũng lỗi -> phải thử tiếp');
+    assert.deepStrictEqual(r.providersTried, ['gemini-image', 'openai-image']);
+    assert.strictEqual(calls.length, 2);
+  });
+
+  await test('A4. content_blocked (chặn nội dung) KHÔNG được failover — nội dung dùng chung, provider nào cũng chặn', async () => {
+    mockFetch({ gemini: 'blocked', openai: 'ok' });
+    const r = await client.generateImage({ prompt: PROMPT });
     assert.strictEqual(r.ok, false);
-    assert.strictEqual(calls.length, 1, 'không được tốn thêm 1 lệnh gọi vô ích');
+    assert.strictEqual(r.reason, 'content_blocked');
+    assert.strictEqual(calls.length, 1, 'không được tốn thêm 1 lệnh gọi vô ích khi lỗi là do nội dung');
+  });
+
+  await test('A4. malformed_response (JSON dị dạng, riêng 1 provider) PHẢI failover sang provider khác', async () => {
+    mockFetch({ gemini: 'malformed', openai: 'ok' });
+    const r = await client.generateImage({ prompt: PROMPT });
+    assert.strictEqual(r.ok, true, 'JSON dị dạng từ Gemini không có nghĩa OpenAI cũng trả JSON dị dạng');
+    assert.deepStrictEqual(r.providersTried, ['gemini-image', 'openai-image']);
+    assert.strictEqual(calls.length, 2);
   });
 
   await test('A4. empty_prompt / prompt rác -> 0 lệnh gọi API, không throw', async () => {
