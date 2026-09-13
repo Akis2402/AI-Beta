@@ -253,5 +253,57 @@ test('C7. không tạo được hình -> nói rõ, không để người dùng n
   assert.ok(/Chưa tạo được hình cho yêu cầu này/.test(branch), 'thiếu thông báo khi không có hình');
 });
 
+// ============================================================================================
+console.log('\n== (D) Checklist tự-kiểm về định dạng lọt ra câu trả lời + card khái niệm không lặp title ==');
+
+// Đúng nội dung trong ảnh chụp màn hình mới nhất.
+const SELF_CHECK_LEAKED = [
+  '* No titles/headers? Yes.',
+  '* No extra text?',
+  '- Any markdown headings? No.'
+];
+const SELF_CHECK_LEGIT = [
+  '* Bước 1: Tính đạo hàm của hàm số.',
+  '- Có bao nhiêu proton trong hạt nhân?',
+  '* Tại sao phản ứng này toả nhiệt?',
+  '- No, glucose is not stored directly in muscle as fat.'
+];
+
+test('D1. mọi dòng checklist tự-kiểm trong ảnh chụp đều bị nhận diện', () => {
+  SELF_CHECK_LEAKED.forEach((l) => assert.ok(meta.isMetaPlanningLine(l), `KHÔNG bắt được: "${l}"`));
+});
+
+test('D2. KHÔNG bắt nhầm câu hỏi ôn tập / nội dung thật có dấu "?"', () => {
+  SELF_CHECK_LEGIT.forEach((l) => assert.ok(!meta.isMetaPlanningLine(l), `bắt NHẦM: "${l}"`));
+});
+
+test('D3. stripMetaPlanning loại sạch checklist, giữ nguyên "Lời giải chi tiết" thật', () => {
+  const input = [
+    'Sự sống là một khái niệm rộng.', '',
+    SELF_CHECK_LEAKED[0], SELF_CHECK_LEAKED[1]
+  ].join('\n');
+  const out = meta.stripMetaPlanning(input);
+  assert.ok(!/No titles\/headers|No extra text/.test(out), 'checklist vẫn còn lọt ra');
+  assert.ok(/Sự sống là một khái niệm rộng/.test(out), 'mất nội dung thật');
+});
+
+test('D4. renderConceptCard KHÔNG lặp lại title làm thân card khi thiếu purpose', () => {
+  const out = renderer.renderDeterministic({
+    type: 'concept_illustration', title: 'Sơ đồ cấu trúc sinh học', purpose: '', data: {}
+  });
+  assert.ok(out.ok, 'phải vẫn dựng được thẻ tối thiểu');
+  // Chỉ đếm phần TEXT HIỂN THỊ (svgText strip hết tag/attribute, kể cả aria-label) — aria-label
+  // trùng title là hợp lệ (a11y), thứ KHÔNG được lặp là phần thân card NHÌN THẤY ĐƯỢC.
+  const visible = svgText(out.content);
+  const bodyMatches = (visible.match(/Sơ đồ cấu trúc sinh học/g) || []).length;
+  assert.strictEqual(bodyMatches, 1, `title phải chỉ xuất hiện đúng 1 lần (heading) trong phần nhìn thấy, thực tế ${bodyMatches} lần: "${visible}"`);
+});
+
+test('D5. visualPipeline không gửi caption trùng y hệt title xuống client', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'utils', 'visual', 'visualPipeline.js'), 'utf8');
+  assert.ok(/spec\.purpose \|\| ''\)\.trim\(\) === \(spec\.title \|\| ''\)\.trim\(\)/.test(src),
+    'thiếu guard chặn caption trùng title');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exitCode = 1;

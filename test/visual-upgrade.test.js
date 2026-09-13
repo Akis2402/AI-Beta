@@ -514,12 +514,14 @@ async function proxyTests() {
     assert.strictEqual(visualRoute.safeFilename('Vật lý', 'vz_abc_1'), 'vat-ly-vz-abc-1.png');
   });
 
-  await test('MỤC 2.2: store HQ chỉ giữ prompt/necessity/subject, KHÔNG giữ câu hỏi hay lời giải', () => {
+  await test('MỤC 2.2/17: store giữ prompt/necessity/subject/title/type, KHÔNG giữ câu hỏi hay lời giải', () => {
     const hq = require('../server/utils/visual/visualHqStore');
     hq._resetForTest();
     hq.remember('vz_1', { prompt: 'cảnh vật lý', necessity: 'NECESSARY', subject: 'physics', question: 'đề bài' });
     const got = hq.get('vz_1');
-    assert.deepStrictEqual(Object.keys(got).sort(), ['necessity', 'prompt', 'subject']);
+    assert.deepStrictEqual(Object.keys(got).sort(), ['necessity', 'prompt', 'subject', 'title', 'type']);
+    assert.strictEqual(got.title, '', 'không truyền title -> chuỗi rỗng, không phải undefined/lỗi');
+    assert.ok(!('question' in got), 'KHÔNG được lưu câu hỏi gốc');
     assert.strictEqual(hq.get('khong-co'), null, 'không có ngữ cảnh -> null, KHÔNG đoán prompt');
   });
 
