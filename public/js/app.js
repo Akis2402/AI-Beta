@@ -292,6 +292,7 @@ const ICONS = {
   sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"/></svg>',
   moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+  microphone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>',
   camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',
   zap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
   sparkles: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg>',
@@ -325,6 +326,7 @@ if (el('settingsBtnTop')) el('settingsBtnTop').innerHTML = ICONS.settings;
 if (el('flashcardTopBtn')) el('flashcardTopBtn').innerHTML = ICONS.cards;
 if (el('recommendTopBtn')) el('recommendTopBtn').innerHTML = ICONS.outline;
 if (el('attachBtn')) el('attachBtn').innerHTML = ICONS.camera;
+if (el('micBtn')) el('micBtn').innerHTML = ICONS.microphone;
 if (el('settingsGearIcon')) el('settingsGearIcon').innerHTML = ICONS.settings;
 document.querySelectorAll('.think-opt .ic').forEach((s) => { s.innerHTML = ICONS[s.dataset.icon]; });
 // PREMIUM PASS: nạp icon SVG cho các chỗ trước đây dùng emoji làm icon chính (mục 5/18/29 brief nâng cấp UI) —
@@ -2388,16 +2390,444 @@ function renderPartialWarning(container, data) {
   container.appendChild(box);
 }
 
+/* ============================================================================================
+ * MỤC 1.4 — HIỂN THỊ HÌNH MINH HOẠ: CARD + LIGHTBOX + TẢI PNG + OVERLAY SỐ LIỆU
+ * ============================================================================================
+ * renderVisuals() giữ NGUYÊN chữ ký cũ (container, visuals, status) để mọi nơi đang gọi không phải
+ * sửa; phần thân tách thành các hàm con để test được từng mảnh:
+ *   renderVisualCard()  -> renderVisualImage() / renderVisualSvg()
+ *                       -> renderVisualCaption()
+ *                       -> renderVisualOverlay()   (MỤC 1.3 — số liệu ĐÃ VERIFY, có nút ẩn/hiện)
+ *                       -> renderVisualActions()   (Mở ảnh / Tải PNG)
+ *   openVisualLightbox() (Esc đóng, click nền đóng, có nút tải ngay trong lightbox)
+ *
+ * An toàn: server CHỈ gửi 2 dạng — `format:'svg'` (chuỗi SVG đã qua visualValidator) và
+ * `format:'data_url'|'image_url'`. Ở client vẫn kiểm tra lại lần nữa trước khi nhúng — không tin
+ * tuyệt đối vào payload mạng. Mọi text đều gán bằng textContent, không innerHTML.
+ */
+
+/** Tên file tải: `<subject>-<visualId>.png` — không chứa câu hỏi/dữ liệu nhạy cảm. */
+function visualDownloadName(v) {
+  const clean = (s, fallback) => String(s || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40) || fallback;
+  return clean(v && v.subject, 'visual') + '-' + clean(v && v.visualId, 'image') + '.png';
+}
+
 /**
- * renderVisuals() — gắn hình minh hoạ (SVG dựng sẵn ở server hoặc ảnh sinh) vào 1 khối câu trả lời.
+ * visualProxySrc() — URL để HIỂN THỊ/TẢI một ảnh AI.
+ * `data:` URI dùng thẳng. Link `https://` của provider PHẢI đi qua /api/visual/download: CSP của
+ * app cố ý chỉ cho `img-src 'self' data: blob:` và `connect-src 'self'`, nới CSP cho domain provider
+ * là đổi bề mặt bảo mật của cả app chỉ vì 1 tấm ảnh. Proxy có whitelist domain cứng (chống SSRF).
+ * @param {object} v visual
+ * @param {'inline'|'attachment'} disposition inline = hiển thị trong thẻ <img>, attachment = tải về.
+ */
+function visualProxySrc(v, disposition) {
+  if (/^data:/i.test(v.url)) return v.url;
+  return '/api/visual/download?url=' + encodeURIComponent(v.url)
+    + '&subject=' + encodeURIComponent(v.subject || '')
+    + '&visualId=' + encodeURIComponent(v.visualId || '')
+    + (disposition === 'inline' ? '&inline=1' : '');
+}
+
+/** @returns {boolean} v là ẢNH THẬT do image model sinh (không phải SVG deterministic). */
+function isGeneratedImageVisual(v) {
+  return !!(v && (v.format === 'data_url' || v.format === 'image_url')
+    && typeof v.url === 'string' && /^(data:image\/|https:\/\/)/i.test(v.url));
+}
+
+/**
+ * downloadVisualPNG() — tải ảnh về máy.
+ * - `data:` URI  -> fetch -> blob -> createObjectURL -> <a download> (cùng cách đã dùng ở
+ *   mmDownloadPNG cho mindmap, không viết lại kiểu khác).
+ * - `https://`   -> đi qua /api/visual/download (CSP `connect-src 'self'` và CORS của provider đều
+ *   chặn fetch thẳng; proxy có whitelist domain cứng, chống SSRF).
+ */
+async function downloadVisualPNG(v, btn) {
+  if (!isGeneratedImageVisual(v)) return;
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = t('chat.visualDownloading'); }
+  try {
+    const res = await fetch(visualProxySrc(v, 'attachment'));
+    if (!res.ok) throw new Error('download_failed');
+    const blob = await res.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objUrl;
+    a.download = visualDownloadName(v);
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
+  } catch (e) {
+    if (btn) btn.textContent = t('chat.visualDownloadFailed');
+    setTimeout(() => { if (btn) { btn.textContent = label; btn.disabled = false; } }, 2500);
+    return;
+  }
+  if (btn) { btn.textContent = label; btn.disabled = false; }
+}
+
+/**
+ * downloadVisualSvgPNG() — tải hình deterministic (SVG) về dạng PNG.
+ * Dùng ĐÚNG cách đã có sẵn cho mindmap (mmDownloadPNG): serialize SVG -> data URL -> <img> ->
+ * canvas 2x -> toBlob -> <a download>. Không thêm thư viện, không gọi mạng, không gọi AI.
+ */
+async function downloadVisualSvgPNG(v, holder, btn) {
+  const svgEl = holder && holder.querySelector ? holder.querySelector('svg') : null;
+  if (!svgEl) return;
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = t('chat.visualDownloading'); }
+  try {
+    const bg = document.body.classList.contains('dark') ? '#0b1220' : '#ffffff';
+    const clone = svgEl.cloneNode(true);
+    clone.setAttribute('style', 'background:' + bg);
+    const xml = new XMLSerializer().serializeToString(clone);
+    const svg64 = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+    const img = new Image();
+    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = svg64; });
+    const w = (svgEl.viewBox && svgEl.viewBox.baseVal && svgEl.viewBox.baseVal.width) || img.width || 800;
+    const h = (svgEl.viewBox && svgEl.viewBox.baseVal && svgEl.viewBox.baseVal.height) || img.height || 600;
+    const canvas = document.createElement('canvas');
+    canvas.width = w * 2; canvas.height = h * 2;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    await new Promise((resolve) => canvas.toBlob((blob) => {
+      if (blob) {
+        const objUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = objUrl; a.download = visualDownloadName(v);
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
+      }
+      resolve();
+    }, 'image/png'));
+  } catch (e) {
+    if (btn) btn.textContent = t('chat.visualDownloadFailed');
+    setTimeout(() => { if (btn) { btn.textContent = label; btn.disabled = false; } }, 2500);
+    return;
+  }
+  if (btn) { btn.textContent = label; btn.disabled = false; }
+}
+
+/**
+ * downloadVisualHQ() — MỤC 2.2: tải bản 2048x2048. CHỈ chạy khi người dùng bấm tường minh nút này;
+ * độ phân giải mặc định của hệ thống không đổi. Server vẫn áp cost-gate theo imageNecessity, nên
+ * nút có thể bị từ chối (429) với hình chỉ ở mức "có cũng được" — khi đó báo thẳng, không lặng lẽ.
+ */
+async function downloadVisualHQ(v, btn) {
+  if (!isGeneratedImageVisual(v)) return;
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = t('chat.visualDownloading'); }
+  try {
+    const res = await fetch('/api/visual/hq', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visualId: v.visualId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok || !data.url) {
+      const key = data.error === 'cost_gate_low_benefit' ? 'chat.visualHqRefused' : 'chat.visualDownloadFailed';
+      if (btn) btn.textContent = t(key);
+      setTimeout(() => { if (btn) { btn.textContent = label; btn.disabled = false; } }, 3000);
+      return;
+    }
+    await downloadVisualPNG({ ...v, url: data.url, format: data.format || 'data_url' }, null);
+  } catch (e) {
+    if (btn) btn.textContent = t('chat.visualDownloadFailed');
+    setTimeout(() => { if (btn) { btn.textContent = label; btn.disabled = false; } }, 2500);
+    return;
+  }
+  if (btn) { btn.textContent = label; btn.disabled = false; }
+}
+
+/**
+ * openVisualLightbox() — modal xem ảnh phóng to. Không dùng thư viện ngoài (dự án chưa có).
+ * Esc đóng, click nền đóng, ảnh object-fit: contain, có nút tải PNG ngay trong lightbox.
+ */
+function openVisualLightbox(v) {
+  if (!isGeneratedImageVisual(v)) return null;
+  const prev = document.querySelector('.visual-lightbox');
+  if (prev) prev.remove();
+
+  const box = document.createElement('div');
+  box.className = 'visual-lightbox';
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-modal', 'true');
+  box.setAttribute('aria-label', v.title || t('chat.visualOpen'));
+
+  const inner = document.createElement('div');
+  inner.className = 'visual-lightbox-inner';
+
+  const img = document.createElement('img');
+  img.className = 'visual-lightbox-img';
+  img.alt = v.title || '';
+  img.src = visualProxySrc(v, 'inline');
+  inner.appendChild(img);
+
+  const bar = document.createElement('div');
+  bar.className = 'visual-lightbox-bar';
+  const dl = document.createElement('button');
+  dl.type = 'button';
+  dl.className = 'visual-btn';
+  dl.textContent = t('chat.visualDownload');
+  dl.addEventListener('click', () => downloadVisualPNG(v, dl));
+  const hq = document.createElement('button');
+  hq.type = 'button';
+  hq.className = 'visual-btn visual-btn-hq';
+  hq.textContent = t('chat.visualDownloadHq');
+  hq.addEventListener('click', () => downloadVisualHQ(v, hq));
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'visual-btn visual-btn-close';
+  close.textContent = t('chat.visualClose');
+  bar.appendChild(dl);
+  bar.appendChild(hq);
+  bar.appendChild(close);
+  inner.appendChild(bar);
+  box.appendChild(inner);
+
+  const onKey = (e) => { if (e.key === 'Escape') destroy(); };
+  function destroy() {
+    document.removeEventListener('keydown', onKey);
+    box.remove();
+  }
+  close.addEventListener('click', destroy);
+  box.addEventListener('click', (e) => { if (e.target === box) destroy(); }); // click NỀN mới đóng
+  document.addEventListener('keydown', onKey);
+
+  document.body.appendChild(box);
+  try { close.focus(); } catch (e) { /* môi trường không có focus — bỏ qua */ }
+  return box;
+}
+
+/** Thân hình dạng SVG deterministic. @returns {HTMLElement|null} */
+function renderVisualSvg(v) {
+  if (!(v.format === 'svg' && typeof v.content === 'string')) return null;
+  if (/<script|javascript:|\son\w+\s*=|<foreignObject/i.test(v.content)) return null; // fail-safe
+  const holder = document.createElement('div');
+  holder.className = 'visual-svg';
+  holder.innerHTML = v.content;
+  return holder;
+}
+
+/** Thân hình dạng ẢNH AI. @returns {HTMLElement|null} */
+function renderVisualImage(v) {
+  if (!isGeneratedImageVisual(v)) return null;
+  const holder = document.createElement('div');
+  holder.className = 'visual-img-wrap';
+  const img = document.createElement('img');
+  img.className = 'visual-img';
+  img.loading = 'lazy';
+  img.alt = v.title || '';
+  // Ảnh https của provider đi qua proxy (CSP img-src không mở cho domain bên thứ 3), data: dùng thẳng.
+  img.src = visualProxySrc(v, 'inline');
+  img.addEventListener('click', () => openVisualLightbox(v)); // click thẳng vào ảnh cũng phóng to
+  holder.appendChild(img);
+
+  // MỤC 1.3: nhãn NEO THEO % lên chính ảnh, chỉ khi lời giải CÓ toạ độ thật (spec cung cấp
+  // overlay.anchors). Không có toạ độ -> không neo gì cả, bảng chú thích dưới hình lo phần còn lại.
+  const anchors = (v.overlay && Array.isArray(v.overlay.anchors)) ? v.overlay.anchors : [];
+  if (anchors.length) {
+    const layer = document.createElement('div');
+    layer.className = 'visual-anchor-layer';
+    anchors.forEach((a) => {
+      const tag = document.createElement('span');
+      tag.className = 'visual-anchor';
+      tag.textContent = String(a.label);
+      tag.style.left = a.xPct + '%';
+      tag.style.top = a.yPct + '%';
+      layer.appendChild(tag);
+    });
+    holder.appendChild(layer);
+  }
+  return holder;
+}
+
+/** Chú thích dưới hình. @returns {HTMLElement|null} */
+function renderVisualCaption(v) {
+  if (!v.caption && !v.title) return null;
+  const cap = document.createElement('figcaption');
+  cap.textContent = v.title ? (v.caption ? v.title + ' — ' + v.caption : v.title) : v.caption;
+  return cap;
+}
+
+/**
+ * MỤC 1.3 — OVERLAY SỐ LIỆU ĐÃ XÁC THỰC.
+ * Ảnh AI KHÔNG còn được yêu cầu tự vẽ số/công thức (mục 1.2), nên số duy nhất người học nhìn thấy
+ * phải đến từ đây: `v.overlay` lấy thẳng từ spec đã verify ở server, KHÔNG gọi thêm AI nào.
+ * PHẦN 14: overlay phải TOGGLE được.
+ * @returns {HTMLElement|null}
+ */
+function renderVisualOverlay(v) {
+  const o = v && v.overlay;
+  if (!o) return null;
+  const numbers = Array.isArray(o.numbers) ? o.numbers : [];
+  const equations = Array.isArray(o.equations) ? o.equations : [];
+  const labels = Array.isArray(o.labels) ? o.labels : [];
+  if (!numbers.length && !equations.length && !labels.length) return null;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'visual-overlay';
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'visual-btn visual-overlay-toggle';
+  toggle.setAttribute('aria-expanded', 'true');
+  toggle.textContent = t('chat.visualHideAnnotations');
+
+  const body = document.createElement('div');
+  body.className = 'visual-overlay-body';
+
+  if (numbers.length) {
+    const list = document.createElement('ul');
+    list.className = 'visual-overlay-list';
+    numbers.forEach((n) => {
+      const li = document.createElement('li');
+      li.textContent = String(n.symbol) + ' = ' + String(n.value) + (n.unit ? ' ' + n.unit : '');
+      list.appendChild(li);
+    });
+    body.appendChild(list);
+  }
+  if (equations.length) {
+    const eq = document.createElement('ul');
+    eq.className = 'visual-overlay-list visual-overlay-eq';
+    equations.forEach((e) => {
+      const li = document.createElement('li');
+      li.textContent = String(e);
+      eq.appendChild(li);
+    });
+    body.appendChild(eq);
+  }
+  if (labels.length) {
+    const p = document.createElement('p');
+    p.className = 'visual-overlay-labels';
+    p.textContent = t('chat.visualPoints') + ': ' + labels.join(', ');
+    body.appendChild(p);
+  }
+
+  const src = document.createElement('p');
+  src.className = 'visual-overlay-source';
+  src.textContent = t('chat.visualAnnotationsSource');
+  body.appendChild(src);
+
+  toggle.addEventListener('click', () => {
+    const hidden = wrap.classList.toggle('is-collapsed');
+    toggle.setAttribute('aria-expanded', hidden ? 'false' : 'true');
+    toggle.textContent = hidden ? t('chat.visualShowAnnotations') : t('chat.visualHideAnnotations');
+  });
+
+  wrap.appendChild(toggle);
+  wrap.appendChild(body);
+  return wrap;
+}
+
+/**
+ * Hàng nút thao tác. Chỉ ảnh AI THẬT mới có "Mở ảnh"/"Tải PNG" — SVG deterministic giữ nguyên hành
+ * vi cũ (không phải trọng tâm phàn nàn, và tải SVG là việc khác).
+ * @returns {HTMLElement|null}
+ */
+function renderVisualActions(v, body) {
+  // SVG deterministic: chỉ có nút tải PNG (không lightbox — SVG đã co giãn theo khung, phóng to
+  // không thêm thông tin gì). Hành vi hiển thị của SVG giữ nguyên như trước.
+  if (!isGeneratedImageVisual(v)) {
+    if (!(v && v.format === 'svg' && body)) return null;
+    const svgBar = document.createElement('div');
+    svgBar.className = 'visual-actions';
+    const svgDl = document.createElement('button');
+    svgDl.type = 'button';
+    svgDl.className = 'visual-btn';
+    svgDl.textContent = t('chat.visualDownload');
+    svgDl.addEventListener('click', () => downloadVisualSvgPNG(v, body, svgDl));
+    svgBar.appendChild(svgDl);
+    return svgBar;
+  }
+  const bar = document.createElement('div');
+  bar.className = 'visual-actions';
+
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'visual-btn';
+  open.textContent = t('chat.visualOpen');
+  open.addEventListener('click', () => openVisualLightbox(v));
+
+  const dl = document.createElement('button');
+  dl.type = 'button';
+  dl.className = 'visual-btn';
+  dl.textContent = t('chat.visualDownload');
+  dl.addEventListener('click', () => downloadVisualPNG(v, dl));
+
+  bar.appendChild(open);
+  bar.appendChild(dl);
+  return bar;
+}
+
+/** Một card hình hoàn chỉnh. @returns {HTMLElement|null} null khi payload không hợp lệ. */
+function renderVisualCard(v) {
+  if (!v) return null;
+  const body = renderVisualSvg(v) || renderVisualImage(v);
+  if (!body) return null;
+
+  const fig = document.createElement('figure');
+  fig.className = 'visual-figure visual-card';
+  if (isGeneratedImageVisual(v)) fig.classList.add('visual-card-image');
+
+  if (v.title) {
+    const head = document.createElement('div');
+    head.className = 'visual-card-head';
+    head.textContent = v.title;
+    fig.appendChild(head);
+  }
+  fig.appendChild(body);
+
+  const cap = renderVisualCaption(v);
+  if (cap) fig.appendChild(cap);
+
+  const overlay = renderVisualOverlay(v);
+  if (overlay) fig.appendChild(overlay);
+
+  const actions = renderVisualActions(v, body);
+  if (actions) fig.appendChild(actions);
+
+  // Rủi ro #3: đề cần hình THẬT (lát cắt/giải phẫu/bản đồ) mà hệ thống chỉ dựng được sơ đồ khái
+  // niệm -> nói rõ với người học, đừng để họ tưởng đang nhìn một hình giải phẫu chính xác.
+  if (v.fidelity === 'schematic_only') {
+    const note = document.createElement('p');
+    note.className = 'visual-fidelity-note';
+    note.textContent = 'Đây là sơ đồ khái niệm, không phải hình giải phẫu/bản đồ thực tế — '
+      + 'dùng để nắm cấu trúc và vị trí tương đối, không dùng để nhận dạng chi tiết.';
+    fig.appendChild(note);
+  }
+  // B9.9/A3: hình do người dùng YÊU CẦU TƯỜNG MINH được nêu rõ là theo yêu cầu, tách khỏi hình
+  // hệ thống tự quyết định tạo.
+  if (v.necessity === 'USER_REQUESTED' || v.overrodeNever) {
+    const note = document.createElement('p');
+    note.className = 'visual-origin-note';
+    note.textContent = v.overrodeNever
+      ? 'Đã tạo hình theo yêu cầu của bạn, dù cài đặt đang tắt hình minh hoạ.'
+      : 'Hình được tạo theo yêu cầu của bạn.';
+    fig.appendChild(note);
+  }
+  return fig;
+}
+
+/**
+ * renderVisuals() — gắn hình minh hoạ vào 1 khối câu trả lời. CHỮ KÝ GIỮ NGUYÊN.
  *
- * An toàn: server CHỈ gửi 2 dạng — `format:'svg'` (chuỗi SVG đã qua visualValidator, bị chặn
- * script, thuộc tính on..., foreignObject ở tầng validate) và `format:'data_url'|'image_url'`.
- * Ở client vẫn kiểm tra lại một lần nữa trước khi nhúng — không tin tuyệt đối vào payload mạng.
- *
- * PHẦN 32: `status==='failed'` KHÔNG BAO GIỜ hiển thị như lỗi câu trả lời — chỉ là 1 dòng ghi chú.
+ * PHẦN 16: `status==='pending'` hiện "Đang tạo hình minh hoạ…" — KHÔNG để trống (trống trông y hệt
+ * lỗi). PHẦN 32: `status==='failed'` KHÔNG BAO GIỜ hiển thị như lỗi câu trả lời — chỉ 1 dòng ghi chú.
  */
 function renderVisuals(container, visuals, status) {
+  if (!container) return;
+  // Dọn placeholder loading của lượt trước (nếu có) trước khi vẽ kết quả thật.
+  container.querySelectorAll('.visual-loading').forEach((el) => el.remove());
+
+  if (status === 'pending') {
+    const wait = document.createElement('div');
+    wait.className = 'visual-note visual-loading';
+    wait.textContent = t('chat.visualGenerating');
+    container.appendChild(wait);
+    return;
+  }
   if (status === 'failed') {
     const note = document.createElement('div');
     note.className = 'visual-note';
@@ -2407,49 +2837,8 @@ function renderVisuals(container, visuals, status) {
   }
   if (!Array.isArray(visuals) || !visuals.length) return;
   visuals.forEach((v) => {
-    if (!v) return;
-    const fig = document.createElement('figure');
-    fig.className = 'visual-figure';
-    if (v.format === 'svg' && typeof v.content === 'string') {
-      if (/<script|javascript:|\son\w+\s*=|<foreignObject/i.test(v.content)) return; // fail-safe, bỏ hình đáng ngờ
-      const holder = document.createElement('div');
-      holder.className = 'visual-svg';
-      holder.innerHTML = v.content;
-      fig.appendChild(holder);
-    } else if ((v.format === 'data_url' || v.format === 'image_url') && typeof v.url === 'string'
-      && /^(data:image\/|https:\/\/)/i.test(v.url)) {
-      const img = document.createElement('img');
-      img.className = 'visual-img';
-      img.loading = 'lazy';
-      img.alt = v.title || '';
-      img.src = v.url;
-      fig.appendChild(img);
-    } else return;
-    if (v.caption || v.title) {
-      const cap = document.createElement('figcaption');
-      cap.textContent = v.title ? (v.caption ? v.title + ' — ' + v.caption : v.title) : v.caption;
-      fig.appendChild(cap);
-    }
-    // Rủi ro #3: đề cần hình THẬT (lát cắt/giải phẫu/bản đồ) mà hệ thống chỉ dựng được sơ đồ khái
-    // niệm -> nói rõ với người học, đừng để họ tưởng đang nhìn một hình giải phẫu chính xác.
-    if (v.fidelity === 'schematic_only') {
-      const note = document.createElement('p');
-      note.className = 'visual-fidelity-note';
-      note.textContent = 'Đây là sơ đồ khái niệm, không phải hình giải phẫu/bản đồ thực tế — '
-        + 'dùng để nắm cấu trúc và vị trí tương đối, không dùng để nhận dạng chi tiết.';
-      fig.appendChild(note);
-    }
-    // B9.9/A3: hình do người dùng YÊU CẦU TƯỜNG MINH được nêu rõ là theo yêu cầu, tách khỏi hình
-    // hệ thống tự quyết định tạo.
-    if (v.necessity === 'USER_REQUESTED' || v.overrodeNever) {
-      const note = document.createElement('p');
-      note.className = 'visual-origin-note';
-      note.textContent = v.overrodeNever
-        ? 'Đã tạo hình theo yêu cầu của bạn, dù cài đặt đang tắt hình minh hoạ.'
-        : 'Hình được tạo theo yêu cầu của bạn.';
-      fig.appendChild(note);
-    }
-    container.appendChild(fig);
+    const card = renderVisualCard(v);
+    if (card) container.appendChild(card);
   });
 }
 
@@ -2723,6 +3112,141 @@ function appendDetailSection(contentEl, msg, aiRow) {
 el('qInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 el('qInput').addEventListener('input', function () { this.style.height = 'auto'; this.style.height = Math.min(this.scrollHeight, 150) + 'px'; });
 el('sendBtn').onclick = sendMessage;
+
+/* ================= PHẦN D/F — VOICE INPUT (microphone) =================
+   Luồng ĐẦY ĐỦ, không có nhánh nào gọi thêm AI:
+       click #micBtn
+         -> voiceInput.start()  (trình duyệt tự xin quyền microphone nếu chưa có)
+         -> Web Speech API nhận dạng NGAY TRONG TRÌNH DUYỆT
+         -> transcript được GHÉP vào #qInput (không xoá nội dung đang gõ — PHẦN 24)
+         -> dispatch 'input' để auto-resize + mọi listener hiện có chạy như khi gõ tay (PHẦN 19)
+         -> NGƯỜI DÙNG tự bấm "Giải bài" (PHẦN 15/25: KHÔNG tự động gửi)
+   Không có audio nào rời khỏi máy người dùng, không có request nào tới /api/chat từ bước này. */
+(function setupVoiceInput() {
+  const micBtn = el('micBtn');
+  const statusBox = el('voiceStatus');
+  const statusText = el('voiceStatusText');
+  const interimEl = el('voiceInterim');
+  if (!micBtn) return;
+
+  const tr = (key, fallback) => (typeof window.t === 'function' ? window.t(key) : fallback) || fallback;
+
+  function showStatus(kind, message) {
+    if (!statusBox) return;
+    statusBox.classList.remove('error', 'unsupported');
+    if (kind) statusBox.classList.add(kind);
+    if (statusText) statusText.textContent = message || '';
+    if (message) statusBox.classList.add('show'); else statusBox.classList.remove('show');
+  }
+
+  function clearInterim() { if (interimEl) interimEl.textContent = ''; }
+
+  function setButtonState(st) {
+    micBtn.classList.remove('recording', 'processing', 'mic-error');
+    if (st === 'recording') micBtn.classList.add('recording');
+    else if (st === 'processing') micBtn.classList.add('processing');
+    else if (st === 'error') micBtn.classList.add('mic-error');
+    micBtn.setAttribute('aria-pressed', st === 'recording' ? 'true' : 'false');
+    micBtn.setAttribute(
+      'aria-label',
+      st === 'recording' ? tr('voice.micStopAria', 'Dừng ghi âm') : tr('voice.micAria', 'Nhập câu hỏi bằng giọng nói')
+    );
+  }
+
+  // Trình duyệt không hỗ trợ -> DISABLE nút + báo rõ ràng. Không throw, không crash (PHẦN 16/23).
+  if (!window.voiceInput || !window.voiceInput.isSupported()) {
+    micBtn.disabled = true;
+    micBtn.title = tr('voice.unsupported', 'Trình duyệt này không hỗ trợ nhập bằng giọng nói.');
+    micBtn.setAttribute('aria-disabled', 'true');
+    return;
+  }
+
+  const ERROR_KEY = {
+    'not-allowed': 'voice.errNotAllowed',
+    'service-not-allowed': 'voice.errNotAllowed',
+    'no-speech': 'voice.errNoSpeech',
+    'audio-capture': 'voice.errAudioCapture',
+    network: 'voice.errNetwork',
+    unsupported: 'voice.unsupported'
+  };
+
+  /**
+   * PHẦN 24: KHÔNG BAO GIỜ xoá nội dung người dùng đang gõ. Quy tắc ghép rõ ràng:
+   *   - #qInput rỗng            -> transcript trở thành nội dung.
+   *   - #qInput đã có nội dung  -> nối vào CUỐI, tự thêm đúng MỘT khoảng trắng nếu cần.
+   * Ví dụ: "Giải phương trình " + "hai x cộng ba bằng bảy"
+   *     -> "Giải phương trình hai x cộng ba bằng bảy"
+   */
+  function appendTranscript(text) {
+    const input = el('qInput');
+    if (!input || !text) return;
+    const current = input.value || '';
+    if (!current) input.value = text;
+    else input.value = /\s$/.test(current) ? current + text : current + ' ' + text;
+    // PHẦN 19: phát 'input' để auto-resize textarea + mọi listener khác chạy y như khi gõ tay.
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+    // Đưa con trỏ về cuối để người dùng sửa tiếp ngay.
+    try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) { /* noop */ }
+  }
+
+  function startListening() {
+    clearInterim();
+    let lang;
+    try {
+      lang = window.voiceInput.resolveRecognitionLang(state && state.settings ? state.settings.lang : undefined);
+    } catch (e) { lang = undefined; }
+
+    window.voiceInput.start({
+      lang,
+      onPartial: (partial) => { if (interimEl) interimEl.textContent = partial; },
+      onResult: (finalText) => {
+        // CHỈ đưa text vào ô nhập. KHÔNG gọi sendMessage() ở đây (PHẦN 15/25).
+        appendTranscript(finalText);
+      },
+      onError: (code) => {
+        clearInterim();
+        showStatus('error', tr(ERROR_KEY[code] || 'voice.errGeneric', 'Không nhận dạng được giọng nói.'));
+      },
+      onEnd: () => {
+        clearInterim();
+        if (window.voiceInput.getState() !== 'error') showStatus(null, '');
+      }
+    });
+  }
+
+  micBtn.addEventListener('click', () => {
+    try {
+      const st = window.voiceInput.getState();
+      if (st === 'recording' || st === 'processing') { window.voiceInput.stop(); return; }
+      if (st === 'error') window.voiceInput.resetError();
+      startListening();
+    } catch (e) {
+      // Lớp phòng thủ cuối: không bao giờ để lỗi microphone làm hỏng app (PHẦN 23).
+      showStatus('error', tr('voice.errGeneric', 'Không nhận dạng được giọng nói.'));
+    }
+  });
+
+  // Esc dừng ghi âm (PHẦN 18). Dùng capture=false và CHỈ xử lý khi đang ghi, nên không đụng tới
+  // các handler Esc sẵn có (đóng lightbox/popover).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const st = window.voiceInput.getState();
+    if (st === 'recording' || st === 'processing') {
+      e.stopPropagation();
+      window.voiceInput.abort();
+    }
+  });
+
+  window.voiceInput.subscribe((st) => {
+    setButtonState(st);
+    if (st === 'recording') showStatus(null, tr('voice.listening', 'Đang nghe…') + ' · ' + tr('voice.stopHint', 'Bấm lại hoặc nhấn Esc để dừng'));
+    else if (st === 'processing') showStatus(null, tr('voice.processing', 'Đang xử lý giọng nói…'));
+    else if (st === 'idle') { clearInterim(); showStatus(null, ''); }
+  });
+
+  setButtonState('idle');
+})();
 
 function finalizePendingTurnIfAny() {
   // Nếu lượt trước đó chỉ mới có "Hướng giải" mà người dùng chưa bấm xem chi tiết,

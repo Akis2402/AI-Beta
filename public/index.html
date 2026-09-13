@@ -11,7 +11,6 @@
      public/js/boot.js. File này phải nạp bằng thẻ <script src> (được 'self' cho phép), đặt TRƯỚC mọi
      script CDN để bắt được cả lỗi xảy ra khi các CDN đó tải/parse thất bại. -->
 <script src="/js/boot.js"></script>
-<script src="/js/speed-insights.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="alternate icon" href="/favicon.svg">
 <link rel="apple-touch-icon" href="/favicon.svg">
@@ -106,7 +105,7 @@
       <div class="left">
         <button id="menuBtn" class="iconbtn" data-i18n-aria-label="sidebar.openMenuAria" data-i18n-title="sidebar.openMenu" aria-label="Mở menu điều hướng" title="Mở menu"></button>
         <div class="title-wrap">
-          <span class="title" id="chatTitle">Bu��i học mới</span>
+          <span class="title" id="chatTitle">Buổi học mới</span>
           <span class="title-meta" id="chatMeta"></span>
         </div>
         <span class="grade-badge" id="chatGradeBadge"></span>
@@ -130,6 +129,7 @@
           <div id="chatBarTools">
             <input type="file" id="imageInput" accept="image/*" style="display:none;">
             <button id="attachBtn" type="button" class="tool-btn icon-only" data-i18n-title="upload.imageBtnTitle" data-i18n-aria-label="upload.imageBtn" title="Tải ảnh đề bài từ máy (hoặc kéo-thả / dán ảnh bằng Ctrl+V)" aria-label="Tải ảnh đề bài"></button>
+            <button id="micBtn" type="button" class="tool-btn icon-only" data-i18n-title="voice.micTitle" data-i18n-aria-label="voice.micAria" title="Nhập câu hỏi bằng giọng nói" aria-label="Nhập câu hỏi bằng giọng nói" aria-pressed="false"></button>
             <div id="subjectBtnWrap">
               <button id="subjectBtn" type="button" class="tool-btn" data-i18n-aria-label="composer.subjectAria" aria-label="Chọn môn học" aria-haspopup="true">✨ Tự động</button>
               <div id="subjectPopover"></div>
@@ -153,6 +153,7 @@
             <button id="stopBtn" type="button" style="display:none;" data-i18n="chat.stop">Dừng</button>
           </div>
         </div>
+        <div id="voiceStatus" role="status" aria-live="polite"><span class="voice-dot"></span><span id="voiceStatusText"></span><span id="voiceInterim" class="voice-interim"></span></div>
         <div id="hint" data-i18n="composer.hint">Enter để gửi · Shift+Enter xuống dòng · AI sẽ đưa hướng giải trước, bấm "Xem lời giải chi tiết" khi cần</div>
       </div>
     </div>
@@ -347,7 +348,7 @@
      'ACTIVE_3D' has already been declared" quan sát được). scripts/build.js (chạy TỰ ĐỘNG mỗi lần
      `npm run build`, tức MỖI LẦN Vercel deploy — xem vercel.json "buildCommand") gắn content-hash
      10 ký tự vào tên từng file NGAY TRƯỚC KHI ghi lại đúng các <script src> này (vd
-     "app.7f3a9c1e02.js"): nội dung đổi -> hash đổi -> URL đổi hẳn, không bao giờ trùng URL giữa 2
+     "app.js"): nội dung đổi -> hash đổi -> URL đổi hẳn, không bao giờ trùng URL giữa 2
      nội dung khác nhau -> an toàn cache "immutable" vĩnh viễn (xem vercel.json). File nguồn ở đây
      CỐ Ý giữ tên KHÔNG hash (đây là template — build step ghi đè bản có hash vào output deploy,
      KHÔNG commit ngược lại repo). -->
@@ -364,6 +365,7 @@
 <script src="/js/providers/puterAdapter.js"></script>
 <script src="/js/providers/providerRouter.js"></script>
 <script src="/js/tasks/conversationTaskManager.js"></script>
+<script src="/js/voiceInput.js"></script>
 <script src="/js/geo2d-engine.js"></script>
 <script src="/js/app.js"></script>
 </body>

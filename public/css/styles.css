@@ -858,6 +858,33 @@ body.mm-lock-scroll{overflow:hidden;}
 .tool-btn:active{transform:translateY(0) scale(.97);}
 .tool-btn.icon-only{width:32px;padding:0;justify-content:center;}
 .tool-btn.has-image{border-color:var(--primary);background:var(--highlight);}
+
+/* ---------- PHẦN D/18: nút microphone (Voice Input) ---------- */
+/* Bốn trạng thái nhìn thấy được: idle (mặc định .tool-btn), recording, processing, error; cộng
+   trạng thái unsupported (disabled). Animation dùng transform/opacity — chạy trên compositor nên
+   không gây layout thrash/giật khung hình khi người dùng đang gõ. */
+#micBtn{position:relative;}
+#micBtn.recording{border-color:var(--danger,#d64545);background:color-mix(in srgb,var(--danger,#d64545) 12%,transparent);color:var(--danger,#d64545);}
+#micBtn.recording::after{content:"";position:absolute;inset:-3px;border-radius:inherit;border:2px solid var(--danger,#d64545);opacity:.55;animation:micPulse 1.6s var(--ease-standard,ease-out) infinite;pointer-events:none;}
+#micBtn.processing{border-color:var(--primary);color:var(--primary);}
+#micBtn.processing svg{animation:micBlink 1s ease-in-out infinite;}
+#micBtn.mic-error{border-color:var(--danger,#d64545);color:var(--danger,#d64545);}
+#micBtn:disabled{opacity:.45;cursor:not-allowed;}
+#micBtn:disabled:hover{border-color:var(--rule);transform:none;}
+@keyframes micPulse{0%{transform:scale(1);opacity:.55;}70%{transform:scale(1.28);opacity:0;}100%{transform:scale(1.28);opacity:0;}}
+@keyframes micBlink{0%,100%{opacity:1;}50%{opacity:.45;}}
+
+/* Dải trạng thái "Đang nghe…" ngay dưới ô nhập — không đẩy layout vì chiếm chỗ cố định khi hiện. */
+#voiceStatus{display:none;align-items:center;gap:8px;margin-top:6px;font-size:12.5px;color:var(--muted,#6b7280);}
+#voiceStatus.show{display:flex;}
+#voiceStatus.error{color:var(--danger,#d64545);}
+#voiceStatus .voice-dot{width:8px;height:8px;border-radius:50%;background:var(--danger,#d64545);flex-shrink:0;animation:micBlink 1s ease-in-out infinite;}
+#voiceStatus.error .voice-dot,#voiceStatus.unsupported .voice-dot{animation:none;background:currentColor;}
+#voiceStatus .voice-interim{color:var(--text);font-style:italic;}
+
+@media (prefers-reduced-motion: reduce){
+  #micBtn.recording::after,#micBtn.processing svg,#voiceStatus .voice-dot{animation:none;}
+}
 #thinkBtnWrap{position:relative;}
 #thinkBtn.deep{border-color:var(--primary);background:var(--highlight);color:var(--primary-dark);}
 #thinkPopover{
@@ -1228,7 +1255,134 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 }
 .visual-figure .visual-svg { color: var(--fg); line-height: 0; }
 .visual-figure .visual-svg svg { max-width: 100%; height: auto; }
-.visual-figure .visual-img { display: block; max-width: 100%; height: auto; border-radius: 8px; }
+
+/* ---------- MỤC 1.4: card hình minh hoạ (nền riêng, bo lớn, shadow nhẹ) ---------- */
+/* Ảnh KHÔNG được chiếm hết khung chat: max-height cố định + object-fit: contain, muốn xem to thì
+   bấm "Mở ảnh" (lightbox). */
+.visual-card {
+  padding: 14px;
+  border-radius: 16px;
+  background: var(--card, rgba(127, 127, 127, 0.05));
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 6px 18px rgba(0, 0, 0, 0.07);
+}
+.visual-card-head {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.78;
+}
+.visual-card .visual-img-wrap {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fff;
+}
+
+/* MỤC 1.3: nhãn neo theo % lên chính ảnh — CHỈ xuất hiện khi lời giải có toạ độ thật (server gửi
+   overlay.anchors). Không có toạ độ thì không có lớp này, tuyệt đối không đoán vị trí. */
+.visual-anchor-layer { position: absolute; inset: 0; pointer-events: none; }
+.visual-anchor {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  padding: 1px 6px;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.visual-figure .visual-img {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  height: auto;
+  object-fit: contain;
+  border-radius: 12px;
+  cursor: zoom-in;
+}
+@media (max-width: 640px) {
+  .visual-figure .visual-img { max-height: 280px; }
+  .visual-card { padding: 10px; border-radius: 14px; }
+}
+
+.visual-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.visual-btn {
+  padding: 6px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.visual-btn:hover { background: rgba(127, 127, 127, 0.12); }
+.visual-btn:disabled { opacity: 0.6; cursor: default; }
+
+/* ---------- MỤC 1.3: overlay số liệu ĐÃ XÁC THỰC (toggle được — PHẦN 14) ---------- */
+/* Ảnh AI không chứa số nào; mọi con số người học đọc đều nằm ở khối này và đến từ lời giải đã
+   kiểm chứng. */
+.visual-overlay { margin-top: 10px; }
+.visual-overlay-toggle { margin-bottom: 8px; }
+.visual-overlay.is-collapsed .visual-overlay-body { display: none; }
+.visual-overlay-body {
+  padding: 10px 12px;
+  border: 1px dashed var(--rule);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.visual-overlay-list { margin: 0 0 6px; padding-left: 18px; }
+.visual-overlay-list li { margin: 2px 0; }
+.visual-overlay-eq { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.visual-overlay-labels { margin: 4px 0 0; }
+.visual-overlay-source { margin: 6px 0 0; font-size: 11.5px; opacity: 0.65; }
+
+/* ---------- MỤC 1.4: lightbox (không thư viện ngoài) ---------- */
+.visual-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.72);
+}
+.visual-lightbox-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: min(96vw, 1100px);
+  max-height: 92vh;
+}
+.visual-lightbox-img {
+  max-width: 100%;
+  max-height: 80vh;
+  object-fit: contain;
+  border-radius: 12px;
+  background: #fff;
+}
+.visual-lightbox-bar { display: flex; gap: 8px; justify-content: center; }
+.visual-lightbox .visual-btn {
+  border-color: rgba(255, 255, 255, 0.5);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+.visual-lightbox .visual-btn:hover { background: rgba(255, 255, 255, 0.2); }
+
+/* Trạng thái đang tạo hình — PHẦN 16: KHÔNG để trống, trống trông y hệt lỗi. */
+.visual-loading { font-style: italic; }
 .visual-figure figcaption {
   margin-top: 8px;
   font-size: 12.5px;
