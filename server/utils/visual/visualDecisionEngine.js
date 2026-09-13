@@ -273,7 +273,71 @@ function applyModelJudgement(decision, judgement) {
   };
 }
 
+// ============================================================================================
+// MỤC 1.6 — YÊU CẦU CHỈ-LẤY-HÌNH ("Tạo cho tôi hình ảnh cấu tạo con người")
+// ============================================================================================
+// Đây KHÔNG phải một bài tập cần lời giải. Người dùng muốn ĐÚNG MỘT thứ: bức hình, kèm vài dòng
+// giới thiệu. Chạy nó qua pipeline giải bài hai giai đoạn (Hướng giải -> Lời giải chi tiết, kèm
+// completeness check + continuation) là sai từ gốc: tốn nhiều lượt gọi AI, sinh ra một bài văn dài
+// mà người dùng không hỏi, và vì bài văn dài nên rất dễ chạm trần token -> "CHƯA ĐẦY ĐỦ".
+//
+// Nhận diện cần CẢ HAI vế, để không cướp mất những câu hỏi thật sự có nội dung học thuật:
+//   (1) ĐỘNG TỪ TẠO HÌNH đứng đầu ý định: "tạo/vẽ/làm/cho tôi xem/generate/draw/create ... hình
+//       ảnh|ảnh|hình|sơ đồ|image|picture|diagram".
+//   (2) KHÔNG có ĐỘNG TỪ HỌC THUẬT nào trong câu ("giải", "tính", "chứng minh", "so sánh",
+//       "phân tích", "vì sao", "tại sao", "trình bày", "nêu"...). Có bất kỳ từ nào trong nhóm này
+//       nghĩa là người dùng muốn NỘI DUNG, hình chỉ là phần kèm theo -> đi đường bình thường.
+// Câu cũng phải NGẮN (<= 160 ký tự): một đề bài dài kèm câu "vẽ hình minh hoạ" ở cuối vẫn là đề bài.
+// LƯU Ý KỸ THUẬT (đã mắc phải và sửa): KHÔNG dùng `\b` quanh từ tiếng Việt. `\b` của JavaScript
+// dựa trên [A-Za-z0-9_], nên "ẽ" trong "vẽ" và "ả" trong "ảnh" KHÔNG phải ký tự từ -> `\bảnh` hay
+// `vẽ\b` không bao giờ khớp. Dùng lookaround theo \p{L} (cờ `u`) làm ranh giới từ Unicode.
+const NOT_LETTER_BEFORE = '(?<![\\p{L}\\p{N}])';
+const NOT_LETTER_AFTER = '(?![\\p{L}\\p{N}])';
+const IMAGE_ONLY_VERB_RE = new RegExp(
+  NOT_LETTER_BEFORE
+  + '(?:tạo|vẽ|làm|thiết\\s*kế|cho\\s+(?:tôi|mình|em)\\s+(?:xem|một|1)?|generate|create|draw|show\\s+me|make)'
+  + NOT_LETTER_AFTER
+  + '[^.?!]{0,40}?' + NOT_LETTER_BEFORE
+  + '(?:hình\\s*ảnh|hình\\s*vẽ|bức\\s*ảnh|tấm\\s*ảnh|hình|ảnh|sơ\\s*đồ|minh\\s*hoạ|minh\\s*họa'
+  + '|image|picture|photo|illustration|diagram|drawing)' + NOT_LETTER_AFTER,
+  'iu'
+);
+const CONTENT_VERB_RE = new RegExp(
+  NOT_LETTER_BEFORE
+  + '(?:giải|tính|chứng\\s*minh|cmr|so\\s*sánh|phân\\s*tích|giải\\s*thích|vì\\s*sao|tại\\s*sao'
+  + '|trình\\s*bày|nêu|liệt\\s*kê|viết\\s*(?:đoạn|bài)|lập\\s*bảng|tìm\\s+(?:x|y|giá\\s*trị|nghiệm)'
+  + '|rút\\s*gọn|khảo\\s*sát|solve|calculate|prove|explain|compare|analyz)',
+  'iu'
+);
+
+/**
+ * detectImageOnlyRequest() — thuần heuristic, 0 token.
+ * @param {string} question
+ * @returns {{imageOnly:boolean, topic:string, reason:string}} `topic` = chủ thể cần vẽ, đã bỏ phần
+ *   động từ yêu cầu ("Tạo cho tôi hình ảnh cấu tạo con người" -> "cấu tạo con người").
+ */
+function detectImageOnlyRequest(question) {
+  const q = String(question || '').trim();
+  if (!q) return { imageOnly: false, topic: '', reason: 'empty' };
+  if (q.length > 160) return { imageOnly: false, topic: '', reason: 'too_long_for_image_only' };
+  if (!IMAGE_ONLY_VERB_RE.test(q)) return { imageOnly: false, topic: '', reason: 'no_image_verb' };
+  if (CONTENT_VERB_RE.test(q)) return { imageOnly: false, topic: '', reason: 'has_content_verb' };
+
+  // Chủ thể = phần còn lại sau khi bỏ cụm yêu cầu tạo hình ở đầu.
+  const topic = q
+    .replace(IMAGE_ONLY_VERB_RE, ' ')
+    .replace(/^\s*(?:về|of|the|một|1|cái|bức|tấm)(?![\p{L}\p{N}])/iu, '')
+    .replace(/[\s,.;:!?]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Không còn chủ thể nào ("vẽ cho tôi một bức ảnh") -> không đủ dữ kiện, để pipeline thường hỏi lại.
+  if (topic.length < 3) return { imageOnly: false, topic: '', reason: 'no_topic' };
+  return { imageOnly: true, topic, reason: 'image_only_request' };
+}
+
 module.exports = {
+  detectImageOnlyRequest,
   evaluateVisualNeed,
   NECESSITY,
   classifyNecessity,

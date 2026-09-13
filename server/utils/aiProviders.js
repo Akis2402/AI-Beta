@@ -37,6 +37,9 @@ const rotationStore = require('./rotationStore');
 const { stripThinkingTags, createStreamingThinkingFilter } = require('./thinkingFilter');
 // Lọc "nhãn phân loại an toàn nội bộ bị lộ ra làm câu trả lời" — xem đầu safetyLeakFilter.js.
 const { createSafetyLineFilter } = require('./safetyLeakFilter');
+// LỚP 3: nháp lập kế hoạch KHÔNG có thẻ ("We need to continue from that point...") — xem
+// server/utils/metaPlanningFilter.js để biết nguyên nhân gốc và luật chống dương tính giả.
+const { createMetaPlanningFilter } = require('./metaPlanningFilter');
 // Observability (mục LVIII): log requestId/provider/model/targetId/stage/latency/status/error class
 // cho MỖI lần gọi 1 execution target — không log secret (logger tự redact). `requestId` là optional
 // (args.requestId, do chat.js gán) — nếu không có, field đó vắng mặt trong log, không throw.
@@ -716,7 +719,11 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
       attemptText += visible;
       onDelta(visible);
     });
-    const filter = createStreamingThinkingFilter((visible) => safetyFilter.feed(visible));
+    // Chuỗi lọc: thinking tag -> nháp lập kế hoạch -> nhãn an toàn -> người dùng.
+    // metaFilter đặt TRƯỚC safetyFilter để `committed` vẫn chỉ bật khi có nội dung THẬT đi tới cuối
+    // chuỗi: lượt gọi chỉ sinh ra nháp kế hoạch sẽ có committed=false và được failover như response rỗng.
+    const metaFilter = createMetaPlanningFilter((visible) => safetyFilter.feed(visible));
+    const filter = createStreamingThinkingFilter((visible) => metaFilter.feed(visible));
     const attemptStartedAt = Date.now();
     try {
       const meta = {};
@@ -726,6 +733,7 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
         onDelta: (piece) => filter.feed(piece)
       });
       filter.flush();
+      metaFilter.flush();
       safetyFilter.flush();
       const visibleText = stripThinkingTags(text);
       if (visibleText || committed) {
@@ -761,7 +769,7 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
         // lấy nốt phần đang nằm trong buffer (trước đây bị mất trắng: nhánh catch không hề gọi
         // filter.flush()/safetyFilter.flush(), nên đoạn văn bản cuối còn đệm trong bộ lọc thinking
         // bị bỏ đi cùng lỗi), rồi trả checkpoint để caller chuyển sang RESUME MODE.
-        try { filter.flush(); safetyFilter.flush(); } catch (e) { /* bộ lọc đã đóng — bỏ qua */ }
+        try { filter.flush(); metaFilter.flush(); safetyFilter.flush(); } catch (e) { /* bộ lọc đã đóng — bỏ qua */ }
         logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'partial_error', err });
         // Người dùng hủy giữa chừng thì KHÔNG phải lỗi provider — không cooldown, không resume.
         if (err && err.cancelled) {

@@ -335,8 +335,8 @@ function renderConceptCard(spec) {
   let inner = `<rect x="${PAD - 16}" y="40" width="${W - 2 * PAD + 32}" height="${height - 62}" rx="10" stroke-width="1.6" fill="currentColor" fill-opacity="0.04"/>`;
   rows.forEach((r, k) => {
     const y = 76 + k * 34;
-    inner += `<text x="${PAD}" y="${y}" stroke="none" fill="currentColor" font-size="13" font-weight="600">${esc(truncate(r[0], 22))}</text>`
-      + `<text x="${PAD + 160}" y="${y}" stroke="none" fill="currentColor" font-size="13">${esc(truncate(r[1], 52))}</text>`
+    inner += `<text x="${PAD}" y="${y}" stroke="none" fill="currentColor" font-size="13" font-weight="600">${esc(truncate(r[0], 26))}</text>`
+      + `<text x="${PAD + 160}" y="${y}" stroke="none" fill="currentColor" font-size="13">${esc(truncate(r[1], 68))}</text>`
       + `<line x1="${PAD}" y1="${y + 10}" x2="${W - PAD}" y2="${y + 10}" stroke-width="0.6" opacity="0.2"/>`;
   });
   return svgShell(inner, { title: spec.title, height });
@@ -379,26 +379,104 @@ function renderChemistry(spec) {
 // Sơ đồ có chú thích: một hình bao (tế bào/cơ quan) với các thành phần ĐƯỢC NÊU TÊN TRONG LỜI GIẢI,
 // mỗi thành phần có đường dẫn tới nhãn. Không vẽ chi tiết giải phẫu (dễ sai) — chỉ thể hiện đúng
 // quan hệ "thành phần nằm trong chỉnh thể" và tên/chức năng đã xác thực.
-function renderBiology(spec) {
-  const parts = ((spec.data && spec.data.parts) || []).slice(0, 6);
-  if (parts.length < 2) return null;
-  const cx = 250, cy = H / 2 + 6, rx = 165, ry = 132;
-  let inner = `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" stroke-width="2.2" fill="currentColor" fill-opacity="0.04"/>`;
+// ---------- Chia 1 chuỗi thành nhiều dòng theo số ký tự tối đa, CẮT Ở RANH GIỚI TỪ ----------
+// SVG không tự xuống dòng. Trước đây mọi nhãn đều bị `truncate(note, 28)` -> người dùng nhận được
+// "Cơ thể người có 4 nhóm mô c…" — vô dụng. Nay nhãn được XUỐNG DÒNG thay vì bị cắt cụt; chỉ khi
+// vượt quá số dòng cho phép mới thêm dấu "…".
+function wrapText(str, maxChars, maxLines) {
+  const words = String(str == null ? '' : str).trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    const next = cur ? `${cur} ${w}` : w;
+    if (next.length <= maxChars) { cur = next; continue; }
+    if (cur) lines.push(cur);
+    cur = w.length > maxChars ? `${w.slice(0, maxChars - 1)}…` : w;
+    if (lines.length >= maxLines) break;
+  }
+  if (cur && lines.length < maxLines) lines.push(cur);
+  if (lines.length === maxLines && words.join(' ').length > lines.join(' ').length) {
+    lines[maxLines - 1] = truncate(lines[maxLines - 1] + ' …', maxChars);
+  }
+  return lines;
+}
+
+// ============================== biology_diagram ==============================
+// MỤC 1.5 — KHÔNG BAO GIỜ VẼ HÌNH GIẢ.
+//
+// BUG ĐÃ QUAN SÁT ĐƯỢC: với câu "cấu tạo cơ thể người", renderer cũ vẽ một HÌNH ELIP rỗng rồi rải
+// các chấm đánh số 1..n vào những vị trí chia đều theo góc bên trong nó, kéo đường dẫn sang nhãn ở
+// mép phải. Hình elip đó KHÔNG đại diện cho bất cứ thứ gì, và vị trí các chấm là BỊA HOÀN TOÀN —
+// nó ngụ ý "hệ sinh dục nằm ở chỗ này trong cơ thể" trong khi renderer không hề biết điều đó. Đường
+// dẫn còn cắt chéo nhau và nhãn bị cắt cụt ở 22/28 ký tự. Đây đúng là loại "hình sai còn tệ hơn
+// không có hình" mà PHẦN 18/26 cấm.
+//
+// NGUYÊN TẮC MỚI: sơ đồ có ĐỊNH VỊ (chấm + đường dẫn trên một hình bao) CHỈ được dựng khi spec
+// THỰC SỰ mang toạ độ giải phẫu do tầng trên xác thực (`part.pos = {x,y}` theo tỉ lệ 0..1 của khung
+// hình). Không có toạ độ -> dựng BẢNG THÀNH PHẦN có cấu trúc: đánh số, tên đầy đủ, mô tả xuống
+// dòng. Trung thực, đọc được, và không bịa ra quan hệ không gian nào.
+function hasAnatomicalPositions(parts) {
+  if (!parts || parts.length < 2) return false;
+  return parts.every((p) => p && p.pos
+    && Number.isFinite(Number(p.pos.x)) && Number.isFinite(Number(p.pos.y))
+    && Number(p.pos.x) >= 0 && Number(p.pos.x) <= 1
+    && Number(p.pos.y) >= 0 && Number(p.pos.y) <= 1);
+}
+
+/** Sơ đồ ĐỊNH VỊ — chỉ dùng khi toạ độ là THẬT (xem hasAnatomicalPositions). */
+function renderBiologyPositioned(spec, parts) {
+  const boxX = PAD, boxY = 52, boxW = 340, boxH = H - boxY - 56;
+  let inner = `<rect x="${boxX}" y="${boxY}" width="${boxW}" height="${boxH}" rx="14" stroke-width="2" fill="currentColor" fill-opacity="0.04"/>`;
+  const lx = boxX + boxW + 46;
+  const slot = (H - boxY - 40) / parts.length;
   parts.forEach((p, k) => {
-    const a = -Math.PI / 2 + (2 * Math.PI * k) / parts.length;
-    const px = cx + (rx * 0.55) * Math.cos(a);
-    const py = cy + (ry * 0.55) * Math.sin(a);
-    const ly = 66 + k * ((H - 110) / Math.max(1, parts.length - 1 || 1));
-    const lx = W - 250;
-    inner += `<circle cx="${num(px)}" cy="${num(py)}" r="12" stroke-width="1.8" fill="currentColor" fill-opacity="0.12"/>`
+    const px = boxX + Number(p.pos.x) * boxW;
+    const py = boxY + Number(p.pos.y) * boxH;
+    const ly = boxY + 16 + k * slot;
+    inner += `<line x1="${num(px)}" y1="${num(py)}" x2="${num(lx - 10)}" y2="${num(ly - 4)}" stroke-width="0.9" opacity="0.45"/>`
+      + `<circle cx="${num(px)}" cy="${num(py)}" r="11" stroke-width="1.8" fill="currentColor" fill-opacity="0.14"/>`
       + `<text x="${num(px)}" y="${num(py + 4)}" text-anchor="middle" stroke="none" fill="currentColor" font-size="11">${k + 1}</text>`
-      + `<line x1="${num(px + 12)}" y1="${num(py)}" x2="${num(lx - 8)}" y2="${num(ly - 4)}" stroke-width="1" opacity="0.5"/>`
-      + `<text x="${num(lx)}" y="${num(ly)}" stroke="none" fill="currentColor" font-size="12.5" font-weight="600">${k + 1}. ${esc(truncate(p.name, 22))}</text>`;
-    if (p.note) {
-      inner += `<text x="${num(lx)}" y="${num(ly + 15)}" stroke="none" fill="currentColor" font-size="11" opacity="0.72">${esc(truncate(p.note, 28))}</text>`;
-    }
+      + `<text x="${num(lx)}" y="${num(ly)}" stroke="none" fill="currentColor" font-size="12.5" font-weight="600">${k + 1}. ${esc(truncate(p.name, 34))}</text>`;
+    wrapText(p.note || '', 40, 2).forEach((ln, j) => {
+      inner += `<text x="${num(lx)}" y="${num(ly + 15 + j * 13)}" stroke="none" fill="currentColor" font-size="11" opacity="0.72">${esc(ln)}</text>`;
+    });
   });
   return svgShell(inner, { title: spec.title });
+}
+
+/**
+ * BẢNG THÀNH PHẦN — đường mặc định khi KHÔNG có toạ độ thật.
+ * Mỗi thành phần là một thẻ: số thứ tự + tên đầy đủ + mô tả xuống dòng (không cắt cụt).
+ */
+function renderPartsBoard(spec, parts) {
+  const cols = parts.length > 4 ? 2 : 1;
+  const rows = Math.ceil(parts.length / cols);
+  const cardW = (W - 2 * PAD - (cols - 1) * 18) / cols;
+  const cardH = cols === 2 ? 84 : 62;
+  const height = 62 + rows * (cardH + 14) + 22;
+  let inner = '';
+  parts.forEach((p, k) => {
+    const c = k % cols;
+    const r = Math.floor(k / cols);
+    const x = PAD + c * (cardW + 18);
+    const y = 56 + r * (cardH + 14);
+    const noteChars = Math.max(18, Math.round(cardW / 6.6));
+    inner += `<rect x="${num(x)}" y="${num(y)}" width="${num(cardW)}" height="${cardH}" rx="10" stroke-width="1.4" fill="currentColor" fill-opacity="0.05"/>`
+      + `<circle cx="${num(x + 22)}" cy="${num(y + 24)}" r="13" stroke-width="1.5" fill="currentColor" fill-opacity="0.12"/>`
+      + `<text x="${num(x + 22)}" y="${num(y + 28)}" text-anchor="middle" stroke="none" fill="currentColor" font-size="12" font-weight="600">${k + 1}</text>`
+      + `<text x="${num(x + 44)}" y="${num(y + 28)}" stroke="none" fill="currentColor" font-size="13.5" font-weight="600">${esc(truncate(p.name, Math.round(noteChars * 0.9)))}</text>`;
+    wrapText(p.note || '', noteChars, cols === 2 ? 3 : 2).forEach((ln, j) => {
+      inner += `<text x="${num(x + 44)}" y="${num(y + 46 + j * 14)}" stroke="none" fill="currentColor" font-size="11.5" opacity="0.75">${esc(ln)}</text>`;
+    });
+  });
+  return svgShell(inner, { title: spec.title, height });
+}
+
+function renderBiology(spec) {
+  const parts = ((spec.data && spec.data.parts) || []).slice(0, 8).filter((p) => p && p.name);
+  if (parts.length < 2) return null;
+  if (hasAnatomicalPositions(parts)) return renderBiologyPositioned(spec, parts.slice(0, 6));
+  return renderPartsBoard(spec, parts);
 }
 
 // ============================== map_diagram ==============================
@@ -503,5 +581,6 @@ function renderDeterministic(spec) {
 module.exports = {
   renderDeterministic, evalExpression, normalizeImplicitMultiplication, esc,
   renderPlot, renderGeometry, renderPhysics, renderCircuit, renderFlowchart, renderChart, renderConceptCard,
+  renderPartsBoard, hasAnatomicalPositions, wrapText,
   renderChemistry, renderBiology, renderMap, renderApparatus, alternateRenderers
 };

@@ -10,6 +10,8 @@ const {
 // (ngân sách đó chỉ tính cho bước THU THẬP lượt giải). Có timeout riêng, rõ ràng để lượt tổng hợp
 // không bị "thừa hưởng" một REQUEST_TIMEOUT_MS quá dài rồi cộng dồn vượt quá maxDuration của hosting.
 const RECONCILE_TIMEOUT_MS = Number(process.env.RECONCILE_TIMEOUT_MS) || 25000;
+// Ngân sách cho chú thích của đường "chỉ lấy hình": vài câu + danh sách thành phần, không hơn.
+const IMAGE_CAPTION_MAX_TOKENS = Number(process.env.IMAGE_CAPTION_MAX_TOKENS) || 600;
 const {
   buildChatSystemPrompt,
   buildChatSystemPromptParts,
@@ -305,6 +307,51 @@ function makeRecoveryResolver({ reserveState, recalcTarget, deadline }) {
     if (decision && decision.allow) reserveState.used += decision.amount;
     return decision;
   };
+}
+
+/**
+ * MỤC 1.6 — ĐƯỜNG "CHỈ LẤY HÌNH".
+ *
+ * Người dùng gõ "Tạo cho tôi hình ảnh cấu tạo con người" thì thứ họ muốn là BỨC HÌNH, kèm vài dòng
+ * giới thiệu — không phải một bài giảng hai giai đoạn. Đường này:
+ *   - Gọi AI ĐÚNG MỘT LƯỢT, ngân sách nhỏ, để sinh phần chú thích ngắn. Chính văn bản đó cũng là
+ *     nguồn dữ kiện cho visualSpecBuilder (tên các thành phần + mô tả), nên KHÔNG tốn lượt gọi thứ hai.
+ *   - Rồi chạy đúng pipeline hình sẵn có với userPreference='always' (yêu cầu tường minh của người
+ *     dùng, NECESSITY.USER_REQUESTED).
+ * Tổng cộng: 1 lượt gọi text + 1 lượt gọi ảnh. Không completeness check, không continuation — vì
+ * không có "lời giải" nào để mà thiếu, nên cũng không còn cảnh báo "CHƯA ĐẦY ĐỦ (finish_reason_length)"
+ * vốn chỉ là hệ quả của việc ép một yêu cầu tạo ảnh đi qua khuôn lời giải dài.
+ *
+ * @returns {Promise<{text:string, provider:object}>}
+ */
+async function generateImageCaption({ topic, language, activeProviders, deadline, requestId, signal }) {
+  const isEnglish = /english/i.test(String(language || ''));
+  const system = isEnglish
+    ? 'You write the short caption that accompanies an illustration. Be factual and concise.'
+    : 'Bạn viết phần chú thích ngắn đi kèm một hình minh hoạ. Chính xác, ngắn gọn, không lan man.';
+  const prompt = isEnglish
+    ? `Write a SHORT introduction (2-3 sentences) for an illustration of: "${topic}".\n`
+      + 'Then list 4-6 main components as bullets in the form "- Name: one short sentence".\n'
+      + 'No solution, no steps, no headings. Nothing else.'
+    : `Viết phần GIỚI THIỆU NGẮN (2-3 câu) cho một hình minh hoạ về: "${topic}".\n`
+      + 'Sau đó liệt kê 4-6 thành phần chính dưới dạng gạch đầu dòng theo mẫu "- Tên: một câu ngắn".\n'
+      + 'Không giải bài, không chia bước, không tiêu đề. Không viết gì thêm.';
+  const result = await callWithFailover(
+    activeProviders,
+    {
+      system,
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens: IMAGE_CAPTION_MAX_TOKENS,
+      // Không bật native reasoning: đây là một đoạn mô tả, không phải bài toán cần suy luận.
+      reasoningBudget: 0,
+      deepThinking: false,
+      telemetryStage: 'image_only_caption',
+      requestId,
+      signal
+    },
+    { deadline }
+  );
+  return { text: (result && result.text ? result.text.trim() : ''), provider: result && result.provider };
 }
 
 /**
@@ -750,6 +797,77 @@ router.post('/', async (req, res, next) => {
     // cùng (thứ người dùng thực sự đọc) được stream, các lượt thu thập trước đó báo tiến trình qua
     // sự kiện "status" vì bản thân chúng không hiển thị trực tiếp lên giao diện.
     // ============================================================================================
+    // ============================================================================================
+    // MỤC 1.6 — NHÁNH "CHỈ LẤY HÌNH": trả lời đúng thứ người dùng hỏi, không hơn
+    // ============================================================================================
+    // Đặt TRƯỚC mọi nhánh giải bài (kể cả cross-check) và SAU cache-hit, nên nó không đụng gì tới
+    // các đường hiện có: câu hỏi không phải dạng "tạo cho tôi hình ảnh X" sẽ không bao giờ vào đây.
+    const imageOnly = visualSystem.decisionEngine.detectImageOnlyRequest(problemText);
+    if (imageOnly.imageOnly) {
+      reqLogger.log({ stage: 'image_only_request', topic: imageOnly.topic.length, reason: imageOnly.reason });
+      const imageVisualBase = { ...visualBase, userPreference: 'always', question: imageOnly.topic || problemText };
+
+      if (wantsStream) {
+        sseHeaders(res);
+        req.on('close', () => { try { res.end(); } catch (e) { /* đã đóng — bỏ qua */ } });
+      }
+      try {
+        if (wantsStream) sseWrite(res, 'status', { state: STATES.GENERATING, message: 'Đang chuẩn bị hình minh hoạ…' });
+        const caption = await generateImageCaption({
+          topic: imageOnly.topic || problemText,
+          language: input.settings.lang,
+          activeProviders, deadline: globalDeadline, requestId: reqLogger.requestId, signal
+        });
+        if (disconnected) return;
+        const captionText = caption.text || '';
+        if (wantsStream && captionText) sseWrite(res, 'delta', { text: captionText });
+
+        const payload = {
+          ...subjectPayload,
+          // Yêu cầu tạo hình KHÔNG có khái niệm "lời giải thiếu ý": luôn COMPLETED, nên giao diện
+          // không bao giờ hiện cảnh báo "CHƯA ĐẦY ĐỦ" cho loại yêu cầu này nữa.
+          state: STATES.COMPLETED,
+          partial: false,
+          text: captionText,
+          imageOnly: true,
+          provider: caption.provider ? caption.provider.label : 'unknown',
+          completeness: 'COMPLETE',
+          continuations: 0
+        };
+
+        if (wantsStream) {
+          sseWrite(res, 'done', { ...payload, visualPending: true });
+          const run = await runVisualsFor({
+            ...imageVisualBase, finalAnswer: captionText, answerComplete: true,
+            onEvent: (ev) => { const { type, ...rest } = ev; sseWrite(res, type, rest); }
+          });
+          payload.visuals = run.visuals;
+          payload.visualStatus = run.status;
+          if (!run.visuals || !run.visuals.length) {
+            // Người dùng hỏi ĐÚNG một bức hình mà hệ thống không dựng được — phải nói thẳng, không
+            // để họ nhìn một khoảng trống và tự đoán.
+            sseWrite(res, 'status', {
+              message: 'Chưa tạo được hình cho yêu cầu này. Máy chủ có thể chưa cấu hình nhà cung cấp ảnh.'
+            });
+          }
+          reqLogger.log({ stage: 'image_only_done', ...attemptTelemetry.snapshot(), ...run.telemetry });
+          return res.end();
+        }
+
+        const run = await runVisualsFor({ ...imageVisualBase, finalAnswer: captionText, answerComplete: true });
+        payload.visuals = run.visuals;
+        payload.visualStatus = run.status;
+        reqLogger.log({ stage: 'image_only_done', ...attemptTelemetry.snapshot(), ...run.telemetry });
+        return res.json(payload);
+      } catch (e) {
+        if (e && e.cancelled) return;
+        const norm = normalizeError(e);
+        reqLogger.log({ stage: 'image_only_failed', error: norm.code });
+        if (wantsStream) { sseWrite(res, 'error', { message: norm.userMessage, code: norm.code }); return res.end(); }
+        return res.status(norm.status || 502).json({ error: norm.userMessage, code: norm.code });
+      }
+    }
+
     if (wantsStream) {
       sseHeaders(res);
       req.on('close', () => { try { res.end(); } catch (e) { /* đã đóng — bỏ qua */ } });
