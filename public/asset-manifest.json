@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-13T14:10:44.137Z",
+  "generatedAt": "2026-09-13T22:33:53.442Z",
   "assets": {
     "boot.js": "/js/boot.29aa9029e5.js",
     "storage.js": "/js/storage.1d27028cd0.js",
@@ -11,7 +11,7 @@
     "scene3d.js": "/js/scene3d.9ace739f98.js",
     "voiceInput.js": "/js/voiceInput.66463c87c2.js",
     "geo2d-engine.js": "/js/geo2d-engine.b1cd4669fc.js",
-    "app.js": "/js/app.cb9bcfd99a.js",
+    "app.js": "/js/app.a9af859cef.js",
     "translations.js": "/js/i18n/translations.e11956bf52.js",
     "languageStore.js": "/js/i18n/languageStore.763a541496.js",
     "i18n.js": "/js/i18n/i18n.bcc564c301.js",
