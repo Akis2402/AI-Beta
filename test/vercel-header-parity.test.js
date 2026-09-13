@@ -1,4 +1,7 @@
 'use strict';
+
+const fs = require('fs');
+const path = require('path');
 // ---------- REGRESSION: FINAL AUDIT section N — Vercel vs local Express header parity ----------
 // Phát hiện qua scripts/smoke-test.js chạy trên local server THẬT (không phải suy đoán tĩnh):
 // vercel.json khai báo tường minh X-Frame-Options: DENY cho response Vercel, nhưng khi chạy qua
@@ -51,6 +54,27 @@ async function main() {
     await test('Permissions-Policy có mặt trên local Express (khớp vercel.json)', async () => {
       const res = await get(server, '/api/health');
       assert.ok(!!res.headers['permissions-policy']);
+    });
+
+    // PHẦN E mục 21: hai nơi set Permissions-Policy (Express + Vercel edge). Nếu chúng lệch nhau,
+    // microphone sẽ chạy ở local nhưng CHẾT trên production (hoặc ngược lại) — đúng lớp lỗi mà
+    // người dùng không thể tự chẩn đoán. Test này khoá parity BYTE-FOR-BYTE.
+    await test('Permissions-Policy KHỚP CHÍNH XÁC giữa Express và vercel.json (không được lệch)', async () => {
+      const res = await get(server, '/api/health');
+      const live = String(res.headers['permissions-policy'] || '');
+      const vercel = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'vercel.json'), 'utf8'));
+      const rule = vercel.headers.find((h) => h.source === '/(.*)');
+      const declared = (rule.headers.find((h) => h.key === 'Permissions-Policy') || {}).value || '';
+      assert.strictEqual(live, declared,
+        `lệch header: Express="${live}" vs vercel.json="${declared}"`);
+    });
+
+    await test('Permissions-Policy cho phép microphone=(self) và KHÔNG mở cho origin khác', async () => {
+      const res = await get(server, '/api/health');
+      const policy = String(res.headers['permissions-policy'] || '');
+      assert.ok(/microphone=\(self\)/.test(policy), `Voice Input cần microphone=(self), thực tế "${policy}"`);
+      assert.ok(!/microphone=\*/.test(policy), 'KHÔNG được mở microphone cho mọi origin');
+      assert.ok(/camera=\(\)/.test(policy), 'camera vẫn phải bị chặn tuyệt đối');
     });
 
     await test('Strict-Transport-Security có mặt (Helmet mặc định bật HSTS)', async () => {

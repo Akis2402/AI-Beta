@@ -108,7 +108,11 @@ test('11. index.html có đủ 3 lựa chọn cài đặt hình minh họa', () 
 
 test('12. renderVisuals chặn SVG đáng ngờ ở tầng client (phòng thủ nhiều lớp)', () => {
   const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');
-  const idx = appSrc.indexOf('function renderVisuals(');
+  // Sau đợt nâng cấp (mục 1.4), renderVisuals() được tách thành các hàm con; chốt chặn SVG nằm ở
+  // renderVisualSvg(). Vẫn kiểm tra đúng chốt chặn đó, chỉ đổi nơi tìm.
+  const idx = appSrc.indexOf('function renderVisualSvg(') !== -1
+    ? appSrc.indexOf('function renderVisualSvg(')
+    : appSrc.indexOf('function renderVisuals(');
   const body = appSrc.slice(idx, idx + 2000);
   assert.ok(/<script\|javascript:/.test(body) || body.includes('foreignObject'),
     'client phải kiểm tra lại nội dung SVG trước khi nhúng, không tin tuyệt đối payload mạng');

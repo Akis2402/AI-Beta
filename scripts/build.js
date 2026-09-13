@@ -33,7 +33,6 @@ const indexHtmlPath = path.join(publicDir, 'index.html');
 // (thứ tự thật đọc trực tiếp từ chính index.html, xem PHẦN 8 của yêu cầu audit).
 const CORE_JS = [
   'boot.js',
-  'speed-insights.js', // Vercel Speed Insights integration
   'storage.js',
   'imageStorage.js',
   'config.js',
@@ -41,6 +40,7 @@ const CORE_JS = [
   'subjects.js',
   'solid3d.js',
   'scene3d.js', // PHẦN J-S: engine 3D mới (compact scene JSON + patch)
+  'voiceInput.js', // PHẦN D: nhập bằng giọng nói (Web Speech API, xử lý hoàn toàn trong trình duyệt)
   'geo2d-engine.js',
   'app.js',
 ];
