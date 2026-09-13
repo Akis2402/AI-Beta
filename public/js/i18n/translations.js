@@ -108,6 +108,8 @@ window.TRANSLATIONS = {
     // ---- composer ----
     'input.placeholder': 'Nhập câu hỏi, dán đề bài, dán ảnh (Ctrl+V), kéo-thả ảnh hoặc tải ảnh từ máy…',
     'composer.hint': 'Enter để gửi · Shift+Enter xuống dòng · AI sẽ đưa hướng giải trước, bấm "Xem lời giải chi tiết" khi cần',
+    'chat.visualFallbackBadge': 'sơ đồ thay thế',
+    'chat.visualFallbackHint': 'Chưa tạo được ảnh AI cho phần này nên hệ thống dựng sơ đồ thay thế từ chính nội dung lời giải.',
     // ---- PHẦN D/F: nhập bằng giọng nói ----
     'voice.micTitle': 'Nhập câu hỏi bằng giọng nói',
     'voice.micAria': 'Nhập câu hỏi bằng giọng nói',
@@ -350,6 +352,8 @@ window.TRANSLATIONS = {
 
     'input.placeholder': 'Type a question, paste a problem, paste an image (Ctrl+V), drag & drop or upload an image…',
     'composer.hint': 'Enter to send · Shift+Enter for a new line · The AI gives an approach first — click "View full solution" when you need it',
+    'chat.visualFallbackBadge': 'fallback diagram',
+    'chat.visualFallbackHint': 'AI image generation was unavailable, so this diagram was built from the solution text instead.',
     // ---- Voice input ----
     'voice.micTitle': 'Ask by voice',
     'voice.micAria': 'Ask by voice',

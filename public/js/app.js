@@ -2775,6 +2775,16 @@ function renderVisualCard(v) {
     const head = document.createElement('div');
     head.className = 'visual-card-head';
     head.textContent = v.title;
+    // MỤC 2.7: nhãn nhỏ phân biệt "sơ đồ thay thế" với ảnh AI thành công. Chỉ hiện khi backend xác
+    // nhận LẼ RA phải có ảnh AI nhưng đã phải hạ xuống sơ đồ — không hiện cho hình vốn dĩ luôn là
+    // deterministic (đồ thị, mạch điện), vì ở đó sơ đồ mới là thứ đúng.
+    if (v.fallbackSchematic) {
+      const badge = document.createElement('span');
+      badge.className = 'visual-fallback-badge';
+      badge.textContent = t('chat.visualFallbackBadge');
+      badge.title = t('chat.visualFallbackHint');
+      head.appendChild(badge);
+    }
     fig.appendChild(head);
   }
   fig.appendChild(body);
@@ -2828,14 +2838,18 @@ function renderVisuals(container, visuals, status) {
     container.appendChild(wait);
     return;
   }
-  if (status === 'failed') {
+  // MỤC 2.7: KHÔNG BAO GIỜ hiện "không thể tạo hình" khi thực tế đã có ít nhất 1 visual hợp lệ.
+  // Trạng thái 'failed' chỉ đúng khi mảng visuals thật sự rỗng; nếu pipeline trả 'failed' kèm visual
+  // (vd một nhánh fallback vẫn dựng được) thì thông báo lỗi là SAI và làm người dùng bỏ qua hình đã có.
+  const hasVisual = Array.isArray(visuals) && visuals.length > 0;
+  if (status === 'failed' && !hasVisual) {
     const note = document.createElement('div');
     note.className = 'visual-note';
     note.textContent = t('chat.visualFailed');
     container.appendChild(note);
     return;
   }
-  if (!Array.isArray(visuals) || !visuals.length) return;
+  if (!hasVisual) return;
   visuals.forEach((v) => {
     const card = renderVisualCard(v);
     if (card) container.appendChild(card);
