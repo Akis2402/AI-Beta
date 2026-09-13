@@ -88,13 +88,38 @@ function chooseVisualRenderer(spec, env = {}) {
     };
   }
 
-  // physics/optics: deterministic trước, image generation chỉ là phương án 2.
+  // ==========================================================================================
+  // MỤC 1.1 — physics/optics và các loại "ở giữa": QUYẾT ĐỊNH THEO DỮ KIỆN, KHÔNG THEO TYPE
+  // ==========================================================================================
+  // BUG cũ: nhánh này gán CỨNG accuracyCritical=true + primary='deterministic' cho MỌI type không
+  // nằm trong 2 tập trên, nên "một vật trượt trên mặt phẳng nghiêng" (định tính, không đòi số đo)
+  // vẫn bị đẩy về SVG thô. Nay dùng cờ `spec.needsPreciseGeometry` do visualSpecBuilder tính từ
+  // dữ kiện thật (toạ độ/góc cụ thể/plotExpr/quan hệ hình học).
+  //
+  // Mặc định KHI THIẾU CỜ (spec cũ, caller ngoài pipeline) = true -> giữ nguyên hành vi an toàn cũ.
+  const needsPrecise = (spec && spec.needsPreciseGeometry === false) ? false : true;
+
+  if (!needsPrecise && imageAvailable) {
+    return {
+      renderer: 'generated_image',
+      primary: 'image_generation',
+      fallbacks: ['deterministic', 'concept_card', 'no_visual'],
+      accuracyCritical: false,
+      needsPreciseGeometry: false,
+      fidelity: 'illustrative',
+      reason: 'qualitative_scene_image_preferred'
+    };
+  }
+
   return {
     renderer: 'svg_diagram',
     primary: 'deterministic',
-    fallbacks: imageAvailable ? ['image_generation', 'concept_card', 'no_visual'] : ['concept_card', 'no_visual'],
-    accuracyCritical: true,
-    reason: 'semi_accuracy_critical'
+    // Không có số đo phải vẽ đúng thì hình minh hoạ vẫn là fallback hợp lệ; còn khi CÓ số đo
+    // (needsPrecise=true) thì image model không được đụng vào (hình sai tệ hơn không hình).
+    fallbacks: (imageAvailable && !needsPrecise) ? ['image_generation', 'concept_card', 'no_visual'] : ['concept_card', 'no_visual'],
+    accuracyCritical: needsPrecise,
+    needsPreciseGeometry: needsPrecise,
+    reason: needsPrecise ? 'semi_accuracy_critical' : 'qualitative_no_image_provider'
   };
 }
 

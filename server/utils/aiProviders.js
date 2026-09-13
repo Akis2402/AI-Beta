@@ -1,5 +1,7 @@
 'use strict';
 
+const { recordAttemptFor } = require('./tokenTelemetry');
+
 // ---------- Điều phối AI Rotation: Provider → API Keys → Models → Execution Targets ----------
 // KHÔNG coi "AI = API Key" hay "AI = Model". Mỗi tổ hợp (API Key × Model) là 1 Execution Target độc
 // lập (xem executionTargets.js) — rotation xoay công bằng qua các target đó (xem rotationManager.js:
@@ -39,7 +41,7 @@ const { createSafetyLineFilter } = require('./safetyLeakFilter');
 // cho MỖI lần gọi 1 execution target — không log secret (logger tự redact). `requestId` là optional
 // (args.requestId, do chat.js gán) — nếu không có, field đó vắng mặt trong log, không throw.
 const { log, classifyErrorForLog } = require('./logger');
-function logAttempt({ requestId, stage, target, latency, status, err }) {
+function logAttempt({ requestId, stage, target, latency, status, err, usage, answerBudget, reasoningBudget, providerMaxTokens, finishReason, retry, recovery, estimatedOutputTokens }) {
   log({
     requestId, stage, status,
     provider: target && target.providerKey,
@@ -47,6 +49,18 @@ function logAttempt({ requestId, stage, target, latency, status, err }) {
     targetId: target && target.id,
     latency,
     errorClass: err ? classifyErrorForLog(err) : undefined
+  });
+  // PHẦN B mục 11: telemetry PER ATTEMPT. Không log API key/nội dung — recordAttemptFor() chỉ nhận
+  // số đếm và nhãn. No-op nếu route chưa đăng ký recorder cho requestId này (đường gọi legacy/test).
+  recordAttemptFor(requestId, {
+    stage,
+    provider: target && target.providerKey,
+    model: target && target.modelId,
+    targetId: target && target.id,
+    latencyMs: latency,
+    status: status === 'success' ? 'success' : (status === 'empty' ? 'empty' : 'error'),
+    usage, answerBudget, reasoningBudget, providerMaxTokens, finishReason,
+    retry: !!retry, recovery: !!recovery, estimatedOutputTokens
   });
 }
 
@@ -271,7 +285,7 @@ async function gatherCrossCheckCandidates(providers, { system, variantSystem, me
       const startedAt = Date.now();
       const meta = {};
       return p.call({ system: variantSystem, messages, maxTokens, reasoningBudget, timeoutMs: t, deepThinking, signal, meta })
-        .then((text) => { accumulateUsage(usage, meta.usage); logAttempt({ requestId, stage: 'cross_check_round1', target: p, latency: Date.now() - startedAt, status: 'success' }); return text; })
+        .then((text) => { accumulateUsage(usage, meta.usage); logAttempt({ requestId, stage: 'cross_check_round1', target: p, latency: Date.now() - startedAt, status: 'success', usage: meta.usage, answerBudget: maxTokens, reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, estimatedOutputTokens: estimateTokens(text) }); return text; })
         .catch((err) => { logAttempt({ requestId, stage: 'cross_check_round1', target: p, latency: Date.now() - startedAt, status: 'error', err }); throw err; });
     })
   );
@@ -323,10 +337,10 @@ async function gatherCrossCheckCandidates(providers, { system, variantSystem, me
           const retryMeta = {};
           const text = stripThinkingTags(await replacement.call({ system: variantSystem, messages, maxTokens, reasoningBudget, timeoutMs: t, deepThinking, signal, meta: retryMeta }));
           accumulateUsage(usage, retryMeta.usage);
-          logAttempt({ requestId, stage: 'cross_check_retry', target: replacement, latency: Date.now() - startedAt, status: text ? 'success' : 'empty' });
+          logAttempt({ requestId, stage: 'cross_check_retry', target: replacement, latency: Date.now() - startedAt, status: text ? 'success' : 'empty', usage: retryMeta.usage, answerBudget: maxTokens, reasoningBudget, finishReason: retryMeta.finishReason, retry: true, estimatedOutputTokens: estimateTokens(text || '') });
           if (text) { markSuccess(replacement); return { label: replacement.label, text }; }
         } catch (e) {
-          logAttempt({ requestId, stage: 'cross_check_retry', target: replacement, latency: Date.now() - startedAt, status: 'error', err: e });
+          logAttempt({ requestId, stage: 'cross_check_retry', target: replacement, latency: Date.now() - startedAt, status: 'error', err: e, answerBudget: maxTokens, reasoningBudget, retry: true });
           markFailure(replacement, e);
         }
         throw new Error('Không còn target nào khả dụng để thử lại trong ngân sách thời gian cho phép.');
@@ -413,7 +427,7 @@ async function callWithFailover(providers, args, { preferWebSearch = false, requ
       const meta = {};
       const text = stripThinkingTags(await p.call({ ...args, timeoutMs: callTimeout, meta }));
       const failoverLatency = Date.now() - attemptStartedAt;
-      logAttempt({ requestId: args.requestId, stage: 'failover', target: p, latency: failoverLatency, status: text ? 'success' : 'empty' });
+      logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'failover', target: p, latency: failoverLatency, status: text ? 'success' : 'empty', usage: meta.usage, answerBudget: args.maxTokens, reasoningBudget: args.reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, recovery: !!args.telemetryRecovery, estimatedOutputTokens: estimateTokens(text || '') });
       if (text) {
         markSuccess(p, failoverLatency);
         const realOutNs = meta.usage && Number(meta.usage.outputTokens);
@@ -432,7 +446,7 @@ async function callWithFailover(providers, args, { preferWebSearch = false, requ
       const classification = markFailure(p, err);
       invalidateModelIfNeeded(p, classification);
       lastClassification = classification;
-      logAttempt({ requestId: args.requestId, stage: 'failover', target: p, latency: Date.now() - attemptStartedAt, status: 'error', err });
+      logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'failover', target: p, latency: Date.now() - attemptStartedAt, status: 'error', err, answerBudget: args.maxTokens, reasoningBudget: args.reasoningBudget, recovery: !!args.telemetryRecovery });
       // P0 mục 2: KHÔNG BAO GIỜ lộ err.message thô (có thể chứa chi tiết billing/nội bộ của provider)
       // ra danh sách `tried` (field này đi thẳng vào response client qua errorHandler.js) — luôn dùng
       // sanitizedMessage đã được errorClassifier.js chuẩn hóa, bất kể loại lỗi (không chỉ billing).
@@ -716,7 +730,7 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
       const visibleText = stripThinkingTags(text);
       if (visibleText || committed) {
         const latency = Date.now() - attemptStartedAt;
-        logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency, status: 'success' });
+        logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'stream', target: p, latency, status: 'success', usage: meta.usage, answerBudget: args.maxTokens, reasoningBudget: args.reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, recovery: !!args.telemetryRecovery, estimatedOutputTokens: estimateTokens(visibleText || '') });
         // PHẦN J FIX: TRƯỚC ĐÂY đường streaming gọi `markSuccess(p)` KHÔNG kèm latency, nên toàn bộ
         // telemetry latency/throughput không bao giờ học được gì từ đường code chạy NHIỀU NHẤT
         // (mọi request thật đều là streaming). Nay ghi cả latency (cho isTargetSlow) và throughput
@@ -773,7 +787,7 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
       // mục 4: bị hủy (client disconnect/bấm Dừng) trước khi kịp phát delta nào — dừng ngay, không
       // thử target khác (mọi target khác cũng dùng chung signal, cũng sẽ abort ngay lập tức).
       if (err && err.cancelled) throw err;
-      logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'error', err });
+      logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'error', err, answerBudget: args.maxTokens, reasoningBudget: args.reasoningBudget, recovery: !!args.telemetryRecovery });
       const classification = markFailure(p, err);
       invalidateModelIfNeeded(p, classification);
       lastClassification = classification;

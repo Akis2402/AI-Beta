@@ -46,7 +46,6 @@ const { compactCandidatesForReconcile } = require('../utils/verificationPacket')
 // leak đáp số/tính toán chi tiết.
 const { validateApproachCompactness, buildApproachRepairPrompt, extractApproachSection } = require('../utils/approachValidator');
 const { normalizeError } = require('../utils/errorNormalize');
-const { calculateAdaptiveBudget } = require('../utils/adaptiveBudget');
 const { compressHistoryForBudget } = require('../utils/semanticCompression');
 const { validateSolutionCompleteness, extractCoverageList } = require('../utils/completenessCheck');
 const { computeRecoveryBudget, appendContinuationTurn } = require('../utils/continuation');
@@ -66,10 +65,16 @@ const { createRequestLogger } = require('../utils/logger');
 const { extractFinalAnswer, normalizeAnswerString } = require('../utils/studyTasks');
 const { resolveThinkingMode } = require('../utils/thinkingRouter');
 // PHẦN 2/4: kế hoạch ngân sách TÁCH BẠCH reasoning / answer / recovery / visual.
-const { genericReasoningBudget } = require('../utils/budget/requestBudgetPlanner');
+// A1 (SOURCE OF TRUTH): resolveBudget() là ĐƯỜNG DUY NHẤT tính ngân sách cho 1 lượt gọi provider.
+// chat.js KHÔNG còn gọi calculateAdaptiveBudget() trực tiếp — trước đây nó vừa gọi hàm đó với
+// `deepThinking: input.deepThinking` (hệ số ×1.35 dành cho reasoning nằm TRONG output) vừa cộng thêm
+// genericReasoningBudget() lên trên, tức phần suy luận bị tính HAI LẦN vào cùng một request.
+const { resolveBudget, genericReasoningBudget } = require('../utils/budget/requestBudgetPlanner');
 // PHẦN 12-32: hệ thống hình minh hoạ (quyết định -> spec -> renderer -> validate -> cache).
 const visualSystem = require('../utils/visual');
 const tokenEconomy = require('../utils/tokenEconomy');
+// PHẦN B (mục 10/11/12): telemetry per-attempt + thống kê cấp request (token THẬT vs ƯỚC LƯỢNG).
+const tokenTelemetry = require('../utils/tokenTelemetry');
 const { resolveSubject } = require('../utils/subjects');
 
 // ---------- Mục 5/5A: candidate đã ĐỒNG THUẬN thì reconcile không cần sinh lại full solution ----------
@@ -243,7 +248,7 @@ async function ensureCompleteNonStream(callOnce, initialResult, ctx) {
  * lời bị cắt... không fail chỉ vì reserve cố định đã hết trong khi total request budget vẫn còn").
  *
  * @param {{completeness:object, reserveState:{budget:number, used:number}, recalcBudget:Function,
- *   deadline:object}} opts `recalcBudget()` => target budget hiện tại (gọi lại calculateAdaptiveBudget
+ *   deadline:object}} opts `recalcBudget()` => target budget hiện tại (gọi lại resolveBudget
  *   với remainingMs mới nhất — do caller cung cấp vì nó biết chính xác opts nào cần cho stage đó).
  * @returns {{allow:boolean, amount:number}}
  */
@@ -327,9 +332,9 @@ async function runVisualsFor(opts) {
  * `mode` đến từ resumableStream (INITIAL/CONTINUATION/RESUME): lượt tiếp nối KHÔNG cần suy luận lại
  * từ đầu (ngữ cảnh tối thiểu đã chứa mọi kết quả trung gian) nên dùng phase='recovery'.
  */
-function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode }) {
+function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode, problemClass }) {
   return genericReasoningBudget({
-    answerBudget, complexityLevel, deepThinking: !!deepThinking,
+    answerBudget, complexityLevel, deepThinking: !!deepThinking, problemClass,
     phase: (mode && mode !== 'INITIAL' && mode !== 'initial') ? 'recovery' : 'initial'
   });
 }
@@ -540,7 +545,7 @@ router.post('/', async (req, res, next) => {
 
     // PHẦN E: compression CHỈ tối ưu phía INPUT. Các con số dưới đây đi vào TELEMETRY và KHÔNG BAO
     // GIỜ được dùng để suy ra maxTokens/output budget — budget output vẫn tính hoàn toàn theo độ
-    // phức tạp bài + deadline (budgetOf/calculateAdaptiveBudget), xem PHẦN E trong báo cáo.
+    // phức tạp bài + deadline (budgetOf -> resolveBudget), xem PHẦN E trong báo cáo.
     const estimatedCompressedInput =
       systemPack.compressedTokens
       + Math.ceil(problemText.length / 3.2)
@@ -575,29 +580,67 @@ router.post('/', async (req, res, next) => {
     // coreBudget/reserveBudget (allocateCoreReserve của chính tokenEconomy.js) — lượt gọi ĐẦU TIÊN
     // dùng đúng coreBudget (70%), reserve (30%) CHỈ được cấp phát khi completeness FAIL và theo lô
     // nhỏ (xem shouldUseReserve() ở các vòng continuation bên dưới), không phải totalBudget ngay từ đầu.
+    // problemClass được tokenEconomy.classifyProblem() xác định ở tePlan bên dưới. budgetPlanOf()
+    // CHỈ được GỌI sau khi tePlan đã dựng xong (nhánh cross-check/direct/JSON đều nằm sau), nên đọc
+    // qua biến này là an toàn; nếu vì lý do nào đó chưa có, giá trị null giữ nguyên hành vi cũ.
+    let currentProblemClass = null;
+
+    // ---------- A3: PROVIDER-AWARE ngay từ bước lập kế hoạch (không dùng generic làm nguồn cuối) ----------
+    // Ở thời điểm này rotation/failover CHƯA chọn target, nên "provider-aware" ở tầng route nghĩa là:
+    // đọc capability THẬT của POOL đang khả dụng (executionTargets.js đã merge provider-level +
+    // model-level từ modelDiscovery) để biết cơ chế reasoning nào sẽ được dùng — native hay
+    // prompt-based. Con số cuối cùng vẫn được HIỆU CHỈNH LẠI ở tầng client, nơi đã biết chắc model
+    // (fitReasoningToModel) — nên đây là kế hoạch, không phải quyết định cuối.
+    const poolCaps = (activeProviders || []).map((p) => p && p.capabilities).filter(Boolean);
+    const poolProviderKeys = new Set((activeProviders || []).map((p) => p && p.providerKey).filter(Boolean));
+    // Chỉ khẳng định provider khi TOÀN BỘ pool cùng một hãng; pool hỗn hợp -> để undefined và dùng
+    // chính sách chung (mỗi client vẫn tự gate theo capability của mình).
+    const representativeProvider = poolProviderKeys.size === 1 ? [...poolProviderKeys][0] : undefined;
+    // KHÔNG đưa maxOutputTokens vào đây: trần output khác nhau theo từng model trong pool, kẹp theo
+    // model nhỏ nhất sẽ bóp nghẹt model lớn. Việc kẹp diễn ra ở tầng client, nơi biết ĐÚNG model.
+    const representativeCapabilities = poolCaps.length
+      ? {
+        supportsThinking: poolCaps.some((c) => c.supportsThinking),
+        supportsAdaptiveThinking: poolCaps.some((c) => c.supportsAdaptiveThinking)
+      }
+      : undefined;
+
     const budgetPlanOf = (stage) => {
-      const base = calculateAdaptiveBudget({
+      // ---------- SOURCE OF TRUTH DUY NHẤT: resolveBudget() ----------
+      // Nó tự quyết định có nhân hệ số ×1.35 hay không dựa trên CƠ CHẾ reasoning thật của provider:
+      //   - native reasoning (Anthropic/OpenAI/Gemini)  -> answer budget KHÔNG nhân, reasoning cấp riêng
+      //   - prompt-based (provider không có native)     -> vẫn nhân ×1.35 vì khối suy luận nằm TRONG output
+      // Nhờ vậy cùng một phần suy luận không bao giờ được cộng hai lần nữa.
+      const plan = resolveBudget({
+        // Chưa biết target nào sẽ thắng rotation ở thời điểm này -> không truyền provider/model;
+        // mỗi client sẽ HIỆU CHỈNH LẠI theo capability thật của model nó đang gọi (xem
+        // anthropicClient/geminiClient/openaiClient + fitReasoningToModel).
+        provider: representativeProvider,
+        capabilities: representativeCapabilities,
         stage, problemText, historyText, contextsText, approachText: input.approachText,
-        hasImage: !!input.image, deepThinking: input.deepThinking, crossCheck: input.crossCheck,
+        hasImage: !!input.image, deepThinking: !!input.deepThinking, crossCheck: !!input.crossCheck,
+        problemClass: currentProblemClass,
         remainingMs: globalDeadline.remaining(),
         // PHẦN J: throughput ĐO THẬT của các target đang khả dụng thay cho hằng số 60 tok/s — quyết
         // định "trong thời gian còn lại model kịp sinh bao nhiêu token" phải khác nhau giữa 1
         // provider 110 tok/s và 1 provider 30 tok/s, nếu không sẽ hoặc cắt sớm hoặc timeout giữa stream.
         throughputTokensPerSec: throughputStats.getRepresentativeThroughput(activeProviders)
       });
-      const { coreBudget, reserveBudget, totalBudget } = tokenEconomy.allocateCoreReserve(base.target);
-      // ---------- ROOT CAUSE FIX (PHẦN 1/2): reasoning budget TÁCH RIÊNG, KHÔNG ăn vào answer ----------
-      // `coreBudget` từ đây trở đi có ngữ nghĩa DUY NHẤT là NGÂN SÁCH CHO VĂN BẢN HIỂN THỊ.
-      // `reasoningBudget` được CỘNG THÊM ở tầng client (anthropicClient/geminiClient/openaiClient tự
-      // gate theo capability thật của model) — nên bật "Suy nghĩ sâu" KHÔNG còn làm co phần trả lời
-      // xuống 28% ngân sách như trước (xem server/utils/budget/reasoningPolicy.js để biết vì sao con
-      // số 28% đó chính là nguyên nhân của lỗi "chưa đầy đủ sau khi đã thử khôi phục").
-      const reasoningBudget = genericReasoningBudget({
-        answerBudget: coreBudget,
-        complexityLevel: base.complexity.level,
-        deepThinking: !!input.deepThinking
-      });
-      return { ...base, coreBudget, reserveBudget, totalBudget, reasoningBudget, complexityLevel: base.complexity.level };
+      // Ánh xạ sang TÊN TRƯỜNG CŨ để mọi call-site hiện có (sessionInit, resolveRecovery, log...)
+      // không phải đổi. TỔNG ngân sách answer đến từ resolveBudget() (source of truth duy nhất);
+      // việc CHIA tổng đó thành core (lượt đầu) / reserve (dự phòng continuation) vẫn do
+      // tokenEconomy.allocateCoreReserve() đảm nhiệm — giữ đúng 1 nơi định nghĩa tỷ lệ 70/30.
+      const answerTotal = plan.answerBudget + plan.recoveryBudget;
+      const { coreBudget, reserveBudget, totalBudget } = tokenEconomy.allocateCoreReserve(answerTotal);
+      const reasoningBudget = plan.reasoningBudget;
+      return {
+        ...plan,
+        coreBudget, reserveBudget, totalBudget, reasoningBudget,
+        target: totalBudget,
+        min: Math.max(200, Math.round(totalBudget * 0.35)),
+        max: totalBudget,
+        complexityLevel: plan.complexity.level
+      };
     };
     // Giữ tên cũ cho các nơi vẫn cần {min,target,max} thô (vd budget hiển thị debug) — KHÔNG còn
     // dùng .target trực tiếp làm maxTokens của lượt gọi model thật (xem trên).
@@ -615,6 +658,10 @@ router.post('/', async (req, res, next) => {
     // B10/A1.8: usage THẬT cộng dồn cho CẢ request (candidate + reconcile + continuation), gồm
     // cachedTokens/cacheSavedTokens do provider báo về — đo hiệu quả prompt caching (MEASURED).
     const requestUsage = emptyUsageAccumulator();
+    // PHẦN B mục 11/12: recorder được đăng ký theo requestId -> aiProviders.logAttempt() tự ghi TỪNG
+    // lượt gọi provider vào đây (không phải luồn tham số qua mọi chữ ký hàm, tránh lặp lại bug B2).
+    const attemptTelemetry = tokenTelemetry.createRequestTelemetry(reqLogger.requestId);
+    res.on('close', () => tokenTelemetry.releaseRequestTelemetry(reqLogger.requestId));
     const sourceIdsFp = effectiveContexts.map((c) => `${c.doc}#${c.id}#${c.citeNo}`).sort().join(',');
     const tePlan = tokenEconomy.runTokenEconomyPipeline({
       problemText, historyText, contextsText, approachText: input.approachText,
@@ -642,8 +689,16 @@ router.post('/', async (req, res, next) => {
         ...(input.image ? { imageFp: tokenEconomy.imageFingerprint(input.image.base64, input.image.mediaType) } : {})
       }
     });
+    // A5: từ đây trở đi budgetPlanOf() biết lớp bài -> câu MICRO không còn mua ngân sách native
+    // reasoning (sàn 1024 token) chỉ vì người dùng bật Deep Thinking.
+    // A5.2: dùng `intrinsicClass` (độ khó của CHÍNH đề bài), KHÔNG dùng `problemClass` — nhãn đầy đủ
+    // đã cộng +1 điểm cho chính cờ deepThinking, nên nếu lấy nó thì bật "Suy nghĩ sâu" khiến KHÔNG
+    // câu nào còn là MICRO và cổng tiết kiệm token không bao giờ kích hoạt. Đề ngắn nhưng khó
+    // (chứng minh, tích phân, giới hạn…) đã được nâng tối thiểu lên SHORT ở classifyProblem().
+    currentProblemClass = tePlan.classification.intrinsicClass;
     reqLogger.log({
       stage: 'token_economy_classify', problemClass: tePlan.classification.problemClass,
+      intrinsicClass: tePlan.classification.intrinsicClass,
       modelTier: tePlan.modelTier, cacheHit: tePlan.cacheHit, coreBudget: tePlan.budget.coreBudget,
       reserveBudget: tePlan.budget.reserveBudget
     });
@@ -675,6 +730,7 @@ router.post('/', async (req, res, next) => {
     };
 
     // ---------- Cache hit: trả thẳng response đã tính trước, KHÔNG gọi lại AI (mục 21.18) ----------
+    attemptTelemetry.recordCache(!!(tePlan.cacheHit && tePlan.cachedValue));
     if (tePlan.cacheHit && tePlan.cachedValue) {
       reqLogger.log({ stage: 'token_economy_cache_hit' });
       if (wantsStream) {
@@ -792,9 +848,12 @@ router.post('/', async (req, res, next) => {
             },
             buildArgs: ({ messages: msgs, maxTokens, mode }) => ({
               system: reconcileSystem, messages: msgs, maxTokens,
+              telemetryStage: mode && mode !== 'INITIAL' ? 'reconcile_recovery' : 'reconcile',
+              telemetryRecovery: !!(mode && mode !== 'INITIAL'),
               reasoningBudget: reasoningFor({
                 deepThinking: input.deepThinking, answerBudget: maxTokens,
-                complexityLevel: budgetOf(reconcileStage).complexityLevel, mode
+                complexityLevel: budgetOf(reconcileStage).complexityLevel,
+                problemClass: currentProblemClass, mode
               }),
               webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS,
               requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal
@@ -876,7 +935,7 @@ router.post('/', async (req, res, next) => {
           teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
           teTelemetry.record('outputTokens', full.length / 3.2);
           teTelemetry.record('continuationTokens', reconcileRun.session.continuationTokens);
-          reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...compressionTelemetry, ...visualRun.telemetry });
+          reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot(), ...compressionTelemetry, ...visualRun.telemetry });
           return res.end();
         }
 
@@ -910,9 +969,12 @@ router.post('/', async (req, res, next) => {
           },
           buildArgs: ({ messages: msgs, maxTokens, mode }) => ({
             system, messages: msgs, maxTokens, fast: useFastModel,
+            telemetryStage: mode && mode !== 'INITIAL' ? `${directStageName}_recovery` : directStageName,
+            telemetryRecovery: !!(mode && mode !== 'INITIAL'),
             reasoningBudget: reasoningFor({
               deepThinking: input.deepThinking, answerBudget: maxTokens,
-              complexityLevel: directBudget.complexityLevel, mode
+              complexityLevel: directBudget.complexityLevel,
+              problemClass: currentProblemClass, mode
             }),
             deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal
           }),
@@ -989,7 +1051,7 @@ router.post('/', async (req, res, next) => {
         teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
         teTelemetry.record('outputTokens', full.length / 3.2);
         teTelemetry.record('continuationTokens', directRun.session.continuationTokens);
-        reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...compressionTelemetry, ...directVisualRun.telemetry });
+        reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot(), ...compressionTelemetry, ...directVisualRun.telemetry });
         return res.end();
       } catch (streamErr) {
         // Header SSE đã gửi (200 text/event-stream) — không thể chuyển sang next(err) để trả JSON
@@ -1068,7 +1130,7 @@ router.post('/', async (req, res, next) => {
 
       const initial = await callWithFailover(
         activeProviders,
-        { system: reconcileSystem, messages, maxTokens: budgetOf(reconcileStage).coreBudget, reasoningBudget: budgetOf(reconcileStage).reasoningBudget, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
+        { system: reconcileSystem, messages, maxTokens: budgetOf(reconcileStage).coreBudget, reasoningBudget: budgetOf(reconcileStage).reasoningBudget, telemetryStage: 'reconcile', webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
         { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image } // mục 4/6
       );
 
@@ -1082,7 +1144,7 @@ router.post('/', async (req, res, next) => {
       const { text: finalText, completeness, continuations, provider: reconciler, partial: reconcilePartial } = await ensureCompleteNonStream(
         (msgs, _currentCompleteness, grantedMaxTokens) => callWithFailover(
           activeProviders,
-          { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: budgetOf(reconcileStage).complexityLevel, mode: 'CONTINUATION' }), webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
+          { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'reconcile_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: budgetOf(reconcileStage).complexityLevel, problemClass: currentProblemClass, mode: 'CONTINUATION' }), webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
           { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image }
         ),
         initial,
@@ -1125,7 +1187,7 @@ router.post('/', async (req, res, next) => {
       if (!tePlan.cacheBypassed && !reconcilePartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
       if (!reconcilePartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, finalText.length / 3.2);
       teTelemetry.record('outputTokens', finalText.length / 3.2);
-      reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot() });
+      reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });
       return res.json(jsonDonePayload);
     }
 
@@ -1146,7 +1208,7 @@ router.post('/', async (req, res, next) => {
     const useFastModel = callMode.fast && tokenEconomy.tierUsesFastModel(tePlan.modelTier);
     const initialDirect = await directCaller(
       activeProviders,
-      { system, messages, maxTokens: directBudget.coreBudget, reasoningBudget: directBudget.reasoningBudget, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
+      { system, messages, maxTokens: directBudget.coreBudget, reasoningBudget: directBudget.reasoningBudget, telemetryStage: 'direct', fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
       { deadline: globalDeadline, requireVision: !!input.image } // mục 4/6
     );
 
@@ -1160,7 +1222,7 @@ router.post('/', async (req, res, next) => {
     let { text, completeness, continuations, provider, partial: directJsonPartial } = await ensureCompleteNonStream(
       (msgs, _currentCompleteness, grantedMaxTokens) => directCaller(
         activeProviders,
-        { system, messages: msgs, maxTokens: grantedMaxTokens, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: directBudget.complexityLevel, mode: 'CONTINUATION' }), fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
+        { system, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'direct_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass, mode: 'CONTINUATION' }), fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
         { deadline: globalDeadline, requireVision: !!input.image }
       ),
       initialDirect,
@@ -1194,7 +1256,7 @@ router.post('/', async (req, res, next) => {
     if (!directJsonPartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', text.length / 3.2);
     teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
     teTelemetry.record('outputTokens', text.length / 3.2);
-    reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot() });
+    reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });
     res.json(finalJsonPayload);
   } catch (err) {
     // mục 4: lỗi (bao gồm err.cancelled từ abortLink.js khi bị hủy) xảy ra SAU KHI client đã ngắt

@@ -3,7 +3,7 @@
 const { iterateSSELines } = require('./sseParse');
 const { createLinkedAbort, makeCancelledError } = require('./abortLink');
 const { nativeThinkingBudget } = require('./thinkingRouter');
-const { maxReasoningForModel } = require('./budget/reasoningPolicy');
+const { maxReasoningForModel, fitReasoningToModel } = require('./budget/reasoningPolicy');
 const { normalizeFinishReason } = require('./finishReason');
 // A1: system có thể là string (nhánh cũ) hoặc PromptParts (nhánh mới, có cache breakpoint).
 const { toAnthropicSystemBlocks, systemToString } = require('./systemPromptParts');
@@ -28,7 +28,12 @@ function applyAnthropicThinking(body, { maxTokens, reasoningBudget, deepThinking
   const capsKnown = capabilities && typeof capabilities === 'object';
   const nativeCapable = capsKnown ? !!(capabilities.supportsThinking || capabilities.supportsAdaptiveThinking) : true;
   const explicit = Number.isFinite(reasoningBudget) && reasoningBudget > 0;
-  const useNativeThinking = !!deepThinking && !fast && nativeCapable && (explicit || maxTokens >= 1500);
+  // A5: caller truyền TƯỜNG MINH reasoningBudget = 0 nghĩa là "KHÔNG dùng native reasoning cho lượt
+  // này" (lớp bài MICRO, hoặc model quá nhỏ — xem fitReasoningToModel). Trước đây con số 0 không
+  // phân biệt được với `undefined` nên vẫn rơi vào nhánh legacy nativeThinkingBudget(maxTokens) và
+  // câu "12 * 8 = ?" vẫn bị cấp >=1024 thinking token. `undefined` vẫn giữ hành vi legacy.
+  const explicitZero = reasoningBudget === 0 || (Number.isFinite(reasoningBudget) && reasoningBudget <= 0);
+  const useNativeThinking = !!deepThinking && !fast && nativeCapable && !explicitZero && (explicit || maxTokens >= 1500);
   if (!useNativeThinking) {
     if (typeof temperature === 'number') body.temperature = temperature;
     return body;
@@ -37,16 +42,33 @@ function applyAnthropicThinking(body, { maxTokens, reasoningBudget, deepThinking
   // thắng rotation (genericReasoningBudget), nên điểm gate đúng nhất là ĐÂY — nơi đã biết chắc model.
   // capabilities.maxOutputTokens vắng mặt -> không kẹp (giữ hành vi cũ).
   const modelCap = maxReasoningForModel(capsKnown ? capabilities : null);
-  const budget = Math.min(
+  const wanted = Math.min(
     modelCap,
     Math.max(1024, explicit ? Math.round(reasoningBudget) : nativeThinkingBudget(maxTokens))
   );
+  // A4 (bất biến E): answer + reasoning KHÔNG BAO GIỜ vượt maxOutputTokens THẬT của model. Khi model
+  // không đủ chỗ cho cả hai, fitReasoningToModel() trả nativeEnabled=false -> bỏ hẳn native thinking
+  // và để cơ chế prompt-based trong system prompt lo phần suy luận (KHÔNG suy luận nông hơn).
+  const fitted = fitReasoningToModel({
+    reasoningBudget: wanted,
+    answerBudget: explicit ? Math.round(maxTokens) : Math.max(200, Math.round(maxTokens) - wanted),
+    capabilities: capsKnown ? capabilities : null,
+    minReasoningTokens: 1024,
+    countsAgainstOutput: true
+  });
+  if (!fitted.nativeEnabled) {
+    if (typeof temperature === 'number') body.temperature = temperature;
+    return body;
+  }
   if (explicit) {
     // answerBudget được BẢO TOÀN nguyên vẹn: max_tokens = answer + reasoning.
-    body.max_tokens = Math.round(maxTokens) + budget;
-    body.thinking = { type: 'enabled', budget_tokens: budget };
+    body.max_tokens = fitted.providerMaxTokens;
+    body.thinking = { type: 'enabled', budget_tokens: fitted.reasoningBudget };
   } else {
-    body.thinking = { type: 'enabled', budget_tokens: Math.min(budget, Math.max(1024, maxTokens - 200)) };
+    body.thinking = {
+      type: 'enabled',
+      budget_tokens: Math.min(fitted.reasoningBudget, Math.max(1024, Math.round(maxTokens) - 200))
+    };
   }
   // Khi thinking bật, Anthropic KHÔNG cho truyền temperature/top_p/top_k tùy chỉnh -> bỏ qua.
   return body;

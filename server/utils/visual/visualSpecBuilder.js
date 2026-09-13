@@ -19,6 +19,59 @@ const MAX_LABELS = 12;
 const MAX_OBJECTS = 14;
 const MAX_EQUATIONS = 4;
 
+// ============================================================================================
+// VISUAL_PROMPT_VERSION — phiên bản của PROMPT ẢNH (khác PROMPT_VERSION của prompt text).
+// ============================================================================================
+// Bump MỖI KHI buildImagePrompt()/STYLE_PROFILES đổi nội dung. visualPipeline nhét giá trị này vào
+// cache key, nên bản ảnh sinh bởi prompt cũ (vd bản còn nhét số liệu vào prompt — lỗi mục 1.2)
+// KHÔNG BAO GIỜ được trả lại sau khi prompt đã sửa.
+//   v1: prompt gốc (có nhét số liệu + công thức — SAI).
+//   v2: bỏ hẳn số liệu/công thức khỏi prompt ảnh, thêm style theo môn, cắt theo hạn mức provider.
+const VISUAL_PROMPT_VERSION = 'visual-prompt-v2';
+
+// ============================================================================================
+// PHẦN 6 — STYLE THEO MÔN (không còn 1 chuỗi 'educational_scientific' dùng chung cho mọi môn)
+// ============================================================================================
+// Mỗi cụm cố ý viết NGẮN (1 câu): prompt ảnh có hạn mức ký tự cứng theo provider (2000 Gemini /
+// 4000 OpenAI), style dài chỉ ăn chỗ của phần mô tả cảnh — thứ thực sự quyết định hình.
+const STYLE_PROFILES = {
+  physics: {
+    id: 'physics_scientific',
+    prompt: 'Clean scientific illustration, sơ đồ vật lý học đường, nét mảnh dứt khoát, mũi tên lực rõ hướng, nền trắng phẳng, không phối cảnh cầu kỳ.'
+  },
+  biology: {
+    id: 'biology_anatomical',
+    prompt: 'Polished anatomical/biological illustration, màu pastel dịu, lớp mô và bào quan tách bạch, phong cách sách giáo khoa sinh học hiện đại.'
+  },
+  chemistry: {
+    id: 'chemistry_molecular',
+    prompt: 'Molecular 3D rendering, mô hình bóng-que (ball-and-stick), màu nguyên tố theo chuẩn CPK, ánh sáng mềm, nền trắng.'
+  },
+  geography: {
+    id: 'geography_terrain',
+    prompt: 'Clean terrain map illustration, khối địa hình phân tầng màu, đường bờ và ranh giới mảnh, phong cách lược đồ địa lý sách giáo khoa.'
+  },
+  default: {
+    id: 'educational_scientific',
+    prompt: 'Clean educational scientific illustration, bố cục gọn, tương phản cao, nền trắng.'
+  }
+};
+
+/**
+ * styleProfileFor() — chọn cụm phong cách theo MÔN (PHẦN 6).
+ * @param {string} subject
+ * @returns {{id:string, prompt:string}}
+ */
+function styleProfileFor(subject) {
+  const key = String(subject || '').toLowerCase();
+  if (STYLE_PROFILES[key]) return STYLE_PROFILES[key];
+  if (/physic|vật ?l[ýy]/.test(key)) return STYLE_PROFILES.physics;
+  if (/bio|sinh/.test(key)) return STYLE_PROFILES.biology;
+  if (/chem|h[oó]a/.test(key)) return STYLE_PROFILES.chemistry;
+  if (/geo|địa/.test(key)) return STYLE_PROFILES.geography;
+  return STYLE_PROFILES.default;
+}
+
 /** Trích các nhãn điểm hình học viết hoa (A, B, C, M, O, A', H...) — giữ đúng thứ tự xuất hiện. */
 function extractPointLabels(text) {
   const out = [];
@@ -202,6 +255,36 @@ function needsRealism(text, subject) {
   return ['biology', 'geography', 'chemistry', 'general'].includes(subject);
 }
 
+// ============================================================================================
+// MỤC 1.1 — needsPreciseGeometry: HÌNH NÀY CÓ PHẢI VẼ ĐÚNG SỐ ĐO KHÔNG?
+// ============================================================================================
+// Trước đây router suy ra từ `type`: mọi physics_diagram/optics_diagram đều bị ép về deterministic
+// SVG, kể cả đề chỉ cần "một vật nằm trên mặt phẳng nghiêng" — hình minh hoạ trực quan tốt hơn hẳn
+// ở những ca đó. Cờ này tính TỪ SPEC (dữ kiện thật), không phải từ loại hình:
+//   true  -> có toạ độ / góc cụ thể / biểu thức đồ thị / quan hệ hình học phải vẽ đúng.
+//   false -> chỉ mô tả tình huống định tính.
+// Sai số của image model chỉ nguy hiểm ở nhánh true; nhánh false thì không có gì để vẽ sai.
+const PRECISE_RELATIONSHIPS = ['perpendicular', 'parallel', 'tangent', 'midpoint', 'series', 'parallel_circuit'];
+const PRECISE_TEXT_RE = /(toạ độ|tọa độ|đúng tỉ lệ|đúng tỷ lệ|theo tỉ lệ|theo tỷ lệ|vẽ đúng|đồ thị|trục [Oo]xy|hệ trục|vector\s*[A-Za-z→]|thang đo)/i;
+const ANGLE_RE = /(góc|angle|θ|α|β|γ|φ)\s*[A-Za-z0-9]{0,4}\s*(=|bằng|là)?\s*\d+(?:[.,]\d+)?\s*°?/i;
+
+/**
+ * computeNeedsPreciseGeometry() — cờ độ chính xác hình học của một spec.
+ * @param {{objects?:Array, relationships?:string[], labels?:string[], data?:object}} spec
+ * @param {string} source question + phần đầu lời giải.
+ * @returns {boolean}
+ */
+function computeNeedsPreciseGeometry(spec, source = '') {
+  const s = String(source || '');
+  if (spec && spec.data && spec.data.plotExpr) return true;
+  if (Array.isArray(spec && spec.objects) && spec.objects.some((o) => o && (o.unit === '°' || /^(x|y|θ|alpha|beta|phi)$/i.test(String(o.symbol))))) return true;
+  if (Array.isArray(spec && spec.relationships) && spec.relationships.some((r) => PRECISE_RELATIONSHIPS.includes(r))) return true;
+  if (/\(\s*-?\d+(?:[.,]\d+)?\s*[;,]\s*-?\d+(?:[.,]\d+)?\s*\)/.test(s)) return true; // cặp toạ độ (x; y)
+  if (ANGLE_RE.test(s)) return true;
+  if (PRECISE_TEXT_RE.test(s)) return true;
+  return false;
+}
+
 function buildVisualSpec({ decision, finalAnswer = '', question = '', subject = 'general', language = 'vi', grade = '' }) {
   const type = (decision && decision.visualType) || 'concept_illustration';
   // Chỉ đọc phần đầu của lời giải: dữ kiện/hình luôn được thiết lập ở đầu, phần sau là tính toán.
@@ -229,7 +312,8 @@ function buildVisualSpec({ decision, finalAnswer = '', question = '', subject = 
   ];
   if (quantities.length) visualConstraints.push('Giữ nguyên đơn vị của mọi đại lượng.');
 
-  return {
+  const styleProfile = styleProfileFor(subject);
+  const spec = {
     type,
     purpose: (decision && decision.visualPurpose) || '',
     title: buildTitle({ type, question, language }),
@@ -238,14 +322,81 @@ function buildVisualSpec({ decision, finalAnswer = '', question = '', subject = 
     relationships,
     requiredEquations,
     visualConstraints,
-    style: 'educational_scientific',
+    // PHẦN 6: style theo môn. `style` (id) đi vào cache key nên đổi môn = key khác, không trả nhầm.
+    style: styleProfile.id,
+    stylePrompt: styleProfile.prompt,
     // Rủi ro #3: đánh dấu tường minh những đề mà sơ đồ SVG không đủ trung thực.
     realismRequired: needsRealism(source, subject),
     language: language === 'English' || language === 'en' ? 'en' : 'vi',
     grade: grade || '',
     subject,
-    data: { steps, plotExpr, parts: extractNamedParts(head), molecule: extractMolecularFormula(source), regions: extractRegions(head) }
+    data: { steps, plotExpr, parts: extractNamedParts(head), molecule: extractMolecularFormula(source), regions: extractRegions(head), points: extractPointCoordinates(source) }
   };
+  // MỤC 1.1: cờ do spec tính, router KHÔNG suy từ `type` nữa.
+  spec.needsPreciseGeometry = computeNeedsPreciseGeometry(spec, source);
+  // MỤC 1.3: dữ liệu ĐÃ XÁC THỰC dành cho overlay phía client. Lấy nguyên từ spec (không trích
+  // lại lần nữa) — số/công thức KHÔNG còn được gửi cho image model (mục 1.2) nên đây là nguồn DUY
+  // NHẤT hiển thị số cho người học, và nó đến thẳng từ lời giải đã verify.
+  spec.verifiedNumbers = quantities.map((o) => ({ symbol: o.symbol, value: o.value, unit: o.unit || '' }));
+  spec.verifiedLabels = spec.labels.slice();
+  spec.verifiedEquations = requiredEquations.slice();
+  return spec;
+}
+
+/**
+ * extractPointCoordinates() — trích các điểm CÓ TOẠ ĐỘ THẬT trong đề/lời giải: "A(2; 3)", "M(-1,5)".
+ * Đây là nguồn DUY NHẤT để overlay neo nhãn theo %; KHÔNG bao giờ đoán vị trí — không có toạ độ
+ * thì overlay lùi về dạng bảng chú thích dưới hình.
+ * @returns {Array<{label:string, x:number, y:number}>}
+ */
+function extractPointCoordinates(text, limit = 8) {
+  const out = [];
+  const seen = new Set();
+  const re = /\b([A-Z][’']?)\s*\(\s*(-?\d+(?:[.,]\d+)?)\s*[;,]\s*(-?\d+(?:[.,]\d+)?)\s*\)/g;
+  let m;
+  while ((m = re.exec(String(text || ''))) && out.length < limit) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({ label: m[1], x: Number(m[2].replace(',', '.')), y: Number(m[3].replace(',', '.')) });
+  }
+  return out;
+}
+
+/**
+ * anchorsFromPoints() — quy toạ độ THẬT về % khung hình (10%..90%, trục y lật vì màn hình chạy
+ * xuống). Không có toạ độ / tất cả điểm trùng nhau -> trả [] (client tự dùng bảng chú thích).
+ * @returns {Array<{label:string, xPct:number, yPct:number}>}
+ */
+function anchorsFromPoints(points) {
+  if (!Array.isArray(points) || points.length < 2) return [];
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = Math.min(...xs); const maxX = Math.max(...xs);
+  const minY = Math.min(...ys); const maxY = Math.max(...ys);
+  if (maxX === minX || maxY === minY) return [];
+  const map = (v, lo, hi) => 10 + ((v - lo) / (hi - lo)) * 80;
+  return points.map((p) => ({
+    label: p.label,
+    xPct: Math.round(map(p.x, minX, maxX) * 10) / 10,
+    yPct: Math.round((100 - map(p.y, minY, maxY)) * 10) / 10
+  }));
+}
+
+/**
+ * buildVisualOverlay() — payload overlay gửi kèm response visual (MỤC 1.3).
+ * Thuần dữ liệu, KHÔNG gọi thêm bất kỳ text/image API nào (mục 2.5).
+ * `anchors` chỉ có khi lời giải CÓ toạ độ thật -> client neo nhãn theo % lên ảnh; không có thì
+ * client hiển thị bảng chú thích dưới caption. Không bao giờ để AI/renderer đoán vị trí pixel.
+ * @returns {{numbers:Array, labels:string[], equations:string[], anchors:Array}|null}
+ */
+function buildVisualOverlay(spec) {
+  if (!spec) return null;
+  const numbers = Array.isArray(spec.verifiedNumbers) ? spec.verifiedNumbers : [];
+  const labels = Array.isArray(spec.verifiedLabels) ? spec.verifiedLabels : [];
+  const equations = Array.isArray(spec.verifiedEquations) ? spec.verifiedEquations : [];
+  const anchors = anchorsFromPoints(spec.data && spec.data.points);
+  if (!numbers.length && !labels.length && !equations.length && !anchors.length) return null;
+  return { numbers, labels, equations, anchors };
 }
 
 function buildTitle({ type, question, language }) {
@@ -275,20 +426,52 @@ function buildTitle({ type, question, language }) {
  * Chỉ serialize những gì hình cần. KHÔNG kèm hội thoại, KHÔNG kèm reasoning, KHÔNG kèm cả lời giải.
  * @returns {string} prompt ngắn (thường < 180 token) cho image model.
  */
-function buildImagePrompt(spec) {
-  const lines = [
+// Câu ràng buộc an toàn — NGẮN và QUAN TRỌNG, không bao giờ bị cắt khi rút gọn prompt (mục 2.1).
+// PHẦN 13: image model không đảm bảo vẽ đúng chữ số/ký tự, nên cấm nó vẽ số và công thức; số liệu
+// đã verify được overlay phía client (mục 1.3).
+const IMAGE_SAFETY_CONSTRAINT = 'Không vẽ chữ số, không viết công thức, không nhãn văn bản dài, '
+  + 'không watermark. Nền trắng, nét sạch.';
+// Ngưỡng mặc định khi không biết provider nào đang chạy — lấy mức CHẶT nhất (Gemini 2000).
+const DEFAULT_PROMPT_CHAR_LIMIT = 2000;
+
+/**
+ * PHẦN 17 — IMAGE PROMPT = DELTA MINIMUM SUFFICIENT CONTEXT.
+ * Chỉ serialize những gì hình cần. KHÔNG kèm hội thoại, KHÔNG kèm reasoning, KHÔNG kèm cả lời giải.
+ *
+ * MỤC 1.2: KHÔNG nhét số liệu (`Đại lượng: v0=20m/s`) và KHÔNG nhét công thức vào prompt nữa —
+ * đó là đường sinh ra hình có số SAI LỆCH với lời giải đã verify. Prompt chỉ mô tả CẢNH VẬT LÝ
+ * THUẦN TRỰC QUAN.
+ * MỤC 2.1: cắt cứng theo hạn mức ký tự của provider đang dùng; cắt phần mô tả cảnh trước, giữ
+ * nguyên câu ràng buộc an toàn.
+ *
+ * @param {object} spec
+ * @param {{maxChars?:number}} [opts]
+ * @returns {string} prompt ngắn cho image model.
+ */
+function buildImagePrompt(spec, opts = {}) {
+  const maxChars = Number(opts.maxChars) > 0 ? Number(opts.maxChars) : DEFAULT_PROMPT_CHAR_LIMIT;
+  const stylePrompt = spec.stylePrompt || styleProfileFor(spec.subject).prompt;
+  const scene = [
     `${spec.title} — ${spec.purpose}`,
-    `Kiểu hình: ${spec.type}. Phong cách: ${spec.style}. Ngôn ngữ nhãn: ${spec.language}.`
+    `Kiểu hình: ${spec.type}. Phong cách: ${stylePrompt}`
   ];
-  if (spec.labels.length) lines.push(`Nhãn: ${spec.labels.join(', ')}.`);
-  if (spec.objects.length) {
-    lines.push('Đại lượng: ' + spec.objects.map((o) => `${o.symbol}=${o.value}${o.unit}`).join('; ') + '.');
+  // Nhãn điểm (A, B, O...) là KÝ TỰ ĐƠN, không phải số liệu — vẫn có ích để hình đặt đúng vị trí
+  // tương đối, nhưng chỉ ở dạng gợi ý bố cục, không bắt model viết chữ.
+  if (spec.labels && spec.labels.length) {
+    scene.push(`Bố cục có các vị trí được quy chiếu: ${spec.labels.slice(0, 6).join(', ')} (không cần viết chữ lên hình).`);
   }
-  if (spec.relationships.length) lines.push(`Quan hệ: ${spec.relationships.join(', ')}.`);
-  if (spec.requiredEquations.length) lines.push(`Công thức phải hiển thị đúng: ${spec.requiredEquations.join(' ; ')}.`);
-  lines.push(spec.visualConstraints.join(' '));
-  lines.push('Nền trắng, nét sạch, không chữ thừa, không watermark.');
-  return lines.join('\n');
+  if (spec.relationships && spec.relationships.length) scene.push(`Quan hệ hình học: ${spec.relationships.join(', ')}.`);
+  // Chỉ giữ các ràng buộc KHÔNG dính số liệu (ràng buộc về đơn vị/số đã vô nghĩa khi prompt không
+  // còn số nào).
+  const visualOnlyConstraints = (spec.visualConstraints || [])
+    .filter((c) => !/số liệu|đơn vị/i.test(c));
+  if (visualOnlyConstraints.length) scene.push(visualOnlyConstraints.join(' '));
+
+  const tail = IMAGE_SAFETY_CONSTRAINT;
+  let body = scene.join('\n');
+  const budgetForBody = maxChars - tail.length - 1;
+  if (budgetForBody > 0 && body.length > budgetForBody) body = body.slice(0, budgetForBody).trimEnd();
+  return `${body}\n${tail}`;
 }
 
 /** Fingerprint ổn định của spec — dùng làm cache key (PHẦN 22). */
@@ -296,7 +479,10 @@ function specFingerprint(spec) {
   const crypto = require('crypto');
   const canonical = JSON.stringify({
     t: spec.type, l: spec.labels, o: spec.objects, r: spec.relationships,
-    e: spec.requiredEquations, s: spec.style, lang: spec.language, d: spec.data
+    e: spec.requiredEquations, s: spec.style, lang: spec.language, d: spec.data,
+    // Cùng một spec nhưng khác cờ chính xác hình học -> đi renderer khác -> KHÔNG được dùng chung
+    // bản cache của nhau.
+    ng: spec.needsPreciseGeometry
   });
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 24);
 }
@@ -304,7 +490,11 @@ function specFingerprint(spec) {
 module.exports = {
   needsRealism,
   REALISM_REQUIRED_RE,
+  VISUAL_PROMPT_VERSION, STYLE_PROFILES, styleProfileFor,
+  computeNeedsPreciseGeometry, buildVisualOverlay,
+  IMAGE_SAFETY_CONSTRAINT, DEFAULT_PROMPT_CHAR_LIMIT,
   buildVisualSpec, buildImagePrompt, specFingerprint,
   extractPointLabels, extractQuantities, extractEquations, extractSteps, extractPlottableFunction,
-  extractNamedParts, extractMolecularFormula, extractRegions
+  extractNamedParts, extractMolecularFormula, extractRegions,
+  extractPointCoordinates, anchorsFromPoints
 };

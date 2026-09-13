@@ -91,6 +91,18 @@ function listImageProviders() {
 }
 
 /**
+ * activePromptCharLimit() — MỤC 2.1: hạn mức ký tự CỨNG của provider sẽ được thử ĐẦU TIÊN.
+ * Lấy mức chặt nhất trong các provider đã cấu hình để prompt luôn hợp lệ kể cả khi failover sang
+ * provider thứ 2 (không dựng lại prompt giữa chừng).
+ * @returns {number} 0 khi chưa cấu hình provider nào.
+ */
+function activePromptCharLimit() {
+  const providers = listImageProviders();
+  if (!providers.length) return 0;
+  return providers.reduce((min, p) => Math.min(min, Number(p.maxPromptTokens) || Infinity), Infinity);
+}
+
+/**
  * generateImage() — sinh 1 ảnh từ prompt ĐÃ ĐƯỢC DỰNG TỪ SPEC (PHẦN 17: prompt tối thiểu).
  * KHÔNG BAO GIỜ throw: mọi lỗi trả về {ok:false, reason} để caller giữ nguyên text answer.
  *
@@ -246,6 +258,6 @@ async function callOpenAIImage({ prompt, timeoutMs, signal, size }) {
 
 module.exports = {
   generateImage, isConfigured, activeProviderName, IMAGE_TIMEOUT_MS,
-  listImageProviders, classifyImageCost, isRetryableReason, IMAGE_COST,
+  listImageProviders, classifyImageCost, isRetryableReason, IMAGE_COST, activePromptCharLimit,
   extractGeminiInline, geminiBlockReason, isLikelyBase64
 };

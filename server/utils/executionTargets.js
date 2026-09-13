@@ -30,6 +30,23 @@ function parseMultiEnv(raw) {
     .filter(Boolean);
 }
 
+// ---------- Ranh giới: nhãn nội bộ KHÔNG BAO GIỜ được đi xuống provider client ----------
+// Danh sách này CHỈ chứa field do hệ thống tự gắn cho mục đích quan sát (telemetry/log). Mọi field
+// có ý nghĩa với API thật (maxTokens, reasoningBudget, capabilities, ...) đều được giữ nguyên vẹn.
+const INTERNAL_ONLY_ARG_KEYS = ['telemetryStage', 'telemetryRecovery'];
+
+function stripInternalFields(args) {
+  if (!args || typeof args !== 'object') return args;
+  let hasAny = false;
+  for (const k of INTERNAL_ONLY_ARG_KEYS) {
+    if (k in args) { hasAny = true; break; }
+  }
+  if (!hasAny) return args; // đường gọi phổ biến: không tạo object mới một cách vô ích
+  const out = { ...args };
+  INTERNAL_ONLY_ARG_KEYS.forEach((k) => { delete out[k]; });
+  return out;
+}
+
 function pickRandomOrUndefined(list) {
   return list.length ? list[Math.floor(Math.random() * list.length)] : undefined;
 }
@@ -131,15 +148,20 @@ function buildTargetsForDef({ baseKey, baseLabel, apiKeyEnv, modelEnv, fastModel
         // provider-level + model-level từ discovery) được forward vào MỌI lượt gọi thật, để từng
         // client tự gate: model không hỗ trợ -> không gửi field API không được hỗ trợ (fallback
         // prompt-based hoặc bỏ qua native thinking một cách có chủ đích).
+        // PHẦN B: `telemetryStage`/`telemetryRecovery` là NHÃN NỘI BỘ do chat.js gắn để aiProviders.js
+        // phân loại lượt gọi khi ghi telemetry. Chúng được LOẠI BỎ ngay tại ranh giới này, TRƯỚC khi
+        // chạm vào bất kỳ client provider nào — client hiện tại đều dựng `body` tường minh nên không
+        // rò rỉ, nhưng một adapter tương lai lỡ spread `args` vào body sẽ gửi field lạ lên API và ăn
+        // lỗi 400. Cắt ở đúng một chỗ an toàn hơn là tin mọi adapter đều cẩn thận.
         call: (args) => call({
-          ...args,
+          ...stripInternalFields(args),
           apiKeyOverride,
           modelOverride: modelName,
           fastModelOverride: pickRandomOrUndefined(fastModels),
           capabilities: mergedCapabilities
         }),
         callStream: (args) => callStream({
-          ...args,
+          ...stripInternalFields(args),
           apiKeyOverride,
           modelOverride: modelName,
           fastModelOverride: pickRandomOrUndefined(fastModels),
@@ -256,4 +278,4 @@ function listAutoDiscoveryDefs() {
     .filter(Boolean);
 }
 
-module.exports = { getAllExecutionTargets, listAutoDiscoveryDefs, parseMultiEnv };
+module.exports = { getAllExecutionTargets, listAutoDiscoveryDefs, parseMultiEnv, stripInternalFields, INTERNAL_ONLY_ARG_KEYS };

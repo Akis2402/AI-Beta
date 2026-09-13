@@ -20,7 +20,9 @@
 // và `providerMaxTokens` = con số THẬT phải gửi cho provider ở lượt gọi này.
 
 const { calculateAdaptiveBudget, HARD_CEILING } = require('../adaptiveBudget');
-const { getReasoningBudgetPolicy, MIN_ANSWER_TOKENS } = require('./reasoningPolicy');
+const {
+  getReasoningBudgetPolicy, fitReasoningToModel, reasoningScaleForClass, MIN_ANSWER_TOKENS
+} = require('./reasoningPolicy');
 
 // Tỷ lệ core/recovery giữ NGUYÊN 70/30 như tokenEconomy.allocateCoreReserve (không đổi hợp đồng cũ).
 const CORE_RATIO = 0.7;
@@ -50,10 +52,12 @@ function resolveBudget(opts = {}) {
     provider, model, capabilities, stage = 'detail', phase = 'initial',
     problemText = '', historyText = '', contextsText = '', approachText = '',
     hasImage = false, deepThinking = false, crossCheck = false, fast = false,
-    remainingMs, throughputTokensPerSec, requiresVisual = false, deficitTokens
+    remainingMs, throughputTokensPerSec, requiresVisual = false, deficitTokens,
+    // A5: nhãn lớp bài (tokenEconomy.classifyProblem). Không truyền -> hành vi cũ y nguyên.
+    problemClass
   } = opts;
 
-  const policy = getReasoningBudgetPolicy(provider, model, capabilities, { deepThinking, fast, stage });
+  const policy = getReasoningBudgetPolicy(provider, model, capabilities, { deepThinking, fast, stage, problemClass });
 
   // ---------- 1. Ngân sách ANSWER theo độ phức tạp (không đụng reasoning) ----------
   // QUAN TRỌNG: truyền deepThinking=false vào calculateAdaptiveBudget. Hệ số ×1.35 cũ ở đó là một
@@ -103,10 +107,19 @@ function resolveBudget(opts = {}) {
 
   const visualBudget = requiresVisual ? VISUAL_BUDGET_TOKENS : 0;
 
-  // ---------- 5. Con số THẬT gửi provider ----------
-  const providerMaxTokens = policy.countsAgainstOutput
-    ? answerBudget + reasoningBudget
-    : answerBudget;
+  // ---------- 5. CHỐT theo trần output THẬT của model, rồi mới ra con số gửi provider ----------
+  // Bất biến E: answerBudget + reasoningBudget KHÔNG BAO GIỜ vượt model.maxOutputTokens. Nếu model
+  // quá nhỏ để chứa cả hai, fitReasoningToModel() tắt native reasoning (fallback prompt-based) thay
+  // vì gửi một budget mà API sẽ từ chối hoặc cắt ngang giữa chừng.
+  const fitted = fitReasoningToModel({
+    reasoningBudget, answerBudget, capabilities,
+    minReasoningTokens: policy.minReasoningTokens,
+    countsAgainstOutput: policy.countsAgainstOutput
+  });
+  reasoningBudget = fitted.reasoningBudget;
+  answerBudget = fitted.answerBudget;
+  const nativeReasoningEnabled = policy.native && fitted.nativeEnabled;
+  if (policy.native && !fitted.nativeEnabled) strategy = 'prompt_thinking_model_capped';
 
   return {
     reasoningBudget,
@@ -114,11 +127,15 @@ function resolveBudget(opts = {}) {
     recoveryBudget,
     visualBudget,
     totalBudget: answerBudget + recoveryBudget + reasoningBudget + visualBudget,
-    providerMaxTokens,
+    providerMaxTokens: fitted.providerMaxTokens,
     strategy,
     complexity: base.complexity,
+    problemClass: problemClass || null,
+    reasoningClassScale: reasoningScaleForClass(problemClass),
     timeBudget: base.timeBudget,
-    reasoningMechanism: policy.mechanism,
+    reasoningMechanism: nativeReasoningEnabled ? policy.mechanism : (policy.native ? 'prompt' : policy.mechanism),
+    nativeReasoningEnabled,
+    modelClamped: fitted.clamped,
     reasoningCountsAgainstOutput: policy.countsAgainstOutput
   };
 }
@@ -128,11 +145,16 @@ function resolveBudget(opts = {}) {
  * (chat.js giữ nguyên budgetPlanOf/coreBudget để không phá hợp đồng cũ, chỉ bổ sung field này).
  * @returns {number} 0 nếu provider/model không có native reasoning.
  */
-function reasoningBudgetFor({ provider, model, capabilities, deepThinking, fast, answerBudget, complexityLevel = 'medium' }) {
-  const policy = getReasoningBudgetPolicy(provider, model, capabilities, { deepThinking, fast });
+function reasoningBudgetFor({ provider, model, capabilities, deepThinking, fast, answerBudget, complexityLevel = 'medium', problemClass }) {
+  const policy = getReasoningBudgetPolicy(provider, model, capabilities, { deepThinking, fast, problemClass });
   if (!policy.native) return 0;
   const want = Math.round((answerBudget || 1000) * policy.ratioFor(complexityLevel));
-  return Math.max(policy.minReasoningTokens, Math.min(want, policy.maxReasoningTokens));
+  const capped = Math.max(policy.minReasoningTokens, Math.min(want, policy.maxReasoningTokens));
+  // Chốt cuối theo trần output THẬT của model (bất biến E) — model quá nhỏ -> 0 (prompt-based).
+  return fitReasoningToModel({
+    reasoningBudget: capped, answerBudget: answerBudget || 1000, capabilities,
+    minReasoningTokens: policy.minReasoningTokens, countsAgainstOutput: policy.countsAgainstOutput
+  }).reasoningBudget;
 }
 
 module.exports = { resolveBudget, reasoningBudgetFor, CORE_RATIO, VISUAL_BUDGET_TOKENS };
@@ -148,10 +170,14 @@ module.exports = { resolveBudget, reasoningBudgetFor, CORE_RATIO, VISUAL_BUDGET_
  * @param {{answerBudget:number, complexityLevel?:string, deepThinking:boolean, phase?:string}} opts
  * @returns {number} 0 khi không bật deep thinking.
  */
-function genericReasoningBudget({ answerBudget, complexityLevel = 'medium', deepThinking, phase = 'initial' }) {
+function genericReasoningBudget({ answerBudget, complexityLevel = 'medium', deepThinking, phase = 'initial', problemClass }) {
   if (!deepThinking) return 0;
   const { REASONING_RATIO, ANTHROPIC_MIN_THINKING, DEFAULT_MAX_REASONING } = require('./reasoningPolicy');
-  const ratio = REASONING_RATIO[complexityLevel] || REASONING_RATIO.medium;
+  // A5: lớp MICRO -> 0 (KHÔNG native reasoning). Call-site cũ không truyền problemClass giữ NGUYÊN
+  // hành vi (scale = 1), nên mọi test/đường gọi legacy không đổi kết quả.
+  const classScale = reasoningScaleForClass(problemClass);
+  if (classScale === 0) return 0;
+  const ratio = (REASONING_RATIO[complexityLevel] || REASONING_RATIO.medium) * classScale;
   let want = Math.round((answerBudget || 1000) * ratio);
   // PHẦN 6: lượt tiếp nối đã có toàn bộ kết quả trung gian trong ngữ cảnh — không phải suy luận lại
   // từ đầu. Đây KHÔNG phải "cắt reasoning để tiết kiệm token".

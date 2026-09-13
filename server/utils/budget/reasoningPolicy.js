@@ -81,6 +81,117 @@ const REASONING_RATIO = {
   very_large: 1.4
 };
 
+// ============================================================================================
+// A5 — REASONING PHẢI TỈ LỆ VỚI KHỐI LƯỢNG SUY LUẬN THẬT, KHÔNG PHẢI VỚI CỜ deepThinking
+// ============================================================================================
+// Vấn đề đã quan sát: "12 * 8 = ?" bật Deep Thinking vẫn được cấp >= ANTHROPIC_MIN_THINKING (1024)
+// token reasoning — bằng với một bài chứng minh hình học. Đây không phải lỗi làm tròn: sàn 1024 là
+// yêu cầu CỨNG của Anthropic khi bật extended thinking, nên cách duy nhất để một câu MICRO không tiêu
+// hàng nghìn reasoning token là KHÔNG bật native reasoning cho nó (scale = 0 -> mechanism 'prompt').
+// Câu MICRO vẫn giữ nguyên khối suy luận prompt-based trong system prompt, tức KHÔNG hề "suy luận
+// nông hơn" — chỉ là không mua một ngân sách reasoning riêng mà bài đó không dùng hết.
+//
+// Các lớp còn lại được nhân theo khối lượng thật; STANDARD giữ hệ số 1.0 (không đổi hành vi cũ).
+const PROBLEM_CLASS_REASONING_SCALE = {
+  MICRO: 0,
+  SHORT: 0.5,
+  STANDARD: 1,
+  COMPLEX: 1.15,
+  VERY_COMPLEX: 1.3
+};
+
+/**
+ * @param {string} [problemClass] Nhãn từ tokenEconomy.classifyProblem(). Không truyền (undefined)
+ *   => 1 (giữ NGUYÊN hành vi của mọi call-site cũ chưa biết problemClass).
+ * @returns {number}
+ */
+function reasoningScaleForClass(problemClass) {
+  if (!problemClass) return 1;
+  const scale = PROBLEM_CLASS_REASONING_SCALE[String(problemClass).toUpperCase()];
+  return Number.isFinite(scale) ? scale : 1;
+}
+
+/** Sàn TUYỆT ĐỐI cho phần văn bản hiển thị khi model có trần output rất nhỏ. */
+const MIN_VISIBLE_ANSWER_TOKENS = 400;
+
+/**
+ * fitReasoningToModel() — CHỐT CUỐI CÙNG trước khi gửi request đi.
+ *
+ * maxReasoningForModel() ở trên là TRẦN CHÍNH SÁCH (luôn >= ANTHROPIC_MIN_THINKING để không bao giờ
+ * sinh ra một khoảng min>max vô lệ ở tầng planner). Nó KHÔNG đủ để bảo đảm bất biến E của spec:
+ *
+ *     answerBudget + reasoningBudget <= model.maxOutputTokens
+ *
+ * vì answerBudget được tính độc lập với trần model. Hàm này nhận CẢ HAI con số cùng lúc và:
+ *   1. Kẹp tổng vào đúng maxOutputTokens THẬT của model.
+ *   2. Ưu tiên giữ answer >= MIN_VISIBLE_ANSWER_TOKENS (người dùng luôn phải đọc được câu trả lời).
+ *   3. Nếu sau khi kẹp mà phần reasoning còn lại KHÔNG đạt mức tối thiểu hợp lệ của provider
+ *      (vd Anthropic cần >= 1024), TẮT HẲN native reasoning thay vì gửi một budget bị API từ chối.
+ *      Đây không phải "cắt suy luận để tiết kiệm token" — model đó VẬT LÝ không thể vừa suy luận
+ *      vừa trả lời trong trần output của nó, nên cơ chế đúng là prompt-based (vẫn suy luận đầy đủ).
+ *
+ * @param {{reasoningBudget:number, answerBudget:number, capabilities?:object,
+ *   minReasoningTokens?:number, countsAgainstOutput?:boolean}} opts
+ * @returns {{nativeEnabled:boolean, reasoningBudget:number, answerBudget:number,
+ *   providerMaxTokens:number, clamped:boolean}}
+ */
+function fitReasoningToModel({
+  reasoningBudget = 0, answerBudget = 0, capabilities,
+  minReasoningTokens = 0, countsAgainstOutput = true
+} = {}) {
+  let answer = Math.max(1, Math.round(Number(answerBudget) || 0));
+  let reasoning = Math.max(0, Math.round(Number(reasoningBudget) || 0));
+  const minR = Math.max(0, Math.round(Number(minReasoningTokens) || 0));
+  const maxOut = capabilities && Number(capabilities.maxOutputTokens);
+  const known = Number.isFinite(maxOut) && maxOut > 0;
+
+  if (!known) {
+    // Không biết trần model -> KHÔNG kẹp (giữ nguyên hành vi cũ, A2.4).
+    return {
+      nativeEnabled: reasoning > 0,
+      reasoningBudget: reasoning,
+      answerBudget: answer,
+      providerMaxTokens: countsAgainstOutput ? answer + reasoning : answer,
+      clamped: false
+    };
+  }
+
+  const before = `${answer}:${reasoning}`;
+  answer = Math.min(answer, maxOut);
+
+  if (!countsAgainstOutput) {
+    // Provider tách hẳn 2 ngân sách (vd một số OpenAI-compatible) — vẫn không được xin nhiều hơn
+    // trần output của model cho riêng phần reasoning.
+    reasoning = Math.min(reasoning, maxOut);
+    if (reasoning > 0 && minR > 0 && reasoning < minR) reasoning = 0;
+    return {
+      nativeEnabled: reasoning > 0,
+      reasoningBudget: reasoning,
+      answerBudget: answer,
+      providerMaxTokens: answer,
+      clamped: `${answer}:${reasoning}` !== before
+    };
+  }
+
+  if (reasoning > 0 && answer + reasoning > maxOut) {
+    const answerFloor = Math.min(answer, Math.max(MIN_VISIBLE_ANSWER_TOKENS, Math.round(maxOut * 0.25)));
+    reasoning = Math.min(reasoning, Math.max(0, maxOut - answerFloor));
+    answer = Math.min(answer, Math.max(1, maxOut - reasoning));
+  }
+  if (reasoning > 0 && minR > 0 && reasoning < minR) {
+    reasoning = 0; // model không đủ chỗ cho ngân sách reasoning HỢP LỆ -> fallback prompt-based
+    answer = Math.min(answer, maxOut);
+  }
+
+  return {
+    nativeEnabled: reasoning > 0,
+    reasoningBudget: reasoning,
+    answerBudget: answer,
+    providerMaxTokens: Math.min(maxOut, answer + reasoning),
+    clamped: `${answer}:${reasoning}` !== before
+  };
+}
+
 /**
  * getReasoningBudgetPolicy() — trả về CHÍNH SÁCH reasoning cho đúng 1 (provider, model, capability).
  *
@@ -101,9 +212,10 @@ const REASONING_RATIO = {
  * }}
  */
 function getReasoningBudgetPolicy(provider, model, capabilities, context = {}) {
-  const { deepThinking = false, fast = false } = context;
+  const { deepThinking = false, fast = false, problemClass } = context;
   const providerKey = String(provider || '').toLowerCase();
   const modelId = String(model || '').toLowerCase();
+  const classScale = reasoningScaleForClass(problemClass);
 
   const base = {
     mechanism: 'none',
@@ -112,12 +224,17 @@ function getReasoningBudgetPolicy(provider, model, capabilities, context = {}) {
     supportsExplicitBudget: false,
     minReasoningTokens: 0,
     maxReasoningTokens: 0,
-    ratioFor: (level) => REASONING_RATIO[level] || REASONING_RATIO.medium
+    classScale,
+    ratioFor: (level) => (REASONING_RATIO[level] || REASONING_RATIO.medium) * classScale
   };
 
   // deepThinking=false -> KHÔNG có reasoning nào (ưu tiên latency/cost cho chế độ Nhanh).
   // fast=true -> model nhẹ, không bao giờ bật native reasoning.
   if (!deepThinking || fast) return base;
+  // A5: lớp MICRO (vd "12 * 8 = ?") KHÔNG mua ngân sách native reasoning riêng — sàn 1024 của
+  // Anthropic khiến việc bật native cho câu như vậy tốn gấp nhiều lần chính câu trả lời. Suy luận
+  // vẫn diễn ra qua khối prompt-based có sẵn trong system prompt (KHÔNG nông hơn).
+  if (classScale === 0) return { ...base, mechanism: 'prompt' };
 
   const capsKnown = capabilities && typeof capabilities === 'object';
   // A2: trần reasoning của ĐÚNG model này (kẹp theo maxOutputTokens thật nếu discovery biết).
@@ -206,6 +323,10 @@ function thinkingLevelFromBudget(reasoningBudget) {
 module.exports = {
   getReasoningBudgetPolicy,
   maxReasoningForModel,
+  fitReasoningToModel,
+  reasoningScaleForClass,
+  PROBLEM_CLASS_REASONING_SCALE,
+  MIN_VISIBLE_ANSWER_TOKENS,
   MODEL_REASONING_SHARE,
   effortFromBudget,
   thinkingLevelFromBudget,

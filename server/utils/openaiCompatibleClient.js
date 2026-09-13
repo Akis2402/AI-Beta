@@ -117,13 +117,19 @@ function createOpenAICompatibleClient(config) {
     // (declare tường minh tham số reasoning riêng của hãng đó qua thinkingBody, giống cơ chế extraBody
     // sẵn có). Mặc định mọi extra provider hiện tại KHÔNG khai -> deepThinking chỉ còn tác dụng qua
     // prompt-based fallback (buildDeepThinkingBlock), không gửi tham số lạ gây lỗi 400.
-    if (deepThinking && !fast && config.supportsThinking && config.thinkingBody) {
+    // A5: reasoningBudget = 0 TƯỜNG MINH -> không gửi cấu hình reasoning của hãng (lớp bài MICRO /
+    // model quá nhỏ). `undefined` giữ hành vi legacy.
+    const explicitNoReasoning = reasoningBudget === 0 || (Number.isFinite(reasoningBudget) && reasoningBudget <= 0);
+    if (deepThinking && !fast && !explicitNoReasoning && config.supportsThinking && config.thinkingBody) {
       Object.assign(body, config.thinkingBody);
       // PHẦN 2/4: provider OpenAI-compatible thường tách max_tokens (completion) khỏi reasoning, nên
       // KHÔNG cộng mù. Chỉ cộng khi provider TỰ khai reasoningCountsAgainstOutput:true trong
       // extraProviders.js — không đoán capability thay hãng (PHẦN 29: không gửi tham số không hỗ trợ).
       if (config.reasoningCountsAgainstOutput && Number.isFinite(reasoningBudget) && reasoningBudget > 0) {
-        body.max_tokens = Math.round(maxTokens) + Math.round(reasoningBudget);
+        // A4 (bất biến E): kẹp theo trần output THẬT của model khi provider khai maxOutputTokens.
+        const ceiling = Number(config.maxOutputTokens);
+        const wanted = Math.round(maxTokens) + Math.round(reasoningBudget);
+        body.max_tokens = Number.isFinite(ceiling) && ceiling > 0 ? Math.min(ceiling, wanted) : wanted;
       }
     } else if (typeof temperature === 'number') {
       body.temperature = temperature;
@@ -202,13 +208,19 @@ function createOpenAICompatibleClient(config) {
       stream: true,
       ...(extraBody || {}) // vd Groq: {reasoning_format:'hidden'} — xem extraProviders.js
     };
-    if (deepThinking && !fast && config.supportsThinking && config.thinkingBody) {
+    // A5: reasoningBudget = 0 TƯỜNG MINH -> không gửi cấu hình reasoning của hãng (lớp bài MICRO /
+    // model quá nhỏ). `undefined` giữ hành vi legacy.
+    const explicitNoReasoning = reasoningBudget === 0 || (Number.isFinite(reasoningBudget) && reasoningBudget <= 0);
+    if (deepThinking && !fast && !explicitNoReasoning && config.supportsThinking && config.thinkingBody) {
       Object.assign(body, config.thinkingBody);
       // PHẦN 2/4: provider OpenAI-compatible thường tách max_tokens (completion) khỏi reasoning, nên
       // KHÔNG cộng mù. Chỉ cộng khi provider TỰ khai reasoningCountsAgainstOutput:true trong
       // extraProviders.js — không đoán capability thay hãng (PHẦN 29: không gửi tham số không hỗ trợ).
       if (config.reasoningCountsAgainstOutput && Number.isFinite(reasoningBudget) && reasoningBudget > 0) {
-        body.max_tokens = Math.round(maxTokens) + Math.round(reasoningBudget);
+        // A4 (bất biến E): kẹp theo trần output THẬT của model khi provider khai maxOutputTokens.
+        const ceiling = Number(config.maxOutputTokens);
+        const wanted = Math.round(maxTokens) + Math.round(reasoningBudget);
+        body.max_tokens = Number.isFinite(ceiling) && ceiling > 0 ? Math.min(ceiling, wanted) : wanted;
       }
     } else if (typeof temperature === 'number') {
       body.temperature = temperature;

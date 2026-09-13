@@ -22,6 +22,7 @@ const deterministic = require('./deterministicRenderer');
 const validator = require('./visualValidator');
 const cache = require('./visualCache');
 const imageClient = require('./imageGenerationClient');
+const hqStore = require('./visualHqStore');
 
 // PHẦN 30: ngân sách thời gian RIÊNG cho toàn bộ hệ thống hình. Text answer luôn ưu tiên.
 const VISUAL_DEADLINE_MS = Number(process.env.VISUAL_DEADLINE_MS) || 12000;
@@ -182,13 +183,18 @@ async function runVisualPipeline(args) {
     const imageProviderAvailable = imageClient.isConfigured();
     const route = router.chooseVisualRenderer(spec, { imageProviderAvailable });
     telemetry.visualRenderer = route.renderer;
+    // MỤC 1.1: quan sát được vì sao một bài physics/optics đi ảnh hay đi SVG.
+    telemetry.visualNeedsPreciseGeometry = !!spec.needsPreciseGeometry;
+    telemetry.visualRouteReason = route.reason;
     telemetry.visualRealismRequired = !!route.realismRequired;
     telemetry.visualFidelity = route.fidelity || 'schematic';
     telemetry.visualUpgradeHint = route.upgradeHint || null;
 
     // ---------- PHẦN 22: cache ----------
     const keyParts = {
-      promptVersion: cacheKeyExtra.promptVersion || '',
+      // MỤC 1.2: phiên bản prompt ẢNH nằm trong key -> ảnh sinh bởi prompt cũ (còn nhét số liệu)
+      // KHÔNG BAO GIỜ được trả lại sau khi buildImagePrompt() đã sửa.
+      promptVersion: `${cacheKeyExtra.promptVersion || ''}|${specBuilder.VISUAL_PROMPT_VERSION}`,
       specFingerprint: specBuilder.specFingerprint(spec),
       answerStructureHash: cache.answerStructureHash(finalAnswer),
       subject, language: spec.language, renderer: route.renderer,
@@ -216,6 +222,7 @@ async function runVisualPipeline(args) {
     const visualDeadlineAt = Date.now() + Math.min(VISUAL_DEADLINE_MS, Number.isFinite(remaining) ? remaining - 500 : VISUAL_DEADLINE_MS);
     let produced = null;
     let lastValidation = null;
+    let lastImagePrompt = null;
 
     for (const attempt of attempts) {
       if (signal && signal.aborted) { telemetry.visualError = 'aborted'; break; }
@@ -243,13 +250,19 @@ async function runVisualPipeline(args) {
           telemetry.visualError = 'cost_gate_low_benefit';
           continue;
         }
-        const prompt = specBuilder.buildImagePrompt(spec);
+        // MỤC 2.1: cắt prompt theo hạn mức ký tự CỨNG của provider trước khi gửi đi.
+        const maxChars = imageClient.activePromptCharLimit() || specBuilder.DEFAULT_PROMPT_CHAR_LIMIT;
+        const prompt = specBuilder.buildImagePrompt(spec, { maxChars });
         telemetry.visualPromptTokens = Math.ceil(prompt.length / 3.2);
         const img = await imageClient.generateImage({
           prompt, signal, timeoutMs: Math.max(2000, visualDeadlineAt - Date.now()),
           deadlineAt: visualDeadlineAt // A4: failover sang provider 2 chỉ khi còn đủ thời gian
         });
         telemetry.visualProvidersTried = img.providersTried || [];
+        // MỤC 2.2: nhớ prompt + necessity của đúng hình này để nút "Tải PNG chất lượng cao" (nếu
+        // người dùng bấm tường minh) dựng lại ở 2048 mà VẪN đi qua cost-gate. Không lưu câu hỏi/
+        // lời giải/số liệu.
+        if (img.ok) lastImagePrompt = { prompt, necessity: decision.imageNecessity || 'NONE', subject };
         if (img.costClass) telemetry.visualCostClass = img.costClass;
         if (img.ok) out = { format: img.format, url: img.url, renderer: 'generated_image', model: img.model };
         else telemetry.visualError = img.reason;
@@ -286,6 +299,7 @@ async function runVisualPipeline(args) {
     const visual = {
       visualId: nextVisualId(),
       type: spec.type,
+      subject: spec.subject || subject || 'visual',
       renderer: produced.renderer,
       format: produced.format,
       content: produced.content,
@@ -298,16 +312,24 @@ async function runVisualPipeline(args) {
       necessity: decision.imageNecessity || 'NONE',
       overrodeNever: !!decision.overrodeNever,
       placement: decision.placement,
+      // MỤC 1.3: số liệu/nhãn/công thức ĐÃ XÁC THỰC đi kèm response để client vẽ đè lên ảnh AI.
+      // Ảnh AI không còn chứa số (mục 1.2) nên đây là lưới an toàn: người học chỉ nhìn thấy số
+      // đến từ lời giải đã verify. KHÔNG tốn thêm lệnh gọi AI nào (mục 2.5).
+      overlay: produced.renderer === 'generated_image' ? specBuilder.buildVisualOverlay(spec) : null,
       fromCache: false
     };
     if (schematicOnly) telemetry.visualFidelity = 'schematic_only';
+    if (lastImagePrompt && produced.renderer === 'generated_image') {
+      hqStore.remember(visual.visualId, lastImagePrompt);
+    }
 
     // PHẦN 22: chỉ cache khi VALIDATED + COMPLETED.
     await cache.setAsync(keyParts, {
-      type: visual.type, renderer: visual.renderer, format: visual.format,
+      type: visual.type, subject: visual.subject, renderer: visual.renderer, format: visual.format,
       content: visual.content, url: visual.url, title: visual.title,
       caption: visual.caption, placement: visual.placement,
-      fidelity: visual.fidelity, necessity: visual.necessity, overrodeNever: visual.overrodeNever
+      fidelity: visual.fidelity, necessity: visual.necessity, overrodeNever: visual.overrodeNever,
+      overlay: visual.overlay
     }, { validated: true, answerComplete });
 
     telemetry.visualGenerated = true;

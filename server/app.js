@@ -12,6 +12,7 @@ const chatRoutes = require('./routes/chat');
 const generateRoutes = require('./routes/generate');
 const recommendRoutes = require('./routes/recommend');
 const studyRoutes = require('./routes/study');
+const visualRoutes = require('./routes/visual');
 
 const app = express();
 
@@ -48,6 +49,10 @@ app.use('/api/recommend', recommendLimiter, recommendRoutes);
 // Mục 3A/3C: /api/study/* KHÔNG chạy qua chatLimiter (giới hạn dành cho pipeline giải bài nặng hơn
 // nhiều) — dùng chung generateLimiter (giới hạn cho các tác vụ nhỏ/JSON ngắn) cho hợp lý mức chi phí.
 app.use('/api/study', generateLimiter, studyRoutes);
+// MỤC 1.4: proxy tải hộ ảnh do image provider trả về (CSP/CORS chặn client fetch thẳng). Whitelist
+// domain CỨNG trong routes/visual.js — dùng generateLimiter vì đây là tác vụ nhẹ, không phải
+// pipeline giải bài.
+app.use('/api/visual', generateLimiter, visualRoutes);
 
 // ---------- Frontend tĩnh ----------
 // Lưu ý: khi deploy trên Vercel, thư mục public/ được Vercel phục vụ trực tiếp

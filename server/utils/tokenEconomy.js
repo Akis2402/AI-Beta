@@ -8,8 +8,9 @@
 // cross-check policy, patch answer, telemetry. Mọi tiết kiệm token nằm ở APPLICATION LAYER (mục 23),
 // không nhồi vào prompt model.
 
-const { estimateTokens, calculateAdaptiveBudget } = require('./adaptiveBudget');
+const { estimateTokens } = require('./adaptiveBudget');
 const crypto = require('crypto');
+const { CacheAdapter } = require('./cache/cacheAdapter');
 
 // PHẦN 20 FIX: image fingerprint AN TOÀN THẬT (SHA-256, không phải rolling-hash 32-bit của
 // fingerprint() bên dưới — hàm đó dành cho text ngắn, KHÔNG đủ an toàn để phân biệt nội dung ảnh vì
@@ -23,41 +24,72 @@ function imageFingerprint(base64, mediaType) {
 // ================= 21.1 ADAPTIVE TOKEN BUDGET — PHÂN LỚP BÀI =================
 const PROBLEM_CLASS = { MICRO: 'MICRO', SHORT: 'SHORT', STANDARD: 'STANDARD', COMPLEX: 'COMPLEX', VERY_COMPLEX: 'VERY_COMPLEX' };
 
+// ---------- A5.2: "ngắn" KHÔNG đồng nghĩa với "dễ" ----------
+// Một đề chỉ 22 ký tự như "Chứng minh căn 2 là số vô tỉ" hay "Tính tích phân x^2 e^x dx" rơi vào
+// MICRO nếu chỉ đếm ký tự — và nếu MICRO tắt native reasoning thì đúng những bài CẦN suy luận nhất
+// lại bị cắt ngân sách suy luận. Đó sẽ là vi phạm trực tiếp "TOKEN EFFICIENCY không được đánh đổi
+// bằng việc cắt reasoning". Các dấu hiệu dưới đây NÂNG bậc tối thiểu của đề ngắn lên SHORT.
+const HARD_SHORT_HINT_RE = /chứng minh|\bcmr\b|\bc\/m\b|\bprove\b|tích phân|nguyên hàm|đạo hàm|giới hạn|\blim\b|\\int|∫|∑|tổ hợp|xác suất|quy nạp|bất đẳng thức|\bbđt\b|cực trị|min\s*=|max\s*=|quỹ tích|biện luận|tham số\s*m|khảo sát|ma trận|định thức|vô tỉ|số nguyên tố|đồng dư|phương trình hàm|tiệm cận|nghiệm nguyên|chia hết|ước chung|bội chung/i;
+
 /**
  * classifyProblem() gắn nhãn 5 lớp theo mục 21.1, dựng trên estimateProblemComplexity() đã có
  * (adaptiveBudget) rồi cộng thêm tín hiệu source/drawing/deepThinking/crossCheck mà hàm gốc chưa xét.
- * @returns {{problemClass:string, score:number, signals:object}}
+ *
+ * Trả về HAI nhãn, cố ý khác nhau:
+ *   - `problemClass`   : nhãn ĐẦY ĐỦ (gồm cả cờ deepThinking/crossCheck người dùng bật). Dùng cho
+ *                        model routing + cache key — GIỮ NGUYÊN ngữ nghĩa cũ, không đổi hành vi.
+ *   - `intrinsicClass` : độ khó NỘI TẠI của chính đề bài, KHÔNG tính cờ người dùng bật. Đây mới là
+ *                        nhãn đúng để quyết định ngân sách reasoning: "12 * 8 = ?" không trở thành
+ *                        một bài khó chỉ vì người dùng bấm nút "Suy nghĩ sâu".
+ *                        (Nếu dùng `problemClass` cho việc này thì deepThinking=true luôn +1 điểm
+ *                        -> KHÔNG BAO GIỜ còn lớp MICRO, và cổng tiết kiệm token sẽ chết lâm sàng.)
+ * @returns {{problemClass:string, intrinsicClass:string, score:number, intrinsicScore:number, signals:object}}
  */
 function classifyProblem({
   problemText = '', hasImage = false, hasDrawing = false, sourceCount = 0,
   sourceComplexity = 0, deepThinking = false, crossCheck = false, subQuestionCount = 0
 } = {}) {
   const charLength = problemText.length;
-  let score = 0;
+  const hardShortHint = HARD_SHORT_HINT_RE.test(problemText);
 
-  if (charLength <= 60 && subQuestionCount <= 1) score += 0; // MICRO baseline
-  else if (charLength <= 200 && subQuestionCount <= 2) score += 1;
-  else if (charLength <= 500 && subQuestionCount <= 3) score += 2;
-  else if (charLength <= 1200 && subQuestionCount <= 5) score += 3;
-  else score += 4;
+  // ---- Phần điểm đến từ CHÍNH ĐỀ BÀI (độ khó nội tại) ----
+  let intrinsicScore = 0;
+  if (charLength <= 60 && subQuestionCount <= 1) intrinsicScore += 0; // MICRO baseline
+  else if (charLength <= 200 && subQuestionCount <= 2) intrinsicScore += 1;
+  else if (charLength <= 500 && subQuestionCount <= 3) intrinsicScore += 2;
+  else if (charLength <= 1200 && subQuestionCount <= 5) intrinsicScore += 3;
+  else intrinsicScore += 4;
 
-  if (hasImage) score += 1;
-  if (hasDrawing) score += 1;
-  if (sourceCount > 0) score += 1;
-  if (sourceCount >= 3) score += 1;
-  if (sourceComplexity > 0.6) score += 1;
+  // Đề NGẮN nhưng mang dấu hiệu toán khó -> tối thiểu SHORT, không bao giờ là MICRO.
+  if (hardShortHint) intrinsicScore = Math.max(intrinsicScore, 1);
+
+  if (hasImage) intrinsicScore += 1;
+  if (hasDrawing) intrinsicScore += 1;
+  if (sourceCount > 0) intrinsicScore += 1;
+  if (sourceCount >= 3) intrinsicScore += 1;
+  if (sourceComplexity > 0.6) intrinsicScore += 1;
+  if (subQuestionCount >= 4) intrinsicScore += 1;
+
+  // ---- Nhãn ĐẦY ĐỦ: cộng thêm cờ người dùng bật (giữ NGUYÊN công thức cũ) ----
+  let score = intrinsicScore;
   if (deepThinking) score += 1;
   if (crossCheck) score += 1;
-  if (subQuestionCount >= 4) score += 1;
 
-  let problemClass;
-  if (score <= 0) problemClass = PROBLEM_CLASS.MICRO;
-  else if (score <= 2) problemClass = PROBLEM_CLASS.SHORT;
-  else if (score <= 4) problemClass = PROBLEM_CLASS.STANDARD;
-  else if (score <= 6) problemClass = PROBLEM_CLASS.COMPLEX;
-  else problemClass = PROBLEM_CLASS.VERY_COMPLEX;
+  const labelOf = (n) => {
+    if (n <= 0) return PROBLEM_CLASS.MICRO;
+    if (n <= 2) return PROBLEM_CLASS.SHORT;
+    if (n <= 4) return PROBLEM_CLASS.STANDARD;
+    if (n <= 6) return PROBLEM_CLASS.COMPLEX;
+    return PROBLEM_CLASS.VERY_COMPLEX;
+  };
 
-  return { problemClass, score, signals: { charLength, hasImage, hasDrawing, sourceCount, sourceComplexity, deepThinking, crossCheck, subQuestionCount } };
+  return {
+    problemClass: labelOf(score),
+    intrinsicClass: labelOf(intrinsicScore),
+    score,
+    intrinsicScore,
+    signals: { charLength, hasImage, hasDrawing, sourceCount, sourceComplexity, deepThinking, crossCheck, subQuestionCount, hardShortHint }
+  };
 }
 
 // ================= 21.2 TOKEN RESERVE + DYNAMIC EXTENSION =================
@@ -415,46 +447,75 @@ const LEVELS = ['L1', 'L2', 'L3', 'L4', 'L5', 'L6'];
 const DEFAULT_TTL_MS = { L1: 10 * 60 * 1000, L2: 15 * 60 * 1000, L3: 30 * 60 * 1000, L4: 20 * 60 * 1000, L5: 15 * 60 * 1000, L6: 10 * 60 * 1000 };
 const MAX_ENTRIES_PER_LEVEL = 500;
 
+// PHẦN C mục 13: lưu trữ được TÁCH khỏi chính sách cache. Mỗi level có 1 CacheAdapter riêng
+// (L1 RAM bắt buộc + L2 bền vững TÙY CHỌN). API get/set/clear/stats GIỮ NGUYÊN chữ ký cũ nên mọi
+// call-site (chat.js, test) không phải đổi một dòng nào.
 class TokenEconomyCache {
-  constructor() {
-    this.store = new Map(LEVELS.map((l) => [l, new Map()]));
+  constructor(opts = {}) {
+    this.adapters = new Map(LEVELS.map((l) => [l, new CacheAdapter({
+      maxEntries: opts.maxEntries || MAX_ENTRIES_PER_LEVEL,
+      defaultTtlMs: DEFAULT_TTL_MS[l] || 10 * 60 * 1000
+    })]));
   }
 
   _keyOf(parts) {
-    // Cache key bao gồm mọi thứ ẢNH HƯỞNG output — không chỉ nội dung câu hỏi.
+    // Cache key bao gồm mọi thứ ẢNH HƯỞNG output — không chỉ nội dung câu hỏi. Mỗi phần được ghi
+    // dưới dạng `tên=giá_trị_đã_chuẩn_hoá` rồi nối bằng '|' sau khi SẮP XẾP theo tên, nên thứ tự
+    // field của caller không tạo ra 2 key khác nhau cho cùng một ngữ cảnh.
     return Object.keys(parts).sort().map((k) => `${k}=${normalizeForFingerprint(String(parts[k]))}`).join('|');
   }
 
   get(level, keyParts) {
-    const map = this.store.get(level);
-    if (!map) return null;
-    const key = this._keyOf(keyParts);
-    const entry = map.get(key);
-    if (!entry) return null;
-    if (Date.now() > entry.expiresAt) { map.delete(key); return null; }
-    return entry.value;
+    const adapter = this.adapters.get(level);
+    if (!adapter) return null;
+    return adapter.get(this._keyOf(keyParts));
   }
 
   set(level, keyParts, value, ttlMs) {
-    const map = this.store.get(level);
-    if (!map) return;
-    if (map.size >= MAX_ENTRIES_PER_LEVEL) {
-      // Evict entry cũ nhất — Map giữ thứ tự insert nên key đầu tiên là cũ nhất.
-      const firstKey = map.keys().next().value;
-      if (firstKey !== undefined) map.delete(firstKey);
-    }
-    const key = this._keyOf(keyParts);
-    map.set(key, { value, expiresAt: Date.now() + (ttlMs || DEFAULT_TTL_MS[level] || 10 * 60 * 1000) });
+    const adapter = this.adapters.get(level);
+    if (!adapter) return;
+    adapter.set(this._keyOf(keyParts), value, ttlMs);
+  }
+
+  /** Đường bất đồng bộ — dùng khi muốn tận dụng L2 bền vững (best-effort, không bao giờ throw). */
+  async getAsync(level, keyParts) {
+    const adapter = this.adapters.get(level);
+    if (!adapter) return null;
+    return adapter.getAsync(this._keyOf(keyParts));
+  }
+
+  async setAsync(level, keyParts, value, ttlMs) {
+    const adapter = this.adapters.get(level);
+    if (!adapter) return;
+    await adapter.setAsync(this._keyOf(keyParts), value, ttlMs);
+  }
+
+  /**
+   * Cắm một tầng L2 bền vững (KV/Redis/…) cho MỘT level hoặc tất cả. Dự án hiện KHÔNG cấu hình L2
+   * nào — không thêm phụ thuộc nặng chỉ vì cache; đây là điểm cắm sẵn sàng khi hạ tầng có.
+   * @param {object|null} adapter {get,set,delete?} trả Promise
+   * @param {string} [level] bỏ trống = áp cho mọi level
+   */
+  setL2(adapter, level) {
+    if (level) { this.adapters.get(level)?.setL2(adapter); return; }
+    LEVELS.forEach((l) => this.adapters.get(l).setL2(adapter));
   }
 
   clear(level) {
-    if (level) this.store.get(level)?.clear();
-    else LEVELS.forEach((l) => this.store.get(l).clear());
+    if (level) this.adapters.get(level)?.clear();
+    else LEVELS.forEach((l) => this.adapters.get(l).clear());
   }
 
   stats() {
     const out = {};
-    LEVELS.forEach((l) => { out[l] = this.store.get(l).size; });
+    LEVELS.forEach((l) => { out[l] = this.adapters.get(l).stats().size; });
+    return out;
+  }
+
+  /** Thống kê chi tiết từng tầng (hit/miss L1, trạng thái L2) — dùng cho telemetry/chẩn đoán. */
+  detailedStats() {
+    const out = {};
+    LEVELS.forEach((l) => { out[l] = this.adapters.get(l).stats(); });
     return out;
   }
 }
@@ -706,7 +767,29 @@ function runTokenEconomyPipeline(input) {
 
   // ALLOCATE CORE + RESERVE BUDGET — dựa trên adaptiveBudget hiện có, rồi thử override theo lịch sử
   // (mục 21.31) trong giới hạn guardrail.
-  const baseBudget = calculateAdaptiveBudget({ stage, problemText, historyText, contextsText, approachText, hasImage, deepThinking, crossCheck, remainingMs });
+  // ---------- A1: MỘT nguồn sự thật duy nhất cho ngân sách ----------
+  // TRƯỚC ĐÂY hàm này gọi calculateAdaptiveBudget() ĐỘC LẬP với chat.js -> hai hệ budget song song,
+  // hai con số khác nhau cho cùng một request. NAY nó đi qua resolveBudget() giống hệt route.
+  // `capabilities: {}` nghĩa là "biết nhưng model không khai native reasoning" -> cơ chế prompt-based,
+  // tức GIỮ NGUYÊN hệ số ×1.35 mà bản cũ vẫn dùng ở đây (không đổi con số telemetry/routing hiện có).
+  // Đây là ước lượng provider-agnostic phục vụ phân lớp/telemetry; con số ĐIỀU KHIỂN request thật
+  // luôn là resolveBudget() được gọi từ route với capability của pool.
+  const { resolveBudget } = require('./budget/requestBudgetPlanner');
+  const plan = resolveBudget({
+    capabilities: {}, stage, problemText, historyText, contextsText, approachText,
+    hasImage, deepThinking, crossCheck, remainingMs,
+    problemClass: classification.intrinsicClass
+  });
+  const baseBudget = {
+    min: Math.max(200, Math.round((plan.answerBudget + plan.recoveryBudget) * 0.35)),
+    target: plan.answerBudget + plan.recoveryBudget,
+    max: plan.answerBudget + plan.recoveryBudget,
+    complexity: plan.complexity,
+    timeBudget: plan.timeBudget,
+    reasoningBudget: plan.reasoningBudget,
+    providerMaxTokens: plan.providerMaxTokens,
+    strategy: plan.strategy
+  };
   const historicalOverride = suggestBudgetOverride(classification.problemClass, stage, baseBudget.target);
   const effectiveTarget = historicalOverride != null ? Math.min(baseBudget.max, Math.max(baseBudget.min, historicalOverride)) : baseBudget.target;
   const { coreBudget, reserveBudget, totalBudget } = allocateCoreReserve(effectiveTarget);

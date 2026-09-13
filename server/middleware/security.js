@@ -93,7 +93,12 @@ const helmetConfig = helmet({
 // middleware nhỏ để local dev (`npm start`) cũng có header này giống production trên Vercel
 // (vercel.json đã khai báo cho static/CDN edge, đây là lớp dự phòng khi chạy qua Express).
 function permissionsPolicyHeader(req, res, next) {
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()');
+  // PHẦN E mục 21: `microphone=()` chặn microphone HOÀN TOÀN, kể cả cho chính trang này — nút Voice
+  // Input sẽ luôn nhận NotAllowedError dù người dùng đã bấm "Cho phép" trong trình duyệt.
+  // `microphone=(self)` chỉ mở cho CHÍNH origin này (không mở cho iframe/bên thứ ba nào khác), và
+  // trình duyệt VẪN hỏi xin quyền như thường — đây là mức hẹp nhất đủ để tính năng chạy.
+  // Camera/geolocation/payment/usb giữ nguyên trạng thái chặn tuyệt đối.
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(self), geolocation=(), payment=(), usb=(), interest-cohort=()');
   next();
 }
 

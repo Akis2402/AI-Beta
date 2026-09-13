@@ -4,7 +4,7 @@
 // TRƯỚC phần ĐỘNG. systemToString() ghép theo đúng thứ tự đó.
 const { systemToString } = require('./systemPromptParts');
 
-const { effortFromBudget } = require('./budget/reasoningPolicy');
+const { effortFromBudget, fitReasoningToModel } = require('./budget/reasoningPolicy');
 
 const { iterateSSELines } = require('./sseParse');
 const { createLinkedAbort, makeCancelledError } = require('./abortLink');
@@ -39,9 +39,30 @@ function applyOpenAIReasoning(body, { maxTokens, reasoningBudget, deepThinking, 
     if (typeof temperature === 'number') body.temperature = temperature;
     return body;
   }
+  // A5: reasoningBudget = 0 TƯỜNG MINH -> KHÔNG gửi tham số reasoning (lớp bài MICRO / model quá
+  // nhỏ). `undefined` giữ hành vi legacy (effort 'high').
+  if (reasoningBudget === 0 || (Number.isFinite(reasoningBudget) && reasoningBudget <= 0)) {
+    if (typeof temperature === 'number') body.temperature = temperature;
+    return body;
+  }
   const explicit = Number.isFinite(reasoningBudget) && reasoningBudget > 0;
-  body.reasoning = { effort: explicit ? (effortFromBudget(reasoningBudget) || 'high') : 'high' };
-  if (explicit) body.max_output_tokens = Math.round(maxTokens) + Math.round(reasoningBudget);
+  if (explicit) {
+    // A4 (bất biến E): reasoning token của Responses API tính vào max_output_tokens -> answer +
+    // reasoning phải nằm trọn trong trần output THẬT của model.
+    const fitted = fitReasoningToModel({
+      reasoningBudget: Math.round(reasoningBudget), answerBudget: Math.round(maxTokens),
+      capabilities: capsKnown ? capabilities : null,
+      minReasoningTokens: 1024, countsAgainstOutput: true
+    });
+    if (!fitted.nativeEnabled) {
+      if (typeof temperature === 'number') body.temperature = temperature;
+      return body; // model không đủ chỗ cho reasoning hợp lệ -> prompt-based
+    }
+    body.reasoning = { effort: effortFromBudget(fitted.reasoningBudget) || 'high' };
+    body.max_output_tokens = fitted.providerMaxTokens;
+    return body;
+  }
+  body.reasoning = { effort: 'high' };
   return body;
 }
 
