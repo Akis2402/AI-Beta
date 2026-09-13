@@ -83,6 +83,19 @@ const IMAGE_PROVIDER_DEFS = [
     call: (opts) => callGeminiImage(opts)
   },
   {
+    // Provider SONG SONG với 'gemini-image' (REST thuần), gọi qua SDK chính chủ @google/genai
+    // (ai.models.generateContent — KHÔNG phải ai.interactions.create, method đó không tồn tại trong
+    // SDK thật). CỐ Ý không kế thừa GEMINI_API_KEY/GOOGLE_API_KEY: nếu tự động kế thừa, provider này
+    // sẽ TỰ BẬT cùng lúc với gemini-image bằng chung 1 khoá, cả hai cùng gọi 1 backend Gemini và cùng
+    // fail giống hệt nhau khi backend lỗi — tốn 1 lượt failover vô ích mà không tăng độ tin cậy thật.
+    // Vì vậy: chỉ bật khi người vận hành khai báo TƯỜNG MINH GEMINI_SDK_IMAGE_API_KEY (opt-in).
+    name: 'gemini-sdk-image', order: 15,
+    imageKeyEnv: 'GEMINI_SDK_IMAGE_API_KEY', textKeyEnvs: [],
+    modelEnv: 'GEMINI_SDK_IMAGE_MODEL', defaultModel: 'gemini-2.5-flash-image',
+    maxPromptTokens: 2000, costClass: 'IMAGE_COST_LOW', qualityClass: 'standard', latencyClass: 'fast',
+    call: (opts) => callGeminiImageSdk(opts)
+  },
+  {
     name: 'openai-image', order: 20,
     imageKeyEnv: 'OPENAI_IMAGE_API_KEY', textKeyEnvs: ['OPENAI_API_KEY'],
     modelEnv: 'OPENAI_IMAGE_MODEL', defaultModel: 'gpt-image-1',
@@ -406,6 +419,84 @@ async function callGeminiImage({ prompt, timeoutMs, signal, apiKey, model }) {
   }
 }
 
+// ============================================================================================
+// gemini-sdk-image — dùng SDK chính chủ @google/genai thay vì tự dựng request REST.
+// ============================================================================================
+// Snippet gốc người dùng đưa (`ai.interactions.create(...)`, model 'gemini-3.1-flash-image') KHÔNG
+// khớp SDK thật: bản @google/genai hiện hành expose `ai.models.generateContent(...)`, không có
+// namespace `interactions`. Sửa lại đúng method, GIỮ nguyên bất biến của cả file này:
+//   - Luôn xin responseModalities TEXT+IMAGE (lý do xem comment ở callGeminiImage phía trên — model
+//     ảnh của Gemini mặc định thiên về trả TEXT nếu không ép rõ modality).
+//   - KHÔNG BAO GIỜ tin field ảnh theo nhãn mime provider tự khai -> vẫn bắt buộc qua
+//     verifyImageBytes() (chữ ký byte thật), y hệt nhánh REST.
+//   - KHÔNG throw ra ngoài trừ lỗi mạng/abort thật sự (để generateImage() ở trên tự phân loại
+//     provider_error/cancelled và quyết định failover — nhất quán với callGeminiImage).
+//   - SDK không được require() ở TOP-LEVEL: nếu người vận hành không `npm install @google/genai`,
+//     import ở đầu file sẽ làm SẬP toàn bộ server dù họ không hề bật provider này. Lazy-require bên
+//     trong hàm gọi, bọc try/catch -> thiếu package chỉ khiến ĐÚNG provider này fail (retryable),
+//     đúng nguyên tắc "không có provider ảnh KHÔNG PHẢI là lỗi".
+let _genAICtor = null;
+function loadGoogleGenAI() {
+  if (_genAICtor !== null) return _genAICtor;
+  try {
+    // eslint-disable-next-line global-require
+    _genAICtor = require('@google/genai').GoogleGenAI;
+  } catch (e) {
+    _genAICtor = false; // đánh dấu "đã thử, không có" để không require() lại mỗi lần gọi.
+  }
+  return _genAICtor;
+}
+
+async function callGeminiImageSdk({ prompt, timeoutMs, signal, apiKey, model }) {
+  const GoogleGenAI = loadGoogleGenAI();
+  if (!GoogleGenAI) return { ok: false, reason: 'sdk_not_installed' };
+  const linked = createLinkedAbort(timeoutMs, signal);
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    let response;
+    try {
+      // SDK chính chủ không nhận AbortSignal ở mọi bản -> tự canh timeout bằng race thủ công thay vì
+      // dựa vào linked.signal truyền trực tiếp (linked.signal vẫn dùng để phát hiện "đã bị huỷ" bên
+      // dưới khi Promise.race thua).
+      response = await Promise.race([
+        ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: { responseModalities: ['TEXT', 'IMAGE'] }
+        }),
+        new Promise((_, reject) => {
+          if (linked.signal.aborted) return reject(makeCancelledError());
+          linked.signal.addEventListener('abort', () => reject(makeCancelledError()), { once: true });
+        })
+      ]);
+    } catch (e) {
+      if (e && e.cancelled) throw e; // để generateImage() phân loại cancelled/timeout như REST path.
+      // Lỗi API (safety/policy) trả về dạng Error có message/status tuỳ version SDK — nhận diện
+      // bằng nội dung thay vì field cố định để khoan dung nhiều version.
+      const msg = String((e && e.message) || '');
+      if (/safety|blocked|prohibited|recitation/i.test(msg)) return { ok: false, reason: 'content_blocked' };
+      return { ok: false, reason: 'sdk_error' };
+    }
+    const blocked = geminiBlockReason(response);
+    if (blocked) return { ok: false, reason: blocked };
+    const candidates = (response && response.candidates) || [];
+    for (const cand of candidates) {
+      const parts = (cand && cand.content && cand.content.parts) || [];
+      for (const part of parts) {
+        const inline = part && part.inlineData;
+        const b64 = inline && inline.data;
+        if (!b64 || !isLikelyBase64(b64)) continue;
+        const verifiedMime = verifyImageBytes(b64, inline.mimeType || null);
+        if (!verifiedMime) continue; // field tồn tại nhưng không phải ảnh thật -> thử part khác.
+        return { ok: true, format: 'data_url', url: `data:${verifiedMime};base64,${b64}`, model };
+      }
+    }
+    return { ok: false, reason: 'no_image_in_response' };
+  } finally {
+    linked.cleanup();
+  }
+}
+
 /** Chặn trường hợp provider trả chuỗi rác/thông báo lỗi vào đúng field đáng lẽ chứa ảnh. */
 function isLikelyBase64(s) {
   // Độ dài KHÔNG phải tiêu chí phân biệt (fixture test dùng chuỗi rất ngắn, ảnh thật thì rất dài);
@@ -492,5 +583,6 @@ module.exports = {
   listImageProviders, classifyImageCost, isRetryableReason, IMAGE_COST, activePromptCharLimit,
   extractGeminiInline, geminiBlockReason, isLikelyBase64, detectImageSignature, verifyImageBytes,
   // Mục 2.1a: registry mở rộng + phân giải khóa — export để test kiểm chứng trực tiếp.
-  IMAGE_PROVIDER_DEFS, resolveImageKey, callOpenAICompatibleImage, callOpenAIImage, callGeminiImage
+  IMAGE_PROVIDER_DEFS, resolveImageKey, callOpenAICompatibleImage, callOpenAIImage, callGeminiImage,
+  callGeminiImageSdk
 };
