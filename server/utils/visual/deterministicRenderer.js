@@ -330,7 +330,30 @@ function renderConceptCard(spec) {
   if (rows.length < 2) {
     ((spec.data && spec.data.steps) || []).slice(0, 6).forEach((st, i) => rows.push([`Bước ${i + 1}`, st]));
   }
-  if (!rows.length) return null;
+  if (!rows.length) {
+    // ---------- MỤC 2.3: FALLBACK CUỐI CÙNG KHÔNG BAO GIỜ TRẢ null ----------
+    // Concept card được quảng cáo trong chính comment ở trên là "không bao giờ fail", nhưng thực tế
+    // vẫn `return null` khi spec rỗng — và spec RỖNG chính là ca lỗi hay gặp nhất (câu hỏi tổng quan
+    // khái niệm mà phần "Lời giải chi tiết" chỉ có 1-2 câu dẫn nhập, không liệt kê thực thể nào).
+    // Kết quả: pipeline báo status 'failed' và người dùng đọc "Không thể tạo hình minh họa".
+    //
+    // Khi hệ thống ĐÃ quyết định câu trả lời cần hình, luôn tồn tại `spec.title` và `spec.purpose`
+    // (decisionEngine đảm bảo). Dựng một thẻ chỉ gồm đúng hai chuỗi đó là TRUNG THỰC TUYỆT ĐỐI —
+    // không thêm một con số, một cái tên, hay một quan hệ nào mà spec không có.
+    const purpose = String(spec.purpose || spec.visualPurpose || '').trim();
+    const title = String(spec.title || '').trim();
+    if (!purpose && !title) return null; // thật sự không có gì để hiển thị
+    const lines = wrapText(purpose, 64, 4);
+    const minHeight = 96 + Math.max(1, lines.length) * 20;
+    let card = `<rect x="${PAD - 16}" y="46" width="${W - 2 * PAD + 32}" height="${minHeight - 70}" rx="12" stroke-width="1.6" fill="currentColor" fill-opacity="0.04"/>`;
+    lines.forEach((ln, k) => {
+      card += `<text x="${PAD}" y="${86 + k * 20}" stroke="none" fill="currentColor" font-size="13">${esc(ln)}</text>`;
+    });
+    if (!lines.length) {
+      card += `<text x="${PAD}" y="86" stroke="none" fill="currentColor" font-size="13" opacity="0.75">${esc(truncate(title, 64))}</text>`;
+    }
+    return svgShell(card, { title, height: minHeight });
+  }
   const height = 72 + rows.length * 34;
   let inner = `<rect x="${PAD - 16}" y="40" width="${W - 2 * PAD + 32}" height="${height - 62}" rx="10" stroke-width="1.6" fill="currentColor" fill-opacity="0.04"/>`;
   rows.forEach((r, k) => {
@@ -449,7 +472,11 @@ function renderBiologyPositioned(spec, parts) {
  * Mỗi thành phần là một thẻ: số thứ tự + tên đầy đủ + mô tả xuống dòng (không cắt cụt).
  */
 function renderPartsBoard(spec, parts) {
-  const cols = parts.length > 4 ? 2 : 1;
+  // TỐI ƯU ĐIỆN THOẠI: SVG được xuất với `width="100%"` nên nó CO THEO bề ngang màn hình — chữ bên
+  // trong nhỏ đi theo đúng tỉ lệ. Một lưới 2 cột trên khung 720px trở thành 2 cột ~150px thật trên
+  // máy 360px, chữ 11.5px tụt xuống còn ~5.7px: không đọc nổi. Một cột luôn cho bề ngang gấp đôi
+  // cho mỗi thẻ, đổi lại hình cao hơn — và cuộn dọc thì điện thoại vốn đã làm tốt.
+  const cols = 1;
   const rows = Math.ceil(parts.length / cols);
   const cardW = (W - 2 * PAD - (cols - 1) * 18) / cols;
   const cardH = cols === 2 ? 84 : 62;

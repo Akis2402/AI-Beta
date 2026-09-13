@@ -1,5 +1,8 @@
 'use strict';
 
+// Thời gian TỐI THIỂU còn lại để một lệnh gọi ảnh có cơ hội hoàn tất ở mức degrade 'low'.
+const MIN_IMAGE_CALL_MS = Number(process.env.MIN_IMAGE_CALL_MS) || 4000;
+
 // ============================================================================================
 // PHẦN 20/21/24/30/31/32 — VISUAL PIPELINE (KHÔNG BAO GIỜ BLOCK / LÀM HỎNG TEXT ANSWER)
 // ============================================================================================
@@ -110,7 +113,10 @@ async function runVisualPipeline(args) {
   const {
     question = '', finalAnswer = '', answerComplete = false, subject = 'general',
     language = 'vi', grade = '', complexity = 'medium', userPreference = 'auto',
-    candidates = null, deadline, signal, onEvent = () => {}, cacheKeyExtra = {}, judge
+    candidates = null, deadline, signal, onEvent = () => {}, cacheKeyExtra = {}, judge,
+    // ROOT CAUSE B (mục 2.3): nội dung stage 'approach' — CHỈ dùng làm nguồn trích xuất thực thể
+    // cho spec, không bao giờ được coi là câu trả lời.
+    approachText = ''
   } = args || {};
 
   const telemetry = {
@@ -168,7 +174,7 @@ async function runVisualPipeline(args) {
     onEvent({ type: 'visual:pending', visualType: decision.visualType, placement: decision.placement });
 
     // ---------- Dựng SPEC có cấu trúc (PHẦN 16) ----------
-    const spec = specBuilder.buildVisualSpec({ decision, finalAnswer, question, subject, language, grade });
+    const spec = specBuilder.buildVisualSpec({ decision, finalAnswer, question, subject, language, grade, approachText });
     // B9.3 mức MEDIUM: bỏ bớt annotation phụ để prompt/hình gọn hơn — KHÔNG bỏ nhãn/entity chính
     // (chúng là thứ visualValidator kiểm tra, bỏ đi là hình sai).
     if (degrade === 'medium' && Array.isArray(spec.annotations) && spec.annotations.length > 2) {
@@ -214,7 +220,12 @@ async function runVisualPipeline(args) {
       telemetry.visualGenerationLatency = Date.now() - t0;
       const visual = { ...cached, visualId: nextVisualId(), fromCache: true };
       onEvent({ ...visual, type: 'visual:ready' });
-      return { status: 'ready', decision, visuals: [visual], telemetry };
+      // Bản cache đã mang sẵn cờ fallbackSchematic từ lần dựng đầu — đọc lại từ chính nó, không
+      // tính lại (ở đây chưa có `produced` nên không có gì để so).
+      return {
+        status: visual.fallbackSchematic ? 'fallback_schematic' : 'ready',
+        decision, visuals: [visual], telemetry
+      };
     }
 
     // ---------- Sinh hình theo thứ tự: primary -> fallbacks ----------
@@ -238,14 +249,31 @@ async function runVisualPipeline(args) {
       } else if (attempt === 'image_generation') {
         // PHẦN 18: KHÔNG BAO GIỜ dùng image generation cho loại accuracy-critical.
         if (route.accuracyCritical) continue;
-        // B9.3 mức LOW: hết thời gian cho một lượt gọi mạng — chỉ giữ đường deterministic.
-        if (degrade === 'low') { telemetry.visualError = 'degraded_no_image_gen'; continue; }
+        // ---------- MỤC 2.4a: ẢNH AI LÀ LỰA CHỌN ĐƯỢC THỬ ĐẦU TIÊN cho nhóm minh hoạ ----------
+        // BUG CŨ: `if (degrade === 'low') continue;` chặn CỨNG image generation cho MỌI mức
+        // necessity. Một hình BẮT BUỘC (NECESSARY) hoặc được người dùng YÊU CẦU TƯỜNG MINH
+        // (USER_REQUESTED) vẫn bị đá sang SVG chỉ vì ngân sách thời gian đang ở mức thấp — mâu thuẫn
+        // với chính nguyên tắc "yêu cầu tường minh của người dùng ở ưu tiên cao nhất".
+        // NAY: mức `low` chỉ bỏ ảnh cho necessity OPTIONAL/NONE (giữ nguyên hành vi cũ ở đó); với
+        // NECESSARY/USER_REQUESTED vẫn THỬ, nhưng với ngân sách đã co lại (timeout ngắn hơn, ảnh nhỏ
+        // hơn) để phù hợp thời gian còn lại. Mức `emergency` KHÔNG đổi: vẫn bỏ hình hoàn toàn (đã
+        // return sớm ở đầu hàm).
+        const necessityNow = decision.imageNecessity || 'NONE';
+        const highNeed = necessityNow === 'NECESSARY' || necessityNow === 'USER_REQUESTED';
+        if (degrade === 'low' && !highNeed) { telemetry.visualError = 'degraded_no_image_gen'; continue; }
+        // Ở mức `low` vẫn phải còn đủ thời gian cho ÍT NHẤT một lệnh gọi, nếu không thì thử là vô ích.
+        const lowBudgetMs = visualDeadlineAt - Date.now();
+        if (degrade === 'low' && lowBudgetMs < MIN_IMAGE_CALL_MS) {
+          telemetry.visualError = 'degraded_no_time_for_image';
+          continue;
+        }
+        const imageSize = degrade === 'low' ? '512x512' : '1024x1024';
         // B9.15: visual benefit THẤP (OPTIONAL, không phải USER_REQUESTED/NECESSARY) mà chi phí ảnh
         // CAO -> không đốt tiền cho một hình "có cũng được". Yêu cầu tường minh vẫn được ưu tiên,
         // nhưng vẫn chịu deadline/budget guard ở trên (không bypass hoàn toàn).
-        const costClass = imageClient.classifyImageCost({ provider: imageClient.activeProviderName(), size: '1024x1024' });
+        const costClass = imageClient.classifyImageCost({ provider: imageClient.activeProviderName(), size: imageSize });
         telemetry.visualCostClass = costClass;
-        const necessity = decision.imageNecessity || 'NONE';
+        const necessity = necessityNow;
         if (costClass === 'IMAGE_COST_HIGH' && (necessity === 'OPTIONAL' || necessity === 'NONE')) {
           telemetry.visualError = 'cost_gate_low_benefit';
           continue;
@@ -255,7 +283,7 @@ async function runVisualPipeline(args) {
         const prompt = specBuilder.buildImagePrompt(spec, { maxChars });
         telemetry.visualPromptTokens = Math.ceil(prompt.length / 3.2);
         const img = await imageClient.generateImage({
-          prompt, signal, timeoutMs: Math.max(2000, visualDeadlineAt - Date.now()),
+          prompt, signal, size: imageSize, timeoutMs: Math.max(2000, visualDeadlineAt - Date.now()),
           deadlineAt: visualDeadlineAt // A4: failover sang provider 2 chỉ khi còn đủ thời gian
         });
         telemetry.visualProvidersTried = img.providersTried || [];
@@ -296,8 +324,21 @@ async function runVisualPipeline(args) {
       ? ' (conceptual schematic — not a true anatomical/topographic figure)'
       : ' (sơ đồ khái niệm — không phải hình giải phẫu/bản đồ thực tế)';
 
+    // ---------- MỤC 2.7: TRẠNG THÁI `fallback_schematic` ----------
+    // Phân biệt HAI ca hoàn toàn khác nhau mà UI cũ gộp làm một ("có visual = thành công"):
+    //   (a) vốn dĩ LUÔN là deterministic vì accuracy-critical (đồ thị, mạch điện) -> đúng như thiết kế;
+    //   (b) LẼ RA được ảnh AI (route.primary = 'image_generation', provider khả dụng) nhưng đã rơi
+    //       xuống deterministic vì provider lỗi/hết thời gian -> người dùng đang nhìn một BẢN THAY THẾ.
+    // Chỉ ca (b) mới được gắn nhãn fallback; ca (a) im lặng vì không có gì để nói.
+    const imageWasIntended = route.primary === 'image_generation';
+    const isFallbackSchematic = imageWasIntended && produced.renderer !== 'generated_image';
+    telemetry.visualFallbackSchematic = isFallbackSchematic;
+
     const visual = {
       visualId: nextVisualId(),
+      // UI đọc cờ này để hiện nhãn nhỏ "sơ đồ thay thế" thay vì coi như ảnh AI thành công.
+      fallbackSchematic: isFallbackSchematic,
+      fallbackReason: isFallbackSchematic ? (telemetry.visualError || 'image_generation_unavailable') : null,
       type: spec.type,
       subject: spec.subject || subject || 'visual',
       renderer: produced.renderer,
@@ -306,7 +347,7 @@ async function runVisualPipeline(args) {
       url: produced.url,
       title: spec.title,
       caption: (spec.purpose || '') + (schematicOnly ? schematicNote : ''),
-      fidelity: schematicOnly ? 'schematic_only' : (route.fidelity || 'schematic'),
+      fidelity: schematicOnly ? 'schematic_only' : (isFallbackSchematic ? 'fallback_schematic' : (route.fidelity || 'schematic')),
       // B9.9: UI cần phân biệt hình TỰ ĐỘNG sinh với hình do người dùng yêu cầu tường minh (và
       // trường hợp override setting "never" thì phải nói rõ vì sao vẫn có hình).
       necessity: decision.imageNecessity || 'NONE',
@@ -334,7 +375,7 @@ async function runVisualPipeline(args) {
 
     telemetry.visualGenerated = true;
     onEvent({ ...visual, type: 'visual:ready' });
-    return { status: 'ready', decision, visuals: [visual], telemetry };
+    return { status: isFallbackSchematic ? 'fallback_schematic' : 'ready', decision, visuals: [visual], telemetry };
   } catch (e) {
     // Bất biến #1: KHÔNG BAO GIỜ throw ra ngoài.
     telemetry.visualError = 'pipeline_exception:' + (e && e.message);

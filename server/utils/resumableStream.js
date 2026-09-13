@@ -1,5 +1,8 @@
 'use strict';
 
+// MỤC 3: lớp bảo toàn THỨ TỰ câu trả lời sau continuation — xem server/utils/answerOrdering.js.
+const { normalizeFinalAnswerOrder } = require('./answerOrdering');
+
 // ============================================================================================
 // RESUMABLE FAILOVER (PHẦN B / L) — một câu trả lời, nhiều provider, người dùng thấy LIỀN MẠCH
 // ============================================================================================
@@ -179,6 +182,21 @@ async function runResumableStream(cfg) {
 }
 
 function finish(session, evaluate, duplicateCharsRemoved, _unused, completeness) {
+  // ---------- MỤC 3.5/3.8: ANSWER ORDERING INTEGRITY, ĐÚNG MỘT LẦN, Ở ĐÂY ----------
+  // `finish()` là điểm hội tụ DUY NHẤT của cả runResumableStream() lẫn runResumableNonStream(), và
+  // nó chỉ chạy SAU KHI vòng continuation đã dừng hẳn (COMPLETE hoặc hết recovery budget). Đây đúng
+  // là chỗ phải chuẩn hoá thứ tự: sớm hơn thì phá hiệu ứng gõ chữ, muộn hơn (ở chat.js) thì mỗi
+  // nhánh gọi phải tự nhớ gọi — và chỉ cần một nhánh quên là lỗi quay lại.
+  //
+  // normalizeFinalAnswerOrder() HOÀN TOÀN DETERMINISTIC (0 token, 0 lệnh gọi AI) và trả lại nguyên
+  // văn đầu vào khi không nhận ra cấu trúc chắc chắn — nên trường hợp xấu nhất là "không làm gì".
+  const ordering = normalizeFinalAnswerOrder(session.accumulatedText);
+  if (ordering.changed) {
+    // Ghi đè accumulatedText để MỌI thứ đọc từ session (cache, history, visual pipeline, telemetry)
+    // đều thấy CÙNG MỘT final answer duy nhất (mục 3.9) — không có chuyện UI hiện A, cache lưu B.
+    session.accumulatedText = ordering.text;
+  }
+
   const finalCompleteness = completeness || evaluate(session.accumulatedText, {
     finishReason: session.finishReason,
     interrupted: session.interrupted
@@ -190,6 +208,10 @@ function finish(session, evaluate, duplicateCharsRemoved, _unused, completeness)
     session,
     completeness: finalCompleteness,
     text: session.accumulatedText,
+    // Quan sát được: có phải lượt này đã bị sắp xếp lại không, và bao nhiêu khối bị di chuyển.
+    orderNormalized: ordering.changed,
+    orderMoved: ordering.moved,
+    orderDeduped: ordering.deduped,
     provider: session.currentProvider,
     continuations: session.continuationCount,
     resumes: session.resumeCount,

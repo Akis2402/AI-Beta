@@ -268,7 +268,10 @@ function compactPriorText(priorText, opts = {}) {
  */
 function buildResumePrompt({
   priorTail = '', reasons = [], missingCoverage = [], interrupted = false,
-  citationValidation = null, drawingCanonicalErrors = []
+  citationValidation = null, drawingCanonicalErrors = [],
+  // MỤC 3.3: phần trả lời đã có ĐÃ chứa section kết luận hay chưa. Khi CÓ, lượt viết tiếp phải biết
+  // rằng kết luận đó chỉ là TẠM THỜI — nếu không, model sẽ viết Bước còn thiếu rồi kết luận LẦN HAI.
+  hasConclusion = false
 } = {}) {
   const lastChars = String(priorTail).slice(-160).replace(/\s+/g, ' ').trim();
 
@@ -286,7 +289,12 @@ function buildResumePrompt({
     'GIỮ NGUYÊN ký hiệu/ẩn số/tên điểm, mọi kết quả trung gian và số liệu đã có; không tính lại theo cách khác.',
     'GIỮ NGUYÊN cách đánh số đang dùng và tiếp tục đúng số kế tiếp.',
     'Đóng đúng cú pháp mọi khối LaTeX/code/hình vẽ còn mở, không đổi toạ độ/tên điểm đã có.',
-    'Chỉ kết thúc khi đã trình bày đủ mọi yêu cầu của đề. Không thêm nội dung ngoài yêu cầu, không ghi chú về việc bị ngắt.'
+    'Chỉ kết thúc khi đã trình bày đủ mọi yêu cầu của đề. Không thêm nội dung ngoài yêu cầu, không ghi chú về việc bị ngắt.',
+    // Prompt là lớp phòng vệ THỨ NHẤT (giảm tần suất), answerOrdering.js là lớp THỨ HAI (bảo đảm
+    // kết quả). Không dựa vào riêng prompt — model vẫn có thể làm sai, và khi đó code phải tự sửa.
+    hasConclusion
+      ? 'Phần trả lời trên ĐÃ có mục kết luận nhưng đó chỉ là kết luận TẠM THỜI: hãy trình bày nốt các bước/mục còn thiếu, KHÔNG viết thêm một mục kết luận thứ hai.'
+      : ''
   ];
 
   if (missingCoverage.length) {
@@ -313,6 +321,14 @@ function buildResumePrompt({
  * @returns {{messages:Array, priorTokensBefore:number, priorTokensAfter:number, ratio:number,
  *   compacted:boolean}}
  */
+/** Phần trả lời đã có chứa một mục kết luận/đáp số hay chưa (dùng answerOrdering — một nguồn duy nhất). */
+function hasConclusionSection(text) {
+  try {
+    const { splitIntoBlocks } = require('./answerOrdering');
+    return splitIntoBlocks(text).some((b) => b.role === 'conclusion');
+  } catch (e) { return false; }
+}
+
 function buildMinimalContinuationContext({
   messages, priorText, completeness = {}, interrupted = false, tailChars, compact = true
 }) {
@@ -327,7 +343,9 @@ function buildMinimalContinuationContext({
     missingCoverage: completeness.missingCoverage || [],
     interrupted,
     citationValidation: completeness.citationValidation || null,
-    drawingCanonicalErrors: completeness.drawingCanonicalErrors || []
+    drawingCanonicalErrors: completeness.drawingCanonicalErrors || [],
+    // Đọc TRỰC TIẾP từ nội dung đã có thay vì tin vào cờ của caller — chỉ có một nguồn sự thật.
+    hasConclusion: hasConclusionSection(raw)
   });
 
   const before = Math.ceil(raw.length / 3.2);
@@ -421,7 +439,7 @@ function joinContinuation(prior, next) {
 
 module.exports = {
   MAX_CONTINUATIONS, computeRecoveryBudget, buildContinuationPrompt, appendContinuationTurn,
-  buildMinimalContinuationContext, buildResumePrompt, compactPriorText, findSafeCutIndex,
+  buildMinimalContinuationContext, buildResumePrompt, compactPriorText, findSafeCutIndex, hasConclusionSection,
   createSeamDedupe, joinContinuation, isStructuralOrDataLine,
   CONTINUATION_TAIL_CHARS
 };

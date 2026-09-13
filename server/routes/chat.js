@@ -753,6 +753,10 @@ router.post('/', async (req, res, next) => {
     // Ngữ cảnh CỐ ĐỊNH của hệ thống hình cho request này — dựng 1 lần, dùng lại ở cả 4 nhánh.
     const visualBase = {
       question: problemText,
+      // ROOT CAUSE B: ở stage 'detail', `finalAnswer` chỉ là output của lượt gọi thứ hai. Nội dung
+      // Hướng giải (nơi thường liệt kê các thực thể cần vẽ) phải được đưa vào làm NGUỒN TRÍCH XUẤT
+      // cho spec hình — nếu không, spec rỗng và pipeline báo 'failed'.
+      approachText: input.approachText || '',
       subject: input.subjectId,
       language: input.settings.lang,
       grade: input.settings.grade,

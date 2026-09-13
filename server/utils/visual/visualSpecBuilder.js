@@ -285,10 +285,20 @@ function computeNeedsPreciseGeometry(spec, source = '') {
   return false;
 }
 
-function buildVisualSpec({ decision, finalAnswer = '', question = '', subject = 'general', language = 'vi', grade = '' }) {
+function buildVisualSpec({ decision, finalAnswer = '', question = '', subject = 'general', language = 'vi', grade = '', approachText = '' }) {
   const type = (decision && decision.visualType) || 'concept_illustration';
-  // Chỉ đọc phần đầu của lời giải: dữ kiện/hình luôn được thiết lập ở đầu, phần sau là tính toán.
-  const head = String(finalAnswer).slice(0, 3500);
+  // ---------- ROOT CAUSE B: spec builder phải thấy ĐỦ ngữ cảnh, không chỉ stage 'detail' ----------
+  // `finalAnswer` ở stage 'detail' là output của LƯỢT GỌI THỨ HAI. Với câu hỏi tổng quan khái niệm
+  // ("cấu tạo cơ thể người"), danh sách thực thể (Da, Hệ xương, Hệ tuần hoàn…) đã được liệt kê ở
+  // stage 'approach' (Hướng giải), còn phần chi tiết chỉ mở bài bằng 1-2 câu dẫn nhập. Khi đó
+  // extractNamedParts() không tìm thấy gì -> spec.data.parts = [] -> renderBiology() null ->
+  // concept card null -> pipeline 'failed' -> UI hiện "Không thể tạo hình minh họa".
+  //
+  // `approachText` là tham số TUỲ CHỌN (mặc định '') nên mọi call-site/test cũ giữ nguyên hành vi.
+  // Nó CHỈ được dùng làm NGUỒN TRÍCH XUẤT cho spec — không đụng gì tới finalAnswer dùng để hiển
+  // thị/cache, nên không vi phạm nguyên tắc "chỉ có MỘT final answer duy nhất".
+  const approachHead = String(approachText || '').slice(0, 2000);
+  const head = (approachHead ? approachHead + '\n' : '') + String(finalAnswer).slice(0, 3500);
   const source = question + '\n' + head;
 
   const labels = extractPointLabels(source);

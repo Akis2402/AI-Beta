@@ -15,21 +15,107 @@
 
 const { createLinkedAbort, makeCancelledError } = require('../abortLink');
 
-// Khóa RIÊNG cho image generation. Cố ý KHÔNG tái dùng GEMINI_API_KEY/OPENAI_API_KEY mặc định —
-// người vận hành phải bật tường minh (tránh vô tình phát sinh chi phí ảnh).
-const GEMINI_IMAGE_KEY = process.env.GEMINI_IMAGE_API_KEY || '';
-const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image';
-const OPENAI_IMAGE_KEY = process.env.OPENAI_IMAGE_API_KEY || '';
-const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
+// ============================================================================================
+// MỤC 2.1 + 2.1a — REGISTRY PROVIDER ẢNH THEO CAPABILITY, KHÓA KẾ THỪA TỪ PROVIDER TEXT
+// ============================================================================================
+// ROOT CAUSE A (đã xác nhận): bản cũ chỉ đọc GEMINI_IMAGE_API_KEY/OPENAI_IMAGE_API_KEY và CỐ Ý
+// không tái dùng khóa text. Ý định ban đầu ("tránh vô tình phát sinh chi phí ảnh") là hợp lý về
+// mặt chi phí nhưng SAI về mặt sản phẩm: người dùng đã cắm GEMINI_API_KEY cho text, thấy hệ thống
+// nói "cần hình minh họa", rồi nhận đúng một dòng "Không thể tạo hình minh họa" mà KHÔNG có bất kỳ
+// gợi ý nào rằng họ phải khai báo thêm một biến môi trường thứ hai. isConfigured() trả false ->
+// chooseVisualRenderer() không bao giờ chọn 'image_generation' -> cả hệ thống chỉ còn SVG.
+//
+// KIẾN TRÚC MỚI:
+//   - Mỗi provider ảnh là MỘT PHẦN TỬ trong IMAGE_PROVIDER_DEFS (giữ đúng nguyên tắc B9.5: thêm
+//     provider thứ N chỉ cần thêm 1 phần tử, không đẻ nhánh if/else).
+//   - Khóa được phân giải theo thứ tự: <PROVIDER>_IMAGE_API_KEY (override riêng cho ảnh) ->
+//     khóa TEXT của chính provider đó. Không cần khai báo thêm biến nào nếu khóa text đã đủ quyền.
+//   - Thứ tự thử KẾ THỪA thứ tự ưu tiên của provider TEXT, để hành vi rotation của ảnh nhất quán
+//     với text. Có thể override bằng IMAGE_PROVIDER_ORDER.
+//   - CHỈ provider THẬT SỰ có API sinh ảnh công khai mới được đưa vào registry. Anthropic/DeepSeek/
+//     Mistral/Groq hiện KHÔNG có endpoint text-to-image — tuyệt đối không ép chúng vào danh sách chỉ
+//     vì chúng có khóa text, vì như vậy là gọi vào endpoint không tồn tại và tiêu một lượt failover
+//     vô ích.
+//
+// ĐỌC ENV TẠI THỜI ĐIỂM GỌI, không cache vào const lúc require: test và môi trường serverless đều
+// có thể đổi process.env sau khi module đã được nạp (bản cũ cache nên không test được).
+
 const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_GENERATION_TIMEOUT_MS) || 20000;
 
-function isConfigured() {
-  return !!(GEMINI_IMAGE_KEY || OPENAI_IMAGE_KEY);
+/** Khóa text có thể là danh sách nhiều khóa ngăn cách bằng dấu phẩy (xem parseMultiEnv). Lấy khóa đầu. */
+function firstKeyOf(raw) {
+  return String(raw || '').split(',').map((k) => k.trim()).filter(Boolean)[0] || '';
 }
+
+/**
+ * Phân giải khóa cho một provider ảnh.
+ * @returns {{key:string, source:'image_specific'|'text_reuse'|null}}
+ */
+function resolveImageKey(def) {
+  const own = firstKeyOf(process.env[def.imageKeyEnv]);
+  if (own) return { key: own, source: 'image_specific' };
+  for (const env of def.textKeyEnvs || []) {
+    const shared = firstKeyOf(process.env[env]);
+    if (shared) return { key: shared, source: 'text_reuse' };
+  }
+  return { key: '', source: null };
+}
+
+// ---------- REGISTRY ----------
+// `order` = vị trí trong thứ tự ưu tiên provider TEXT của repo (xem server/config/extraProviders.js
+// và server/utils/executionTargets.js): Gemini và OpenAI là provider gốc, Grok/xAI và OpenRouter
+// đến từ EXTRA_PROVIDERS theo đúng thứ tự khai báo ở đó.
+const IMAGE_PROVIDER_DEFS = [
+  {
+    name: 'gemini-image', order: 10,
+    imageKeyEnv: 'GEMINI_IMAGE_API_KEY', textKeyEnvs: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+    modelEnv: 'GEMINI_IMAGE_MODEL', defaultModel: 'gemini-2.5-flash-image',
+    maxPromptTokens: 2000, costClass: 'IMAGE_COST_LOW', qualityClass: 'standard', latencyClass: 'fast',
+    call: (opts) => callGeminiImage(opts)
+  },
+  {
+    name: 'openai-image', order: 20,
+    imageKeyEnv: 'OPENAI_IMAGE_API_KEY', textKeyEnvs: ['OPENAI_API_KEY'],
+    modelEnv: 'OPENAI_IMAGE_MODEL', defaultModel: 'gpt-image-1',
+    maxPromptTokens: 4000, costClass: 'IMAGE_COST_HIGH', qualityClass: 'high', latencyClass: 'slow',
+    call: (opts) => callOpenAICompatibleImage(opts, 'https://api.openai.com/v1/images/generations')
+  },
+  {
+    // xAI phục vụ sinh ảnh qua endpoint TƯƠNG THÍCH OpenAI (/v1/images/generations) nên dùng chung
+    // adapter — không nhân bản code parse cho từng hãng.
+    name: 'grok-image', order: 30,
+    imageKeyEnv: 'GROK_IMAGE_API_KEY', textKeyEnvs: ['GROK_API_KEY', 'XAI_API_KEY'],
+    modelEnv: 'GROK_IMAGE_MODEL', defaultModel: 'grok-2-image-1212',
+    maxPromptTokens: 2000, costClass: 'IMAGE_COST_MEDIUM', qualityClass: 'standard', latencyClass: 'fast',
+    call: (opts) => callOpenAICompatibleImage(opts, 'https://api.x.ai/v1/images/generations')
+  },
+  {
+    // OpenRouter chỉ PROXY tới model của hãng khác: không có model ảnh mặc định nào đúng cho mọi tài
+    // khoản. Vì vậy provider này CHỈ được bật khi người vận hành chỉ định tường minh model ảnh —
+    // `requiresExplicitModel`. Bật mù sẽ gửi request tới một model không tồn tại và đốt một lượt
+    // failover.
+    name: 'openrouter-image', order: 40, requiresExplicitModel: true,
+    imageKeyEnv: 'OPENROUTER_IMAGE_API_KEY', textKeyEnvs: ['OPENROUTER_API_KEY'],
+    modelEnv: 'OPENROUTER_IMAGE_MODEL', defaultModel: '',
+    maxPromptTokens: 4000, costClass: 'IMAGE_COST_MEDIUM', qualityClass: 'standard', latencyClass: 'slow',
+    call: (opts) => callOpenAICompatibleImage(opts, 'https://openrouter.ai/api/v1/images/generations')
+  }
+];
+
+/** Thứ tự thử ảnh. Mặc định kế thừa thứ tự provider text; IMAGE_PROVIDER_ORDER ghi đè nếu cần. */
+function providerOrderOverride() {
+  return String(process.env.IMAGE_PROVIDER_ORDER || '')
+    .split(',').map((x) => x.trim()).filter(Boolean);
+}
+
+function isConfigured() {
+  return listImageProviders().length > 0;
+}
+
+/** Tên provider ảnh sẽ được thử ĐẦU TIÊN. CHỈ trả về TÊN — không bao giờ lộ khóa (mục 2.8). */
 function activeProviderName() {
-  if (GEMINI_IMAGE_KEY) return 'gemini-image';
-  if (OPENAI_IMAGE_KEY) return 'openai-image';
-  return null;
+  const list = listImageProviders();
+  return list.length ? list[0].name : null;
 }
 
 // ============================================================================================
@@ -70,22 +156,47 @@ function classifyImageCost({ provider, size = '1024x1024', renderer } = {}) {
   return pixels >= 1024 * 1024 ? IMAGE_COST.HIGH : IMAGE_COST.MEDIUM;
 }
 
-/** Danh sách provider ảnh có capability — B9.5 (capability-aware router, không hard-code if/else). */
+/**
+ * listImageProviders() — provider ảnh KHẢ DỤNG, đã sắp theo thứ tự ưu tiên.
+ * Một provider chỉ vào danh sách khi: (a) phân giải được khóa, và (b) xác định được model.
+ * @returns {Array<object>}
+ */
 function listImageProviders() {
+  // Công tắc TẮT HẲN: cần thiết vì khóa ảnh nay kế thừa khóa text, nên người vận hành phải có một
+  // cách tường minh để nói "tôi có khóa text nhưng KHÔNG muốn tiêu tiền sinh ảnh".
+  if (/^(0|false|off|no)$/i.test(String(process.env.IMAGE_GENERATION_ENABLED || '').trim())) return [];
+  const override = providerOrderOverride();
   const out = [];
-  if (GEMINI_IMAGE_KEY) {
+  for (const def of IMAGE_PROVIDER_DEFS) {
+    const { key, source } = resolveImageKey(def);
+    if (!key) continue;
+    const model = String(process.env[def.modelEnv] || def.defaultModel || '').trim();
+    if (!model) continue; // vd OpenRouter chưa chỉ định model ảnh -> không bật (requiresExplicitModel)
     out.push({
-      name: 'gemini-image', model: GEMINI_IMAGE_MODEL, supportsTextToImage: true,
-      maxPromptTokens: 2000, costClass: IMAGE_COST.LOW, qualityClass: 'standard', latencyClass: 'fast',
-      call: (opts) => callGeminiImage(opts)
+      name: def.name,
+      model,
+      apiKey: key,            // DÙNG NỘI BỘ. Không bao giờ đi vào log/telemetry/response (mục 2.8).
+      keySource: source,      // 'image_specific' | 'text_reuse' — chỉ để quan sát, không chứa khóa.
+      supportsTextToImage: true,
+      maxPromptTokens: def.maxPromptTokens,
+      costClass: def.costClass,
+      qualityClass: def.qualityClass,
+      latencyClass: def.latencyClass,
+      order: def.order,
+      call: (opts) => def.call({ ...opts, apiKey: key, model })
     });
   }
-  if (OPENAI_IMAGE_KEY) {
-    out.push({
-      name: 'openai-image', model: OPENAI_IMAGE_MODEL, supportsTextToImage: true,
-      maxPromptTokens: 4000, costClass: IMAGE_COST.HIGH, qualityClass: 'high', latencyClass: 'slow',
-      call: (opts) => callOpenAIImage(opts)
+  if (override.length) {
+    // Thứ tự do người vận hành chỉ định thắng; provider không được nêu tên vẫn giữ ở cuối theo
+    // thứ tự kế thừa từ text (không âm thầm loại bỏ provider đã cấu hình).
+    out.sort((a, b) => {
+      const ia = override.indexOf(a.name);
+      const ib = override.indexOf(b.name);
+      if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+      return a.order - b.order;
     });
+  } else {
+    out.sort((a, b) => a.order - b.order);
   }
   return out;
 }
@@ -191,13 +302,13 @@ function geminiBlockReason(data) {
   return null;
 }
 
-async function callGeminiImage({ prompt, timeoutMs, signal }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent`;
+async function callGeminiImage({ prompt, timeoutMs, signal, apiKey, model }) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const linked = createLinkedAbort(timeoutMs, signal);
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_IMAGE_KEY },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }] }),
       signal: linked.signal
     });
@@ -209,7 +320,7 @@ async function callGeminiImage({ prompt, timeoutMs, signal }) {
     const inline = extractGeminiInline(data);
     // Model trả TEXT thay vì ảnh -> đây là FAILURE, không phải thành công (B9.8).
     if (!inline || !isLikelyBase64(inline.b64)) return { ok: false, reason: 'no_image_in_response' };
-    return { ok: true, format: 'data_url', url: `data:${inline.mime};base64,${inline.b64}`, model: GEMINI_IMAGE_MODEL };
+    return { ok: true, format: 'data_url', url: `data:${inline.mime};base64,${inline.b64}`, model };
   } finally {
     linked.cleanup();
   }
@@ -223,13 +334,20 @@ function isLikelyBase64(s) {
   return /^[A-Za-z0-9+/\r\n=]+$/.test(s.slice(0, 512));
 }
 
-async function callOpenAIImage({ prompt, timeoutMs, signal, size }) {
+/**
+ * Adapter DÙNG CHUNG cho mọi provider nói giao thức /v1/images/generations của OpenAI
+ * (OpenAI, xAI/Grok, OpenRouter). Mục 2.1a điểm 7: thêm provider mới chỉ cần trỏ vào endpoint của
+ * nó, KHÔNG đụng vào code của provider khác.
+ * @param {object} opts {prompt, timeoutMs, signal, size, apiKey, model}
+ * @param {string} endpoint URL đầy đủ của endpoint images/generations
+ */
+async function callOpenAICompatibleImage({ prompt, timeoutMs, signal, size, apiKey, model }, endpoint) {
   const linked = createLinkedAbort(timeoutMs, signal);
   try {
-    const res = await fetch('https://api.openai.com/v1/images/generations', {
+    const res = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_IMAGE_KEY}` },
-      body: JSON.stringify({ model: OPENAI_IMAGE_MODEL, prompt, size, n: 1 }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, prompt, size, n: 1 }),
       signal: linked.signal
     });
     if (!res.ok) return { ok: false, reason: 'http_' + res.status };
@@ -244,11 +362,11 @@ async function callOpenAIImage({ prompt, timeoutMs, signal, size }) {
     const b64 = item.b64_json || item.b64Json;
     if (b64 && isLikelyBase64(b64)) {
       const mime = item.output_format ? `image/${item.output_format}` : 'image/png';
-      return { ok: true, format: 'data_url', url: `data:${mime};base64,${b64}`, model: OPENAI_IMAGE_MODEL };
+      return { ok: true, format: 'data_url', url: `data:${mime};base64,${b64}`, model };
     }
     // URL phải là http(s) thật — không nhận data:/javascript:/chuỗi rác (ranh giới an toàn).
     if (typeof item.url === 'string' && /^https?:\/\//i.test(item.url)) {
-      return { ok: true, format: 'image_url', url: item.url, model: OPENAI_IMAGE_MODEL };
+      return { ok: true, format: 'image_url', url: item.url, model };
     }
     return { ok: false, reason: 'no_image_in_response' };
   } finally {
@@ -256,8 +374,15 @@ async function callOpenAIImage({ prompt, timeoutMs, signal, size }) {
   }
 }
 
+/** Giữ tên cũ cho mọi call-site/test hiện có — nay chỉ là alias trỏ vào endpoint OpenAI. */
+function callOpenAIImage(opts) {
+  return callOpenAICompatibleImage(opts, 'https://api.openai.com/v1/images/generations');
+}
+
 module.exports = {
   generateImage, isConfigured, activeProviderName, IMAGE_TIMEOUT_MS,
   listImageProviders, classifyImageCost, isRetryableReason, IMAGE_COST, activePromptCharLimit,
-  extractGeminiInline, geminiBlockReason, isLikelyBase64
+  extractGeminiInline, geminiBlockReason, isLikelyBase64,
+  // Mục 2.1a: registry mở rộng + phân giải khóa — export để test kiểm chứng trực tiếp.
+  IMAGE_PROVIDER_DEFS, resolveImageKey, callOpenAICompatibleImage, callOpenAIImage, callGeminiImage
 };
