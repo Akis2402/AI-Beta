@@ -129,14 +129,23 @@ function activeProviderName() {
 // đẻ thêm nhánh if/else), thử theo thứ tự ưu tiên, và CHỈ thử provider kế tiếp khi lỗi thuộc nhóm
 // RETRYABLE. Tổng số lệnh gọi luôn <= số provider đã cấu hình, KHÔNG có vòng lặp ẩn nào (SECTION D).
 
-/** Lỗi tạm thời -> đáng thử provider khác. Lỗi input (empty_prompt...) thì KHÔNG. */
-const RETRYABLE_REASONS = new Set(['provider_error', 'no_image_in_response', 'http_429', 'http_500', 'http_502', 'http_503', 'http_504']);
-// 'content_blocked'/'malformed_response' CỐ Ý không nằm trong danh sách: nội dung bị chặn thì
-// provider nào cũng chặn, thử tiếp chỉ tốn thêm 1 lệnh gọi.
+// Phân biệt 2 LOẠI lỗi khác bản chất:
+// (a) Lỗi NỘI DUNG prompt (content) — dùng CHUNG cho mọi provider vì prompt giống nhau, provider
+//     nào cũng sẽ chặn/huỷ y hệt -> KHÔNG đáng thử tiếp, chỉ tốn thêm 1 lệnh gọi vô ích.
+// (b) Lỗi CẤU HÌNH/KỸ THUẬT của RIÊNG 1 provider (auth sai, model ID sai, schema request sai,
+//     JSON trả về dị dạng...) — KHÔNG dùng chung: mỗi provider có key/model/endpoint/cơ chế xác
+//     thực khác nhau, lỗi ở Gemini không nói lên gì về OpenAI -> LUÔN đáng thử provider kế tiếp.
+// BUG CŨ (đã sửa): coi mọi 4xx (trừ 429) là "lỗi input dùng chung" — SAI, vì phần lớn 4xx thực tế
+// (400 sai tên model, 401/403 quyền/billing/region, 404 sai endpoint) là lỗi (b), riêng của 1
+// provider. Vì vậy nay dùng DENYLIST: chỉ liệt kê đúng 2 case (a)/"không nên tiếp tục" là KHÔNG
+// retryable; MỌI lý do khác đều retryable.
+const NON_RETRYABLE_REASONS = new Set([
+  'content_blocked', // (a) lỗi nội dung dùng chung — provider nào cũng chặn y hệt
+  'cancelled'         // người dùng huỷ / hết hạn mức thời gian — không nên tiếp tục gọi thêm
+]);
 function isRetryableReason(reason) {
   if (!reason) return false;
-  if (RETRYABLE_REASONS.has(reason)) return true;
-  return /^http_5\d\d$/.test(reason); // mọi 5xx đều là lỗi phía provider
+  return !NON_RETRYABLE_REASONS.has(reason);
 }
 
 // B9.15 — IMAGE COST POLICY. Deterministic renderer không đi qua file này nên luôn LOW (0 cost API).

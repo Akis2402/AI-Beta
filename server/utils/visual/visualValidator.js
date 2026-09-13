@@ -93,10 +93,16 @@ function validateVisual({ spec, output, finalAnswer = '', expectedLanguage = 'vi
   // `molecule`) và địa lý (neo bằng `regions`) luôn bị đánh trượt 'not_relevant' — lỗi do bộ test
   // image-generation phát hiện. Mọi nguồn neo đều phải được tính.
   const d = spec.data || {};
-  checks.relevant = (spec.labels || []).length > 0 || (spec.objects || []).length > 0
+  const hasAnyAnchor = (spec.labels || []).length > 0 || (spec.objects || []).length > 0
     || ((spec.requiredEquations || []).length > 0)
     || ((d.steps || []).length > 0) || !!d.plotExpr
     || ((d.parts || []).length > 0) || ((d.regions || []).length > 0) || !!d.molecule;
+  // Case thẻ tối giản (bản vá "MỤC 2.3" trong deterministicRenderer.renderConceptCard): không có
+  // bất kỳ điểm neo nào, chỉ dựng từ spec.purpose/spec.title. Đây KHÔNG phải "không liên quan" —
+  // đây là lưới an toàn cuối cho câu hỏi tổng quan/khái niệm không có dữ kiện cụ thể để trích.
+  // Chỉ bỏ qua HARD-fail cho đúng case này; mọi case khác vẫn giữ nguyên yêu cầu có điểm neo.
+  const isMinimalConceptCard = !hasAnyAnchor && !!(spec.purpose || spec.title);
+  checks.relevant = hasAnyAnchor || isMinimalConceptCard;
   if (!checks.relevant) issues.push('not_relevant');
 
   // HARD = không được hiển thị. SOFT = hiển thị được nhưng ghi nhận cảnh báo.
