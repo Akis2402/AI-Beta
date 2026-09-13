@@ -39,6 +39,19 @@ function validateVisual({ spec, output, finalAnswer = '', expectedLanguage = 'vi
     return { valid: false, issues: ['empty_output'], severity: 'HARD', checks };
   }
 
+  // ---------- 0. MỤC 7 (đợt audit 2) — bất biến renderer/origin, phòng thủ lớp cuối ----------
+  // renderer='generated_image' PHẢI đi kèm origin='ai_generated' VÀ format phải là data_url/image_url
+  // (không bao giờ là 'svg'). Nếu một nhánh code tương lai vô tình gán renderer sai (bug lập trình),
+  // cổng validate này chặn NGAY ở đây thay vì để lọt ra UI với nhãn "ảnh AI" giả.
+  checks.rendererOriginConsistent = true;
+  if (output.renderer === 'generated_image') {
+    if (output.origin !== 'ai_generated' || output.format === 'svg') {
+      checks.rendererOriginConsistent = false;
+      issues.push('renderer_origin_mismatch');
+    }
+  }
+  if (!checks.rendererOriginConsistent) return { valid: false, issues, severity: 'HARD', checks };
+
   // ---------- 1. SVG phải là SVG hợp lệ, không chứa script/handler (ranh giới XSS) ----------
   if (output.format === 'svg') {
     const svg = String(output.content || '');

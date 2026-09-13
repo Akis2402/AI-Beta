@@ -18,8 +18,27 @@
 // Không có tham số nào khác được truyền tiếp lên upstream.
 
 const express = require('express');
+// MỤC 5/6 (đợt audit 2) — validator nhị phân DÙNG CHUNG. Trước đây route này chỉ kiểm
+// `Content-Type` header (provider/CDN nào cũng có thể khai sai hoặc trả trang lỗi HTML với header
+// content-type bị cấu hình nhầm) mà KHÔNG hề đọc byte thật. Nay bắt buộc đi qua đúng 1 hàm dùng
+// chung với imageGenerationClient.js/live-image-check.js.
+const { validateImageBuffer } = require('../utils/visual/imageBinaryValidator');
 
 const router = express.Router();
+
+/** MIME thật (đã validate) -> extension file tải xuống. Không bao giờ dùng .png cho binary khác. */
+const EXT_BY_MIME = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+
+/** MỤC 6 (đợt audit 2): lấy MIME THẬT đã validate từ kết quả generateImage() để đặt tên file
+ * đúng extension — không đoán, không mặc định .png. */
+function mimeOfImgResult(img) {
+  if (img.verifiedMime) return img.verifiedMime; // format:'image_url' — đã tự tải+validate ở imageGenerationClient.
+  if (img.format === 'data_url' && typeof img.url === 'string') {
+    const m = /^data:([^;]+);base64,/.exec(img.url);
+    if (m) return m[1]; // Đây LÀ mime đã qua verifyImageBytes() ở imageGenerationClient (chữ ký byte thật, không phải nhãn provider).
+  }
+  return null;
+}
 
 // Domain ĐƯỢC PHÉP tải hộ. Thêm domain mới phải sửa đúng ở đây, không đọc từ env (env bị đổi là
 // mở toang SSRF).
@@ -48,19 +67,33 @@ function parseAllowedUrl(raw) {
   return u;
 }
 
-/** Tên file tải xuống: `<subject>-<visualId>.png` — KHÔNG chứa câu hỏi/dữ liệu nhạy cảm. */
-function safeFilename(subject, visualId) {
+/**
+ * Tên file tải xuống: `<subject>-<visualId>.<ext>` — KHÔNG chứa câu hỏi/dữ liệu nhạy cảm.
+ *
+ * MỤC 6 (đợt audit 2) — ROOT CAUSE: hàm cũ LUÔN gắn cứng `.png` bất kể binary thật là gì. Nếu
+ * provider trả JPEG/WebP (item.output_format khác 'png'), người dùng bấm "Tải PNG" sẽ nhận một file
+ * `.png` nhưng bên trong là JPEG/WebP thật — mở được (hầu hết hệ điều hành không kiểm extension) nên
+ * lỗi ẩn, nhưng vẫn là GIẢ MẠO định dạng. Dự án CHƯA có thư viện convert ảnh (không có sharp/jimp
+ * trong package.json — kiểm tra kỹ, không đoán) nên chọn lựa chọn A của yêu cầu: extension PHẢI
+ * khớp ĐÚNG MIME thật đã validate, không giả vờ là .png khi không phải.
+ * @param {string} subject
+ * @param {string} visualId
+ * @param {string} [detectedMime] MIME đã qua validateImageBuffer/validateImageBase64. Thiếu ->
+ *   mặc định 'png' CHỈ ở call-site nào đã tự đảm bảo binary là PNG thật ở nơi khác (không dùng cho
+ *   dữ liệu chưa validate).
+ */
+function safeFilename(subject, visualId, detectedMime) {
   const clean = (s, fallback) => String(s || '')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40) || fallback;
-  return `${clean(subject, 'visual')}-${clean(visualId, 'image')}.png`;
+  const ext = EXT_BY_MIME[String(detectedMime || '').toLowerCase()] || 'png';
+  return `${clean(subject, 'visual')}-${clean(visualId, 'image')}.${ext}`;
 }
 
 router.get('/download', async (req, res) => {
   const target = parseAllowedUrl(req.query.url);
   if (!target) return res.status(400).json({ error: 'url_not_allowed' });
 
-  const filename = safeFilename(req.query.subject, req.query.visualId);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
@@ -79,15 +112,31 @@ router.get('/download', async (req, res) => {
     }
     if (!upstream || !upstream.ok) return res.status(502).json({ error: 'upstream_failed' });
 
-    const ctype = String(upstream.headers.get('content-type') || '');
-    if (!/^image\//i.test(ctype)) return res.status(415).json({ error: 'not_an_image' });
+    // Header content-type CHỈ dùng để loại nhanh trường hợp rõ ràng không phải ảnh (vd text/html của
+    // trang lỗi) — KHÔNG bao giờ dùng làm bằng chứng cuối cùng để quyết định trả file cho client.
+    const ctypeHeader = String(upstream.headers.get('content-type') || '');
+    if (ctypeHeader && !/^image\//i.test(ctypeHeader)) {
+      return res.status(415).json({ error: 'not_an_image', detail: 'content-type header: ' + ctypeHeader });
+    }
     const len = Number(upstream.headers.get('content-length') || 0);
     if (len && len > MAX_BYTES) return res.status(413).json({ error: 'too_large' });
 
     const buf = Buffer.from(await upstream.arrayBuffer());
     if (buf.length > MAX_BYTES) return res.status(413).json({ error: 'too_large' });
 
-    res.setHeader('Content-Type', ctype);
+    // ============================================================================================
+    // MỤC 5 (đợt audit 2) — ROOT CAUSE: route cũ dừng lại ở `content-type startsWith 'image/'`.
+    // Header content-type đến từ CHÍNH upstream (provider/CDN) — nếu upstream trả trang lỗi/hết hạn
+    // URL với header bị cấu hình sai (hoặc cố tình sai), client vẫn nhận "thành công" và tải về một
+    // file .png rác. NAY: đọc byte thật bằng validator dùng chung — HTTP 200 + có content-type ảnh
+    // KHÔNG BAO GIỜ được coi là đủ; chỉ khi magic bytes khớp mới trả file cho client.
+    const validated = validateImageBuffer(buf, ctypeHeader);
+    if (!validated.valid) {
+      return res.status(502).json({ error: 'invalid_image_body', reason: validated.reason });
+    }
+
+    const filename = safeFilename(req.query.subject, req.query.visualId, validated.detectedMime);
+    res.setHeader('Content-Type', validated.detectedMime); // MIME THẬT (chữ ký byte), không phải header upstream tự khai.
     res.setHeader('Content-Length', String(buf.length));
     // `inline=1`: dùng cho thẻ <img> (CSP img-src chỉ cho 'self'), không phải tải về.
     const inline = String(req.query.inline || '') === '1';
@@ -131,10 +180,14 @@ router.post('/hq', express.json({ limit: '4kb' }), async (req, res) => {
   }
 
   const img = await imageClient.generateImage({ prompt: ctx.prompt, size: HQ_SIZE, timeoutMs: 30000 });
-  if (!img.ok) return res.status(502).json({ error: img.reason || 'image_failed' });
+  // MỤC 9 (đợt audit 2): img.ok=true GIỜ ĐÃ tương đương "binary thật, đã validate" (xem mục 3/8 ở
+  // imageGenerationClient.js — cả nhánh base64 lẫn image_url đều tự validate trước khi trả ok:true).
+  // Route này KHÔNG cần validate lại — chỉ cần không bao giờ trả ok:true khi img.ok=false.
+  if (!img.ok) return res.status(502).json({ ok: false, error: img.reason || 'image_failed' });
   return res.json({
     ok: true, format: img.format, url: img.url, size: HQ_SIZE,
-    filename: safeFilename(ctx.subject, visualId)
+    renderer: 'generated_image', origin: 'ai_generated', model: img.model,
+    filename: safeFilename(ctx.subject, visualId, mimeOfImgResult(img))
   });
 });
 

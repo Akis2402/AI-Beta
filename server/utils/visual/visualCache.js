@@ -77,9 +77,15 @@ async function getAsync(parts) {
  * set() — CHỈ ghi khi hình đã VALIDATED và câu trả lời đã COMPLETED (PHẦN 22).
  * @returns {boolean} true nếu thực sự được ghi.
  */
+// MỤC 10 (đợt audit 2) — BẤT BIẾN: renderer='generated_image' CHỈ được cache khi origin='ai_generated'
+// (đã qua validateImageBuffer/validateImageBase64 ở imageGenerationClient — xem visualPipeline.js).
+// Nếu vì lý do gì đó (lỗi lập trình trong tương lai) một item mang renderer=generated_image nhưng
+// KHÔNG có origin=ai_generated lọt tới đây, chặn NGAY tại cổng cache — đây là tuyến phòng thủ cuối,
+// không phụ thuộc caller nhớ gọi đúng thứ tự. Deterministic/SVG không bị ràng buộc này.
 function acceptable(value, { validated, answerComplete }) {
   if (!validated || !answerComplete) return false;
   if (!value || (!value.content && !value.url)) return false;
+  if (value.renderer === 'generated_image' && value.origin !== 'ai_generated') return false;
   return true;
 }
 

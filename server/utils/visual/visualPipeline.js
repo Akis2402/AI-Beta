@@ -245,7 +245,9 @@ async function runVisualPipeline(args) {
       if (attempt === 'deterministic' || attempt === 'concept_card') {
         const specForAttempt = attempt === 'concept_card' ? { ...spec, type: '__concept_card__' } : spec;
         const r = deterministic.renderDeterministic(specForAttempt);
-        if (r.ok) out = { format: r.format, content: r.content, renderer: r.renderer };
+        // MỤC 7 (đợt audit 2) — bất biến: renderer='generated_image' CHỈ khi origin='ai_generated'.
+        // Đường deterministic luôn gắn origin='deterministic', không bao giờ để lẫn.
+        if (r.ok) out = { format: r.format, content: r.content, renderer: r.renderer, origin: 'deterministic' };
         else telemetry.visualError = r.reason;
       } else if (attempt === 'image_generation') {
         // PHẦN 18: KHÔNG BAO GIỜ dùng image generation cho loại accuracy-critical.
@@ -297,7 +299,11 @@ async function runVisualPipeline(args) {
         lastAttemptedImagePrompt = promptCtx;
         if (img.ok) lastImagePrompt = promptCtx;
         if (img.costClass) telemetry.visualCostClass = img.costClass;
-        if (img.ok) out = { format: img.format, url: img.url, renderer: 'generated_image', model: img.model };
+        // MỤC 7/8 (đợt audit 2) — img.ok=true GIỜ CHỈ xảy ra sau khi imageGenerationClient đã tự
+        // validate binary thật (base64 qua verifyImageBytes, URL qua fetch+validateImageBuffer —
+        // xem callOpenAICompatibleImage). Vì vậy tới đây, origin='ai_generated' là PHÁT BIỂU ĐÚNG,
+        // không phải suy đoán từ "API trả 200".
+        if (img.ok) out = { format: img.format, url: img.url, renderer: 'generated_image', origin: 'ai_generated', model: img.model, urlVerified: !!img.urlVerified };
         else telemetry.visualError = img.reason;
       }
 
@@ -369,6 +375,10 @@ async function runVisualPipeline(args) {
       type: spec.type,
       subject: spec.subject || subject || 'visual',
       renderer: produced.renderer,
+      // MỤC 7 (đợt audit 2): trường origin đi kèm renderer ra tới tận response — frontend/telemetry
+      // đều đọc được đây là ảnh AI thật ('ai_generated') hay sơ đồ dựng sẵn ('deterministic'),
+      // không phải suy luận ngược từ renderer nữa.
+      origin: produced.origin,
       format: produced.format,
       content: produced.content,
       url: produced.url,
@@ -397,7 +407,7 @@ async function runVisualPipeline(args) {
 
     // PHẦN 22: chỉ cache khi VALIDATED + COMPLETED.
     await cache.setAsync(keyParts, {
-      type: visual.type, subject: visual.subject, renderer: visual.renderer, format: visual.format,
+      type: visual.type, subject: visual.subject, renderer: visual.renderer, origin: visual.origin, format: visual.format,
       content: visual.content, url: visual.url, title: visual.title,
       caption: visual.caption, placement: visual.placement,
       fidelity: visual.fidelity, necessity: visual.necessity, overrodeNever: visual.overrodeNever,

@@ -910,6 +910,18 @@ router.post('/', async (req, res, next) => {
             });
             candidates = gathered.candidates;
             accumulateUsage(requestUsage, gathered.usage && { ...gathered.usage });
+            // FIX (audit mục 15/20): PARTICIPANT ACCOUNTING THẬT — log để trả lời chính xác câu hỏi
+            // "cấu hình N AI thì thực tế bao nhiêu AI chạy?", và báo UI đúng số THẬT (không phải số
+            // "trông có vẻ nhiều") khi kết quả bị degraded (pool khỏe quá ít để đối chiếu đầy đủ).
+            reqLogger.log({ stage: 'cross_check_accounting', ...gathered.accounting });
+            if (gathered.accounting) {
+              const { successfulTargets, eligibleTargets, degraded } = gathered.accounting;
+              sseWrite(res, 'status', {
+                message: degraded
+                  ? `Đối chiếu đa hướng: ${successfulTargets}/${eligibleTargets} AI tham gia (đã suy giảm — pool AI khỏe hiện còn ít).`
+                  : `Đối chiếu đa hướng: ${successfulTargets}/${eligibleTargets} AI đã tham gia.`
+              });
+            }
           } finally {
             clearInterval(heartbeat);
           }
@@ -1214,7 +1226,7 @@ router.post('/', async (req, res, next) => {
 
       // Mục XII/XXII: xem giải thích đầy đủ ở nhánh streaming phía trên — không giảm số candidate
       // theo risk, luôn dùng CROSS_CHECK_MAX_CANDIDATES mặc định.
-      const { candidates, usage: crossCheckUsage } = await gatherCrossCheckCandidates(activeProviders, {
+      const { candidates, usage: crossCheckUsage, accounting: crossCheckAccounting } = await gatherCrossCheckCandidates(activeProviders, {
         system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget,
         reasoningBudget: budgetOf('candidate').reasoningBudget,
         requestId: reqLogger.requestId,
@@ -1224,6 +1236,8 @@ router.post('/', async (req, res, next) => {
         signal
       });
       accumulateUsage(requestUsage, crossCheckUsage && { ...crossCheckUsage });
+      // FIX (audit mục 15): participant accounting thật, log kể cả nhánh JSON (không chỉ SSE).
+      reqLogger.log({ stage: 'cross_check_accounting', ...crossCheckAccounting });
 
       if (!candidates.length) {
         const err = new Error('Tất cả nhà cung cấp AI đã cấu hình đều gặp lỗi khi giải bài. Vui lòng kiểm tra lại API key trong .env.');

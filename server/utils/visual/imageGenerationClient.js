@@ -14,6 +14,15 @@
 // renderer (PHẦN 19) hoặc bỏ hình. KHÔNG có provider ảnh KHÔNG PHẢI là lỗi.
 
 const { createLinkedAbort, makeCancelledError } = require('../abortLink');
+// MỤC 1/2 (đợt audit 2) — 1 NGUỒN SỰ THẬT DUY NHẤT cho việc "binary này có phải ảnh thật không".
+// Trước đây verifyImageBytes() ở file này tự viết bảng magic-bytes RIÊNG và có 1 nhánh thoát hiểm
+// tin claimedMime khi không nhận diện được chữ ký — nay xoá hẳn nhánh đó, dùng validator dùng
+// chung với routes/visual.js (download/retry/hq) và live-image-check.js.
+const { validateImageBase64, validateImageBuffer, detectSignatureFromBuffer } = require('./imageBinaryValidator');
+
+// MỤC 3/8 (đợt audit 2) — Trần dung lượng khi TỰ TẢI url ảnh về để validate byte thật (không phải
+// trần của route proxy /api/visual/download, đây là bước validate NGAY LÚC SINH ảnh).
+const URL_VALIDATE_MAX_BYTES = 12 * 1024 * 1024;
 
 // ============================================================================================
 // MỤC 2.1 + 2.1a — REGISTRY PROVIDER ẢNH THEO CAPABILITY, KHÓA KẾ THỪA TỪ PROVIDER TEXT
@@ -288,33 +297,17 @@ async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, siz
  * đối chiếu vài byte đầu (đã decode) với signature nhị phân thật của PNG/JPEG/WEBP/GIF — đây là
  * bằng chứng không thể giả mạo bằng cách gắn nhãn mime sai.
  */
-const MAGIC_SIGNATURES = [
-  { mime: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] },
-  { mime: 'image/jpeg', bytes: [0xff, 0xd8, 0xff] },
-  { mime: 'image/gif', bytes: [0x47, 0x49, 0x46, 0x38] },
-  // WEBP: 'RIFF' ở byte 0-3, 'WEBP' ở byte 8-11 — kiểm cả hai đoạn.
-  { mime: 'image/webp', bytes: [0x52, 0x49, 0x46, 0x46], webp: true }
-];
-
 /**
- * detectImageSignature() — giải mã TỐI THIỂU (12 byte đầu) rồi so khớp magic bytes.
+ * detectImageSignature() — GIỮ TÊN CŨ cho mọi call-site hiện có, nay chỉ là lớp mỏng gọi
+ * imageBinaryValidator (1 nguồn sự thật duy nhất, xem file đó).
  * @param {string} b64
  * @returns {string|null} mime THỰC TẾ suy ra từ byte, hoặc null nếu không khớp signature nào.
  */
 function detectImageSignature(b64) {
   try {
     const head = Buffer.from(String(b64 || '').slice(0, 32), 'base64');
-    if (head.length < 4) return null;
-    for (const sig of MAGIC_SIGNATURES) {
-      const matches = sig.bytes.every((byte, i) => head[i] === byte);
-      if (!matches) continue;
-      if (sig.webp) {
-        // Cần thêm 'WEBP' ở offset 8..11 để phân biệt với RIFF/WAV hay RIFF/AVI khác.
-        if (head.length < 12 || head.toString('ascii', 8, 12) !== 'WEBP') continue;
-      }
-      return sig.mime;
-    }
-    return null;
+    const sig = detectSignatureFromBuffer(head);
+    return sig ? sig.mime : null;
   } catch (e) {
     return null;
   }
@@ -322,15 +315,18 @@ function detectImageSignature(b64) {
 
 /**
  * Kiểm chứng b64 CÓ THẬT SỰ LÀ ẢNH không, bất kể provider gắn nhãn mime là gì.
- * @returns {string|null} mime đáng tin (ưu tiên chữ ký byte thật), null nếu không phải ảnh.
+ *
+ * ROOT CAUSE ĐÃ SỬA (đợt audit 2): bản cũ có nhánh thoát hiểm PASS khi không nhận diện được chữ ký
+ * nhưng claimedMime bắt đầu bằng 'image/'. Đây là lỗ hổng: claimedMime chỉ là NHÃN provider tự
+ * khai, không phải bằng chứng. Nay: KHÔNG nhận diện được chữ ký nhị phân thật -> LUÔN trả null
+ * (FAIL), bất kể claimedMime nói gì. Không còn ngoại lệ nào.
+ *
+ * @returns {string|null} mime đáng tin (LUÔN là chữ ký byte thật, không bao giờ là nhãn provider
+ *   tự khai), null nếu không xác định được binary là ảnh thật.
  */
 function verifyImageBytes(b64, claimedMime) {
-  if (!isLikelyBase64(b64)) return null;
-  const real = detectImageSignature(b64);
-  if (real) return real; // chữ ký byte thắng tuyệt đối — không tin nhãn mime nếu byte không khớp.
-  // Không nhận diện được chữ ký (vd ảnh hợp lệ nhưng hiếm/không nằm trong bảng) -> chỉ chấp nhận
-  // khi provider ít nhất tự nhận đúng là 'image/*'; KHÔNG bao giờ mặc định image/png khi mù mờ.
-  return claimedMime && /^image\//i.test(claimedMime) ? claimedMime : null;
+  const r = validateImageBase64(b64, claimedMime);
+  return r.valid ? r.detectedMime : null;
 }
 
 /** Trích base64 + mime từ MỌI biến thể inline-data của Gemini đã biết. */
@@ -452,7 +448,33 @@ async function callOpenAICompatibleImage({ prompt, timeoutMs, signal, size, apiK
     }
     // URL phải là http(s) thật — không nhận data:/javascript:/chuỗi rác (ranh giới an toàn).
     if (typeof item.url === 'string' && /^https?:\/\//i.test(item.url)) {
-      return { ok: true, format: 'image_url', url: item.url, model };
+      // ==========================================================================================
+      // MỤC 3/8 (đợt audit 2) — ROOT CAUSE: trước đây "provider trả URL http(s) hợp lệ cú pháp" ĐÃ
+      // được coi là ok:true, thật ra chưa hề biết URL đó có TRẢ VỀ ẢNH THẬT hay không (URL hết hạn,
+      // URL trả trang lỗi HTML, hoặc chuyển hướng ra ngoài whitelist khi client bấm tải). Hệ quả:
+      // renderer='generated_image' + origin='ai_generated' được gắn cho một thứ CHƯA HỀ được xác
+      // minh — vi phạm đúng bất biến ở mục 7 của yêu cầu audit này. NAY: validate NGAY tại đây,
+      // BẰNG CHÍNH request sẽ dùng để phục vụ client (cùng 1 URL, đọc thật body, so magic bytes) —
+      // chỉ trả ok:true sau khi ĐÃ CÓ BẰNG CHỨNG nhị phân, không còn "success" chỉ vì cú pháp URL đẹp.
+      try {
+        const vRes = await fetch(item.url, { signal: linked.signal });
+        if (!vRes.ok) return { ok: false, reason: 'image_url_fetch_failed:' + vRes.status };
+        const len = Number(vRes.headers.get('content-length') || 0);
+        if (len && len > URL_VALIDATE_MAX_BYTES) return { ok: false, reason: 'image_url_too_large' };
+        const buf = Buffer.from(await vRes.arrayBuffer());
+        if (buf.length > URL_VALIDATE_MAX_BYTES) return { ok: false, reason: 'image_url_too_large' };
+        const validated = validateImageBuffer(buf, vRes.headers.get('content-type'));
+        if (!validated.valid) return { ok: false, reason: 'invalid_image_bytes' };
+        // urlVerified: true — báo hiệu URL đã được đọc thật, không phải đoán từ cú pháp. Client vẫn
+        // tải qua /api/visual/download (proxy SSRF-whitelist) để không phải nới CSP; route đó VẪN
+        // tự validate lại byte của chính nó (mục 5) — 2 lớp độc lập, không lớp nào thay thế lớp kia.
+        return {
+          ok: true, format: 'image_url', url: item.url, model,
+          urlVerified: true, verifiedMime: validated.detectedMime
+        };
+      } catch (e) {
+        return { ok: false, reason: (e && e.cancelled) ? 'cancelled' : 'image_url_verify_error' };
+      }
     }
     return { ok: false, reason: 'no_image_in_response' };
   } finally {
