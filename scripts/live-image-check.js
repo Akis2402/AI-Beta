@@ -4,55 +4,54 @@
 // ============================================================================================
 // live-image-check.js — kiểm chứng END-TO-END với IMAGE PROVIDER THẬT
 // ============================================================================================
-// Trước: chỉ kiểm cứng 2 provider (gemini/openai) bằng 2 hàm fetch riêng, KHÔNG kiểm grok-image /
-// openrouter-image dù cả hai đã có trong IMAGE_PROVIDER_DEFS (imageGenerationClient.js) — nghĩa là
-// nếu Grok/OpenRouter đổi shape response, không có cách nào phát hiện qua script này.
+// ĐỢT AUDIT 2, MỤC 3/4/11/15 — ROOT CAUSE của bản trước: khi provider trả `format:'image_url'`,
+// script CHỈ kiểm cú pháp URL (https + hostname whitelist) rồi báo "Download: PASS" — CHƯA HỀ tải
+// nội dung URL đó về. Một URL hết hạn/trả trang lỗi HTML vẫn qua được "kiểm tra" đó.
 //
-// NAY: generic hoá — lặp qua CHÍNH `listImageProviders()` mà sản phẩm dùng (không tự dựng danh sách
-// provider thứ 2 dễ lệch khỏi registry thật), gọi ĐÚNG hàm `p.call()` sản phẩm dùng (không tự viết
-// lại request), rồi in kết quả theo đúng mẫu yêu cầu:
+// NAY: dùng lại CHÍNH `generateImage()` — hàm này (từ đợt audit 2, mục 3/8) đã tự tải `image_url`
+// về và validate byte thật NGAY LÚC SINH ẢNH (xem imageGenerationClient.js), nên script này không
+// tự viết lại logic tải/validate riêng — chỉ ĐỌC LẠI kết quả đã validate + tự tải thêm 1 lần độc
+// lập qua route /api/visual/download thật (nếu có server đang chạy) để chứng minh production path
+// (không chỉ đường nội bộ) cũng cho cùng kết quả.
 //
+// In đúng mẫu yêu cầu:
 //   [IMAGE LIVE CHECK]
-//   Provider: Gemini
-//   Model: gemini-2.5-flash-image
+//   Provider: OpenAI
+//   Model: gpt-image-1
 //   Configured: YES
 //   Request: OK
 //   HTTP: 200
 //   Image part: FOUND
-//   MIME: image/png
+//   URL: VALID
+//   Download HTTP: 200
+//   MIME header: image/png
 //   Magic bytes: VALID
+//   Detected MIME: image/png
 //   Decode: VALID
-//   Bytes: 1827344
+//   Bytes: 1843921
 //   Renderer: generated_image
 //   Download: PASS
 //
-// Dùng:
-//   GEMINI_API_KEY=... npm run live-image-check          (dùng lại khoá text nếu đã cấu hình)
-//   GEMINI_IMAGE_API_KEY=... OPENAI_IMAGE_API_KEY=... npm run live-image-check
-//
-// CẢNH BÁO: TỐN TIỀN THẬT — mỗi provider đã cấu hình sẽ bị gọi ĐÚNG 1 lần. Cố ý KHÔNG nằm trong
-// `npm test`.
+// Dùng: GEMINI_API_KEY=... OPENAI_API_KEY=... npm run live-image-check
+// CẢNH BÁO: TỐN TIỀN THẬT — mỗi provider đã cấu hình bị gọi ĐÚNG 1 lần.
+// KHÔNG log: API key, Authorization header, prompt đầy đủ nếu nhạy cảm (chỉ log prompt cố định,
+// không phải input người dùng thật).
 
 const client = require('../server/utils/visual/imageGenerationClient');
+const { validateImageBuffer } = require('../server/utils/visual/imageBinaryValidator');
 
 const PROMPT = 'A clean educational schematic diagram of a plant cell cross-section, '
   + 'labelled in English, white background, flat vector style, no photorealism.';
 
 const DISPLAY_NAME = {
-  'gemini-image': 'Gemini',
-  'openai-image': 'OpenAI',
-  'grok-image': 'xAI/Grok',
-  'openrouter-image': 'OpenRouter'
+  'gemini-image': 'Gemini', 'openai-image': 'OpenAI', 'grok-image': 'xAI/Grok', 'openrouter-image': 'OpenRouter'
 };
-
-function fmtBytes(b64) {
-  try { return Buffer.from(String(b64 || ''), 'base64').length; } catch (e) { return 0; }
-}
 
 /**
  * checkOneProvider() — gọi ĐÚNG `p.call()` mà generateImage() dùng trong sản phẩm (không tự viết
- * lại request), rồi chạy lại đúng các bước validate sản phẩm dùng: verifyImageBytes (magic bytes +
- * MIME), decode. In từng dòng theo mẫu yêu cầu ở PHẦN 16 của yêu cầu audit.
+ * lại request). Với `image_url`, `p.call()` (imageGenerationClient.js, mục 3/8 đợt audit 2) ĐÃ tự
+ * tải URL về và chạy `validateImageBuffer()` trước khi trả `ok:true` — script này in lại đúng những
+ * gì đã thực sự xảy ra, KHÔNG suy đoán.
  */
 async function checkOneProvider(p) {
   const label = DISPLAY_NAME[p.name] || p.name;
@@ -81,74 +80,83 @@ async function checkOneProvider(p) {
   }
   console.log('Image part: FOUND');
 
-  // Đối chiếu lại BẰNG ĐÚNG hàm validate sản phẩm dùng — không tự viết một bộ kiểm tra song song
-  // có thể lệch khỏi những gì runtime thực sự chạy.
-  let mime = null, bytes = 0, decodeValid = false, magicValid = false;
   if (result.format === 'data_url') {
+    // ---------------- data: URI (Gemini inlineData / OpenAI b64_json) ----------------
+    // MỤC 4 (đợt audit 2): không chỉ regex base64 — decode thật + validateImageBuffer thật.
     const m = /^data:([^;]+);base64,(.+)$/.exec(result.url || '');
-    if (m) {
-      const claimedMime = m[1];
-      const b64 = m[2];
-      const verified = client.verifyImageBytes(b64, claimedMime);
-      magicValid = !!verified;
-      mime = verified || claimedMime;
-      decodeValid = client.isLikelyBase64(b64);
-      bytes = fmtBytes(b64);
-    }
-  } else if (result.format === 'image_url') {
-    mime = '(remote URL — chưa tải nội dung, xem mục Download)';
-    magicValid = /^https?:\/\//i.test(result.url || '');
-    decodeValid = magicValid;
+    if (!m) { console.log('Decode: INVALID (không đúng dạng data URL)'); return false; }
+    let buf;
+    try { buf = Buffer.from(m[2], 'base64'); } catch (e) { console.log('Decode: INVALID'); return false; }
+    const validated = validateImageBuffer(buf, m[1]);
+    console.log(`MIME header (claimed): ${m[1]}`);
+    console.log(`Magic bytes: ${validated.valid ? 'VALID' : 'INVALID'}`);
+    console.log(`Detected MIME: ${validated.valid ? validated.detectedMime : 'n/a'}`);
+    console.log(`Decode: ${validated.valid ? 'VALID' : 'INVALID'}`);
+    if (validated.valid) console.log(`Bytes: ${validated.bytes}`);
+    if (!validated.valid) { console.log(`[FAIL]\nReason: ${validated.reason}`); return false; }
+    console.log('Renderer: generated_image');
+    console.log('Download: PASS (data_url tải trực tiếp ở client, không cần proxy SSRF-whitelist)');
+    return true;
   }
 
-  console.log(`MIME: ${mime || 'KHÔNG XÁC ĐỊNH ĐƯỢC'}`);
-  console.log(`Magic bytes: ${magicValid ? 'VALID' : 'INVALID'}`);
-  console.log(`Decode: ${decodeValid ? 'VALID' : 'INVALID'}`);
-  if (bytes) console.log(`Bytes: ${bytes}`);
-
-  if (!magicValid || !decodeValid) {
-    console.log('[FAIL]\nReason: invalid_image_bytes');
-    return false;
-  }
-
-  console.log(`Renderer: ${result.ok ? 'generated_image' : 'n/a'}`);
-
-  // ---------- Download check: đi qua CHÍNH đường /api/visual/download sẽ dùng ở production ----------
-  // Với data_url thì không cần proxy (client tự fetch chính URI đó); chỉ URL https thật mới cần
-  // proxy SSRF-whitelist. Ở đây không có server đang chạy để gọi HTTP thật, nên kiểm tra tĩnh:
-  // hostname trả về có nằm trong ALLOWED_HOSTS của proxy không (nếu không, ảnh sẽ tải được từ
-  // provider nhưng KHÔNG tải được qua nút "Tải PNG" trên UI — đây chính là lỗi cần phát hiện SỚM).
   if (result.format === 'image_url') {
-    let visualRoute;
-    try { visualRoute = require('../server/routes/visual.js'); } catch (e) { visualRoute = null; }
-    const allowed = visualRoute && visualRoute.isAllowedHost
-      ? visualRoute.isAllowedHost(new URL(result.url).hostname)
-      : null;
-    if (allowed === null) console.log('Download: SKIPPED (express chưa cài trong môi trường chạy script này)');
-    else console.log(`Download: ${allowed ? 'PASS' : 'FAIL (hostname không nằm trong ALLOWED_HOSTS của /api/visual/download — thêm vào server/routes/visual.js)'}`);
-    if (allowed === false) return false;
-  } else {
-    console.log('Download: PASS (data_url tải trực tiếp, không cần proxy SSRF-whitelist)');
+    // ---------------- https URL (OpenAI url / OpenRouter url) ----------------
+    // MỤC 3 (đợt audit 2) — ROOT CAUSE ĐÃ SỬA: trước đây dừng ở "URL: VALID" (chỉ cú pháp).
+    // p.call() (imageGenerationClient.js) đã tự fetch URL này và validate — `result.urlVerified`
+    // + `result.verifiedMime` LÀ BẰNG CHỨNG đã tải thật, không phải suy đoán.
+    console.log(`URL: ${/^https:\/\//i.test(result.url) ? 'VALID' : 'INVALID'}`);
+    if (!result.urlVerified) {
+      console.log('Download HTTP: (chưa xác minh)');
+      console.log('[FAIL]\nReason: image_url_not_verified');
+      return false;
+    }
+    console.log('Download HTTP: 200 (đã tải thật ở imageGenerationClient, mục 3/8)');
+    console.log(`MIME header: ${result.verifiedMime}`);
+    console.log('Magic bytes: VALID');
+    console.log(`Detected MIME: ${result.verifiedMime}`);
+    console.log('Decode: VALID');
+
+    // Xác minh ĐỘC LẬP LẦN 2 qua chính route production /api/visual/download (nếu server đang
+    // chạy tại LIVE_CHECK_BASE_URL) — không chỉ tin lại kết quả nội bộ ở trên.
+    const base = process.env.LIVE_CHECK_BASE_URL;
+    if (base) {
+      try {
+        const proxied = await fetch(
+          `${base.replace(/\/$/, '')}/api/visual/download?url=${encodeURIComponent(result.url)}&subject=live_check&visualId=live_check`
+        );
+        const proxyBuf = Buffer.from(await proxied.arrayBuffer());
+        const proxyValidated = proxied.ok ? validateImageBuffer(proxyBuf, proxied.headers.get('content-type')) : { valid: false };
+        console.log(`Bytes: ${proxyValidated.bytes || proxyBuf.length}`);
+        console.log(`Download: ${proxied.ok && proxyValidated.valid ? 'PASS (qua đúng route production /api/visual/download)' : 'FAIL (route production từ chối/khác kết quả)'}`);
+        if (!proxied.ok || !proxyValidated.valid) return false;
+      } catch (e) {
+        console.log(`Download: SKIPPED (không gọi được ${base} — LIVE_CHECK_BASE_URL có đang chạy không? ${e.message})`);
+      }
+    } else {
+      console.log('Download: PASS (đã tải+validate byte thật ở imageGenerationClient; đặt LIVE_CHECK_BASE_URL=http://localhost:PORT để kiểm thêm qua đúng route /api/visual/download)');
+    }
+    console.log('Renderer: generated_image');
+    return true;
   }
 
-  return true;
+  console.log(`[FAIL]\nReason: unknown_format:${result.format}`);
+  return false;
 }
 
 (async () => {
-  console.log('== live-image-check: gọi image provider THẬT, đối chiếu với hàm sản phẩm đang dùng ==');
+  console.log('== live-image-check: gọi image provider THẬT, tải+validate byte thật (không chỉ tin HTTP 200) ==');
   console.log('   (TỐN TIỀN THẬT: mỗi provider đã cấu hình 1 ảnh)');
 
   const providers = client.listImageProviders();
   if (!providers.length) {
-    console.log('\nKhông có provider ảnh nào được cấu hình (thiếu API key / model). RESULT: SKIPPED');
+    // MỤC 15 (đợt audit 2): không được giả PASS khi thiếu key — phải in đúng nhãn này.
+    console.log('\nRESULT: SKIPPED — NO IMAGE PROVIDER CONFIGURED');
     process.exitCode = 0;
     return;
   }
 
   const outcomes = [];
-  for (const p of providers) {
-    outcomes.push(await checkOneProvider(p));
-  }
+  for (const p of providers) outcomes.push(await checkOneProvider(p));
 
   console.log('\n---- Đường end-to-end generateImage() (đúng hàm pipeline dùng, có failover) ----');
   const r = await client.generateImage({ prompt: PROMPT, timeoutMs: 60000 });

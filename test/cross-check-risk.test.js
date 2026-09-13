@@ -55,13 +55,22 @@ test('gatherCrossCheckCandidates() được gọi KHÔNG kèm maxCandidates ở 
   usages.forEach((u) => assert.ok(!u.includes('maxCandidates'), 'không được truyền maxCandidates xuống — luôn dùng CROSS_CHECK_MAX_CANDIDATES mặc định'));
 });
 
-test('gatherCrossCheckCandidates() vẫn nhận maxCandidates optional (API giữ nguyên cho nơi gọi khác/test), mặc định = CROSS_CHECK_MAX_CANDIDATES', () => {
-  assert.ok(aiProvidersSrc.includes('maxCandidates = CROSS_CHECK_MAX_CANDIDATES'), 'phải có default param maxCandidates = CROSS_CHECK_MAX_CANDIDATES');
+test('gatherCrossCheckCandidates() vẫn nhận maxCandidates optional (API giữ nguyên cho nơi gọi khác/test) — nhưng KHÔNG default vào CROSS_CHECK_MAX_CANDIDATES nữa (mục audit: default phải adaptive theo pool, không hard-cap)', () => {
+  assert.ok(!/maxCandidates\s*=\s*CROSS_CHECK_MAX_CANDIDATES/.test(aiProvidersSrc),
+    'default param KHÔNG được gán cứng = CROSS_CHECK_MAX_CANDIDATES nữa — nếu không mọi lượt gọi mặc định lại bị cắt về 3');
+  assert.ok(/function resolveParticipantCount/.test(aiProvidersSrc),
+    'phải có resolveParticipantCount() quyết định participant count adaptive theo pool thật');
 });
 
-// ---------- Không bao giờ giảm dưới 2 (an toàn kẹp sàn, dù hiện tại không còn nhánh nào truyền số nhỏ hơn mặc định) ----------
-test('gatherCrossCheckCandidates không bao giờ giảm dưới 2 candidate (Math.max(2, ...))', () => {
-  assert.ok(aiProvidersSrc.includes('Math.max(2, Math.min(maxCandidates,'), 'phải kẹp sàn tối thiểu 2 candidate — không được bỏ hẳn cross-check khi user đã bật');
+// ---------- Không bao giờ giảm dưới 2 (an toàn kẹp sàn), và không hard-cap participant ở giá trị cố định ----------
+test('resolveParticipantCount không bao giờ giảm dưới 2 khi pool >= 2, và dùng CẢ pool khi không có giới hạn tường minh', () => {
+  const aiProviders = require('../server/utils/aiProviders');
+  assert.strictEqual(aiProviders.resolveParticipantCount(2), 2);
+  assert.strictEqual(aiProviders.resolveParticipantCount(5), 5, 'pool 5, không giới hạn tường minh -> phải dùng đủ 5, không cắt về 3');
+  assert.strictEqual(aiProviders.resolveParticipantCount(1), 1, 'pool chỉ còn 1 -> chạy 1 (degraded), không ép lên 2');
+  assert.strictEqual(aiProviders.resolveParticipantCount(0), 0);
+  const cap = aiProviders.CROSS_CHECK_SAFETY_CAP;
+  assert.strictEqual(aiProviders.resolveParticipantCount(cap + 20), cap, 'pool vượt safety cap -> chặn đúng bằng cap, không hơn');
 });
 
 let passed = 0, failed = 0;

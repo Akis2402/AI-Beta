@@ -254,7 +254,7 @@ function createDom() {
 
 function loadVisualModule(fetchImpl) {
   const appJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');
-  const start = appJs.indexOf('/** Tên file tải: `<subject>-<visualId>.png`');
+  const start = appJs.indexOf('// === VISUAL_DOWNLOAD_BLOCK_START ===');
   const end = appJs.indexOf('function renderAnswerBlock(container, rawText) {');
   assert.ok(start !== -1 && end !== -1 && end > start, 'không trích được khối hàm hình minh hoạ trong app.js');
   const src = appJs.slice(start, end);

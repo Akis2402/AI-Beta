@@ -8,6 +8,12 @@
 
 const assert = require('assert');
 
+// PNG 1x1 THẬT (đúng magic bytes) — đợt audit 2 đã siết verifyImageBytes() không còn tin claimedMime
+// khi chữ ký byte không khớp, nên fixture giả 'AAAA'/'BBBB' (không phải ảnh thật) giờ bị từ chối
+// ĐÚNG như thiết kế. Test phải mô phỏng response CÓ ảnh thật để kiểm đúng hành vi failover, không
+// phải hành vi validate binary (đã có test riêng ở image-provider-contract.test.js).
+const REAL_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
 process.env.GEMINI_IMAGE_API_KEY = 'test-gemini-key';
 process.env.OPENAI_IMAGE_API_KEY = 'test-openai-key';
 delete require.cache[require.resolve('../server/utils/visual/imageGenerationClient.js')];
@@ -35,8 +41,8 @@ function mockFetch(plan) {
     return {
       ok: true, status: 200,
       json: async () => (host === 'gemini'
-        ? { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'AAAA' } }] } }] }
-        : { data: [{ b64_json: 'BBBB' }] })
+        ? { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: REAL_PNG_B64 } }] } }] }
+        : { data: [{ b64_json: REAL_PNG_B64 }] })
     };
   };
 }

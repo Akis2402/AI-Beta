@@ -25,9 +25,25 @@ const B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwA
 const PROMPT = 'Vẽ sơ đồ cấu tạo tế bào thực vật, ghi rõ nhãn thành tế bào và lục lạp.';
 const realFetch = global.fetch;
 
-function respond(host, body, status = 200) {
+// Ảnh PNG thật dùng làm nội dung khi mock trả lời lệnh fetch THỨ HAI (đợt audit 2, mục 3/8):
+// callOpenAICompatibleImage() nay tự tải URL về để validate byte thật trước khi báo ok:true, nên
+// mock phải phục vụ ĐÚNG 2 chặng: (1) gọi generation endpoint trả JSON có field `url`, (2) gọi
+// chính URL đó để lấy binary — 2 chặng KHÁC nhau, không được gộp làm một.
+function respond(host, body, status = 200, imageUrlBody = null) {
   global.fetch = async (url) => {
-    const isGemini = String(url).includes('googleapis');
+    const u = String(url);
+    if (/^https:\/\/cdn\.example\.com\//.test(u)) {
+      // Chặng 2: tải nội dung URL ảnh về để validate — mặc định trả PNG thật hợp lệ, trừ khi test
+      // truyền `imageUrlBody` để mô phỏng URL hỏng/hết hạn (trang HTML/JSON lỗi).
+      if (imageUrlBody) return imageUrlBody;
+      const buf = Buffer.from(B64, 'base64');
+      return {
+        ok: true, status: 200,
+        headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'image/png' : (k.toLowerCase() === 'content-length' ? String(buf.length) : null)) },
+        arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+      };
+    }
+    const isGemini = u.includes('googleapis');
     if ((host === 'gemini') !== isGemini) {
       // Provider còn lại luôn lỗi 5xx -> cô lập đúng nhánh đang kiểm.
       return { ok: false, status: 500, text: async () => '', json: async () => ({}) };
@@ -96,6 +112,25 @@ const FAIL_SHAPES = [
       assert.strictEqual(typeof r.ok, 'boolean', 'không bao giờ throw: ' + JSON.stringify(g));
       assert.strictEqual(r.ok, false);
     }
+  });
+
+  await test('MỤC 3/8 (đợt audit 2): URL https hợp lệ cú pháp nhưng nội dung là HTML -> invalid_image_bytes, KHÔNG coi là thành công', async () => {
+    respond('openai', { data: [{ url: 'https://cdn.example.com/expired.png' }] }, 200, {
+      ok: true, status: 200,
+      headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'text/html' : null) },
+      arrayBuffer: async () => Buffer.from('<html>URL hết hạn</html>').buffer
+    });
+    const r = await client.generateImage({ prompt: PROMPT });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.reason, 'invalid_image_bytes');
+  });
+
+  await test('MỤC 3/8: URL https trả binary ảnh thật -> ok:true VÀ urlVerified:true (không chỉ tin cú pháp URL)', async () => {
+    respond('openai', { data: [{ url: 'https://cdn.example.com/real.png' }] });
+    const r = await client.generateImage({ prompt: PROMPT });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.urlVerified, true);
+    assert.strictEqual(r.verifiedMime, 'image/png');
   });
 
   await test('JSON hỏng (provider trả HTML/mã lỗi) -> malformed_response, KHÔNG throw', async () => {

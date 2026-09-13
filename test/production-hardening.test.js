@@ -42,26 +42,57 @@ function makeFakeTarget({ id, providerKey, shouldFail = false, callCounter, dela
 }
 
 (async () => {
-  console.log('\n== 1. Cross-check bị chặn trần số AI call (KHÔNG tỷ lệ thuận số target) ==');
-  for (const n of [10, 20, 50]) {
-    await test(`${n} execution target -> tổng số call cross-check vẫn bị chặn trần`, async () => {
+  console.log('\n== 1. Cross-check ADAPTIVE: participant count theo pool THẬT, KHÔNG hard-cap ở 3 ==');
+  // FIX (audit): TRƯỚC ĐÂY test này khẳng định "callCounter.count <= 2*3+1" là ĐÚNG — đó chính là
+  // hidden cap gây bug "10 AI khỏe chỉ chạy 2-3". NAY: participant count phải scale theo pool, chỉ
+  // chặn bởi CROSS_CHECK_SAFETY_CAP (trần AN TOÀN thật, không phải "luôn 3").
+  for (const n of [2, 5, 10, 20]) {
+    await test(`${n} execution target khỏe -> round 1 gọi đúng min(pool, SAFETY_CAP), KHÔNG dừng ở 3`, async () => {
       const aiProviders = freshAiProviders();
       const callCounter = { count: 0 };
       // Trộn nhiều provider khác nhau để pickDiverseCandidates có cơ hội thể hiện ưu tiên đa dạng.
       const targets = Array.from({ length: n }, (_, i) =>
         makeFakeTarget({ id: `t${i}`, providerKey: `provider${i % 5}`, callCounter })
       );
-      const { candidates } = await aiProviders.gatherCrossCheckCandidates(targets, {
+      const { candidates, accounting } = await aiProviders.gatherCrossCheckCandidates(targets, {
         system: 's', variantSystem: 's2', messages: [], maxTokens: 100, requestId: 'r1'
       });
-      assert.ok(candidates.length >= 1, 'phải có ít nhất 1 candidate thành công');
-      const maxAllowed = 2 * aiProviders.CROSS_CHECK_MAX_CANDIDATES + 1; // vòng 1 + retry + survivor
-      assert.ok(
-        callCounter.count <= maxAllowed,
-        `số call thực tế (${callCounter.count}) phải <= ${maxAllowed}, không tỷ lệ thuận ${n} target`
-      );
+      const expected = Math.min(n, aiProviders.CROSS_CHECK_SAFETY_CAP);
+      assert.strictEqual(callCounter.count, expected,
+        `${n} target khỏe -> phải gọi đúng ${expected} lệnh (min(pool, safety cap)), thấy ${callCounter.count}`);
+      assert.strictEqual(candidates.length, expected, 'mọi target khỏe đều thành công -> đủ số candidate tương ứng');
+      assert.strictEqual(accounting.eligibleTargets, n);
+      assert.strictEqual(accounting.selectedTargets, expected);
+      assert.strictEqual(accounting.successfulTargets, expected);
+      assert.strictEqual(accounting.degraded, false);
     });
   }
+
+  await test('NO HIDDEN CAP (mục 23): 10 target khỏe, budget/deadline đủ -> startedTargets PHẢI > 3', async () => {
+    const aiProviders = freshAiProviders();
+    const callCounter = { count: 0 };
+    const targets = Array.from({ length: 10 }, (_, i) =>
+      makeFakeTarget({ id: `t${i}`, providerKey: `provider${i % 5}`, callCounter }));
+    const { accounting } = await aiProviders.gatherCrossCheckCandidates(targets, {
+      system: 's', variantSystem: 's2', messages: [], maxTokens: 100, requestId: 'r1'
+    });
+    assert.ok(accounting.startedTargets > 3,
+      `startedTargets (${accounting.startedTargets}) phải > 3 khi có 10 target khỏe và đủ budget/deadline — không được giữ hidden cap ở 3`);
+  });
+
+  await test('CROSS_CHECK_SAFETY_CAP vẫn là trần AN TOÀN tuyệt đối khi pool cực lớn (chống phá rate-limit/chi phí)', async () => {
+    const aiProviders = freshAiProviders();
+    const callCounter = { count: 0 };
+    const targets = Array.from({ length: 50 }, (_, i) =>
+      makeFakeTarget({ id: `t${i}`, providerKey: `provider${i % 5}`, callCounter }));
+    const { accounting } = await aiProviders.gatherCrossCheckCandidates(targets, {
+      system: 's', variantSystem: 's2', messages: [], maxTokens: 100, requestId: 'r1'
+    });
+    assert.ok(callCounter.count <= aiProviders.CROSS_CHECK_SAFETY_CAP,
+      `50 target vẫn phải bị chặn bởi safety cap (${aiProviders.CROSS_CHECK_SAFETY_CAP}), thấy ${callCounter.count} lệnh gọi`);
+    assert.strictEqual(accounting.excludedForSafetyCap, 50 - aiProviders.CROSS_CHECK_SAFETY_CAP,
+      'phải báo cáo đúng số target eligible bị loại vì safety cap (không âm thầm co lại)');
+  });
 
   await test('pickDiverseCandidates ưu tiên đa dạng provider trước khi lặp lại cùng 1 hãng', async () => {
     const aiProviders = freshAiProviders();

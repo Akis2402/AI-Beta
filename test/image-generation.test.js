@@ -43,7 +43,20 @@ async function withFetch(stub, fn) {
   try { return await fn(); } finally { global.fetch = real; }
 }
 
-const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUg==';
+/**
+ * withFetchRouted() — MỤC 3/8 (đợt audit 2): callOpenAICompatibleImage() nay tự fetch LẦN 2 để tải
+ * chính URL ảnh về validate byte thật. `stub` cũ chỉ phục vụ 1 lệnh gọi (generation endpoint); dùng
+ * hàm này khi test cần phân biệt lệnh gọi endpoint sinh ảnh với lệnh gọi tải URL ảnh kết quả.
+ * @param {Function} genStub stub cho POST tới endpoint /images/generations
+ * @param {Function} imgStub stub cho GET tới chính URL ảnh trả về (Response có .arrayBuffer()/.headers.get())
+ */
+async function withFetchRouted(genStub, imgStub, fn) {
+  const real = global.fetch;
+  global.fetch = async (url, opts) => (opts && opts.method === 'POST' ? genStub(url, opts) : imgStub(url));
+  try { return await fn(); } finally { global.fetch = real; }
+}
+
+const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 (async function main() {
   // ---------- 1. Không cấu hình provider = KHÔNG PHẢI lỗi ----------
@@ -117,13 +130,20 @@ const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUg==';
     } finally { restore(); }
   });
 
-  await atest('6. OpenAI Images: url -> format image_url', async () => {
+  await atest('6. OpenAI Images: url -> format image_url (đã tự tải về validate byte thật, mục 3/8)', async () => {
     const { mod, restore } = loadClient({ OPENAI_IMAGE_API_KEY: 'k' });
     try {
-      const r = await withFetch(async () => ({ ok: true, status: 200, json: async () => ({ data: [{ url: 'https://example.com/i.png' }] }) }),
+      const r = await withFetchRouted(
+        async () => ({ ok: true, status: 200, json: async () => ({ data: [{ url: 'https://example.com/i.png' }] }) }),
+        async () => ({
+          ok: true, status: 200,
+          headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'image/png' : null) },
+          arrayBuffer: async () => { const b = Buffer.from(PNG_B64, 'base64'); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); }
+        }),
         () => mod.generateImage({ prompt: 'sơ đồ tế bào' }));
       assert.strictEqual(r.ok, true);
       assert.strictEqual(r.format, 'image_url');
+      assert.strictEqual(r.urlVerified, true, 'MỤC 3/8: phải xác nhận đã tải thật, không chỉ tin cú pháp URL');
     } finally { restore(); }
   });
 
