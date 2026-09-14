@@ -305,5 +305,58 @@ test('D5. visualPipeline không gửi caption trùng y hệt title xuống clien
     'thiếu guard chặn caption trùng title');
 });
 
+// ============================================================================================
+console.log('\n== (E) Checklist tự-kiểm ĐỢT 2 — nguyên văn ảnh "tạo hình ảnh cấu tạo cơ thể người" ==');
+// LỚP 5/6/7 mới: "Checked." đứng riêng, "5. **Final Output Generation (", mảnh câu hỏi bị ngắt dòng
+// giữa chừng không còn bullet/opener. Trích NGUYÊN VĂN từ ảnh chụp màn hình mới nhất người dùng gửi.
+const SELF_CHECK_LEAKED_2 = [
+  'Checked.',
+  '* No extra text? Checked.',
+  '5. **Final Output Generation ('
+];
+// Mảnh CHỈ được coi là nháp khi đứng NGAY SAU 1 dòng đã bị loại — kiểm bằng stripMetaPlanning, không
+// phải isMetaPlanningLine đơn lẻ (đúng thiết kế cascading LỚP 7).
+const CONTINUATION_FRAGMENT = ', no steps, no headers? Yes (ensure no "Giới thiệu:" or "Thành phần:" headers).';
+
+const SELF_CHECK_LEGIT_2 = [
+  'Checked the derivative and it equals 2x.',           // "Checked" là ĐỘNG TỪ có tân ngữ thật -> giữ
+  '5. **Bước cuối: Kết luận và đáp số**',                // tiêu đề bước giải bài thật -> giữ
+  '- Output của mạch là 5V khi đóng công tắc.'           // "Output" là nội dung kỹ thuật thật -> giữ
+];
+
+test('E1. mọi dòng nháp mới (Checked. / numbered header) đều bị nhận diện', () => {
+  SELF_CHECK_LEAKED_2.forEach((l) => assert.ok(meta.isMetaPlanningLine(l), `KHÔNG bắt được: "${l}"`));
+});
+
+test('E2. KHÔNG bắt nhầm câu trả lời thật dùng chung từ khoá (Checked/Output/numbered header)', () => {
+  SELF_CHECK_LEGIT_2.forEach((l) => assert.ok(!meta.isMetaPlanningLine(l), `bắt NHẦM: "${l}"`));
+});
+
+test('E3. mảnh câu hỏi bị ngắt dòng CHỈ bị loại khi cascading ngay sau dòng nháp', () => {
+  assert.strictEqual(meta.isMetaPlanningLine(CONTINUATION_FRAGMENT), false,
+    'đứng ĐƠN LẺ không được coi là nháp (tránh dương tính giả trên câu văn thật bắt đầu bằng thường)');
+  const cascaded = meta.stripMetaPlanning([SELF_CHECK_LEAKED_2[1], CONTINUATION_FRAGMENT, 'Nội dung thật.'].join('\n'));
+  assert.ok(!cascaded.includes('no steps, no headers'), 'mảnh vỡ vẫn lọt ra khi cascading sau dòng nháp');
+  assert.ok(cascaded.includes('Nội dung thật.'), 'mất nội dung thật phía sau');
+});
+
+test('E4. stripMetaPlanning trên NGUYÊN VĂN toàn bộ ảnh chụp -> chỉ còn nội dung thật', () => {
+  const input = [
+    SELF_CHECK_LEAKED_2[0],
+    '* No titles/headers? Yes.',
+    SELF_CHECK_LEAKED_2[1],
+    SELF_CHECK_LEAKED_2[2],
+    CONTINUATION_FRAGMENT,
+    'Cơ thể người gồm nhiều hệ cơ quan phối hợp hoạt động.'
+  ].join('\n');
+  const out = meta.stripMetaPlanning(input);
+  assert.strictEqual(out, 'Cơ thể người gồm nhiều hệ cơ quan phối hợp hoạt động.',
+    `còn sót nháp: "${out}"`);
+});
+
+test('E5. response CHỈ CÓ nháp mới (không mảnh cascading) -> coi như rỗng để kích hoạt failover', () => {
+  assert.strictEqual(meta.isOnlyMetaPlanning(SELF_CHECK_LEAKED_2.join('\n')), true);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exitCode = 1;
