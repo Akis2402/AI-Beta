@@ -317,7 +317,7 @@ console.log('\n== Failover qua N provider (case 18) ==');
         if (calls.length <= 2) return { ok: false, status: 503, json: async () => ({}), text: async () => '' };
         return {
           ok: true, status: 200,
-          json: async () => ({ data: [{ b64_json: 'aGVsbG8=' }] }),
+          json: async () => ({ data: [{ b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' }] }),
           text: async () => ''
         };
       };
@@ -372,7 +372,7 @@ console.log('\n== Failover qua N provider (case 18) ==');
     await withEnv({ OPENAI_API_KEY: 'b' }, async (c) => {
       const realFetch = global.fetch;
       global.fetch = async () => ({
-        ok: true, status: 200, json: async () => ({ data: [{ b64_json: 'aGVsbG8=' }] }), text: async () => ''
+        ok: true, status: 200, json: async () => ({ data: [{ b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' }] }), text: async () => ''
       });
       try {
         const r = await c.generateImage({ prompt: 'sơ đồ minh hoạ cấu tạo tế bào thực vật' });
@@ -386,10 +386,22 @@ console.log('\n== Failover qua N provider (case 18) ==');
   await atest('9. Thành công URL -> image_url (frontend sẽ tải qua proxy /api/visual/download)', async () => {
     await withEnv({ OPENAI_API_KEY: 'b' }, async (c) => {
       const realFetch = global.fetch;
-      global.fetch = async () => ({
-        ok: true, status: 200,
-        json: async () => ({ data: [{ url: 'https://cdn.openai.com/a.png' }] }), text: async () => ''
-      });
+      let calls = 0;
+      global.fetch = async () => {
+        calls += 1;
+        if (calls === 1) {
+          return { ok: true, status: 200, json: async () => ({ data: [{ url: 'https://cdn.openai.com/a.png' }] }), text: async () => '' };
+        }
+        // MỤC 3/8: sau khi provider trả URL, client tự tải về validate byte thật trước khi báo ok.
+        return {
+          ok: true, status: 200,
+          headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? 'image/png' : null) },
+          arrayBuffer: async () => {
+            const b = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+            return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+          }
+        };
+      };
       try {
         const r = await c.generateImage({ prompt: 'sơ đồ minh hoạ cấu tạo tế bào thực vật' });
         assert.strictEqual(r.ok, true);
@@ -448,8 +460,11 @@ console.log('\n== Failover qua N provider (case 18) ==');
     assert.ok(/degrade === 'low' && !highNeed/.test(src),
       'gate low phải phân biệt theo necessity, không chặn cứng mọi mức');
     assert.ok(/necessityNow === 'NECESSARY' \|\| necessityNow === 'USER_REQUESTED'/.test(src));
-    assert.ok(/degrade === 'low' \? '512x512' : '1024x1024'/.test(src),
-      'mức low phải hạ kích thước thay vì bỏ hẳn ảnh');
+    assert.ok(/sizeForRequest\(\{ aspectRatio: spec\.aspectRatio, quality: 'standard', degrade \}\)/.test(src),
+      'mức low phải hạ kích thước (qua quality mode) thay vì bỏ hẳn ảnh');
+    const imgClient = require('../server/utils/visual/imageGenerationClient');
+    assert.ok(imgClient.sizeForRequest({ aspectRatio: '1:1', quality: 'standard', degrade: 'low' }).size !== '1024x1024',
+      'degrade low phải cho size nhỏ hơn standard');
     // emergency KHÔNG đổi: vẫn bỏ hình hoàn toàn.
     assert.ok(/degrade === 'emergency'/.test(src) && /deferred_deadline/.test(src));
   });
