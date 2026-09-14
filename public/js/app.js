@@ -79,7 +79,8 @@ async function ensureDocx() {
 }
 
 const state = {
-  docs: [],              // {id, name, ext, chunks:[{id,text,garbled}]} — mọi nguồn đã tải lên đều tự động được dùng khi trả lời, không cần bật/tắt thủ công
+  docs: [],              // {id, name, ext, status:'loading'|'ready'|'error', chunks:[{id,text,garbled}]} — mọi nguồn đã tải lên đều tự động được dùng khi trả lời, không cần bật/tắt thủ công
+  docParsePromises: [],  // Promise[] các file đang được đọc dở — waitForPendingDocs() chờ hết trước khi lấy contexts cho câu hỏi hiện tại (fix race gửi câu hỏi trước khi đọc file xong)
   rules: [],
   // Ghi chú KHÔNG lưu ở mảng riêng nữa — mỗi ghi chú gắn trực tiếp vào tin nhắn AI tương ứng
   // (msg.userNote / msg.userNoteAt trong conversations bên dưới), nhờ vậy luôn đồng bộ 1-1 với
@@ -751,6 +752,34 @@ function chunkText(text, size = 900) {
   for (let i = 0; i < clean.length; i += size) chunks.push(clean.slice(i, i + size));
   return chunks.map((t, idx) => ({ id: idx + 1, text: t, garbled: garbledRatio(t) > 0.3 }));
 }
+// FIX: PDF "chỉ ảnh" (bài scan/chụp rồi gộp vào PDF, không có text layer) — trước đây parsePDF() chỉ
+// gọi getTextContent() nên trả về chuỗi RỖNG, doc vẫn được đánh dấu 'ready' nhưng không có nội dung
+// thật nào để trích dẫn (giống hệt triệu chứng ở bug race điều kiện trước, nhưng lần này không phải
+// do đọc dở mà do bản chất file không có text để đọc). NAY: nếu lượng text trích được quá ít so với
+// số trang (heuristic: trung bình < PDF_TEXT_MIN_CHARS_PER_PAGE ký tự/trang), coi là "PDF chỉ ảnh" —
+// tự động render từng trang (giới hạn PDF_MAX_RASTER_PAGES trang đầu) thành ảnh PNG rồi gửi thẳng cho
+// model đọc bằng vision, y hệt cách 1 ảnh chụp bài đính kèm được xử lý.
+const PDF_TEXT_MIN_CHARS_PER_PAGE = 15;
+const PDF_MAX_RASTER_PAGES = 6;
+const PDF_RASTER_MAX_DIM = 1400; // px — đủ nét để model đọc chữ nhỏ, vẫn giữ base64 gọn
+
+async function rasterizePdfPage(pdf, pageNum) {
+  const page = await pdf.getPage(pageNum);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const scale = Math.min(2, PDF_RASTER_MAX_DIM / Math.max(baseViewport.width, baseViewport.height));
+  const viewport = page.getViewport({ scale: Math.max(scale, 0.5) });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  const ctx = canvas.getContext('2d');
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  const dataUrl = canvas.toDataURL('image/png');
+  const m = dataUrl.match(/^data:(.*?);base64,(.*)$/);
+  canvas.width = 0; canvas.height = 0; // giải phóng bộ nhớ canvas ngay, không chờ GC
+  if (!m) return null;
+  return { mediaType: m[1], base64: m[2] };
+}
+
 async function parsePDF(file) {
   try { await ensurePdfJs(); } catch (e) { /* rơi xuống check window.pdfjsLib bên dưới để báo lỗi đúng nội dung */ }
   if (!window.pdfjsLib) throw new Error('Không tải được thư viện đọc PDF (pdf.js) — kiểm tra kết nối mạng hoặc trình chặn quảng cáo rồi thử lại.');
@@ -770,8 +799,23 @@ async function parsePDF(file) {
     const content = await page.getTextContent();
     full += content.items.map((it) => it.str).join(' ') + '\n';
   }
-  return full;
+  const meaningfulLen = full.replace(/\s+/g, '').length;
+  const isImageOnly = meaningfulLen < pdf.numPages * PDF_TEXT_MIN_CHARS_PER_PAGE;
+  if (!isImageOnly) return { text: full, pageImages: [] };
+
+  // PDF chỉ ảnh: render tối đa PDF_MAX_RASTER_PAGES trang ĐẦU (đủ cho hầu hết đề bài/1 nguồn — nhiều
+  // hơn nữa sẽ quá tốn token cho 1 lượt hỏi). Lỗi ở 1 trang không chặn các trang còn lại.
+  const pageCount = Math.min(pdf.numPages, PDF_MAX_RASTER_PAGES);
+  const pageImages = [];
+  for (let p = 1; p <= pageCount; p++) {
+    try {
+      const img = await rasterizePdfPage(pdf, p);
+      if (img) pageImages.push(img);
+    } catch (e) { console.error('[pdf] render trang ' + p + ' thất bại:', e); }
+  }
+  return { text: '', pageImages, isImageOnly: true, totalPages: pdf.numPages, renderedPages: pageImages.length };
 }
+
 async function parseDocx(file) {
   try { await ensureMammoth(); } catch (e) { /* rơi xuống check window.mammoth bên dưới để báo lỗi đúng nội dung */ }
   if (!window.mammoth) throw new Error('Không tải được thư viện đọc DOCX (mammoth.js) — kiểm tra kết nối mạng hoặc trình chặn quảng cáo rồi thử lại.');
@@ -824,6 +868,15 @@ function renderSources() {
   if (window.docStore) window.docStore.saveAll(state.docs);
 }
 
+// FIX (race: gửi câu hỏi TRƯỚC KHI file đọc xong): handleFiles() trước đây gán ngay chunk placeholder
+// "⏳ Đang đọc…" vào doc.chunks rồi mới await parse — nếu người dùng bấm gửi câu hỏi trong lúc file
+// còn đang đọc (rất dễ xảy ra vì họ vừa upload xong là gõ luôn câu hỏi), retrieveContext() không có
+// cách nào phân biệt được đây là placeholder hay nội dung thật, nên nó gửi thẳng CHUỖI "⏳ Đang đọc…"
+// cho AI làm "nguồn tài liệu" — model nhận đúng như vậy nên trả lời "không nhận được nội dung trích
+// dẫn" dù người dùng RÕ RÀNG đã tải nguồn lên trước đó. FIX: đánh dấu doc.status ('loading'/'ready'/
+// 'error') và lưu Promise đọc file vào state.docParsePromises để nơi gửi câu hỏi có thể await xong hết
+// trước khi lấy contexts (xem waitForPendingDocs()); đồng thời retrieveContext() tự loại doc chưa
+// 'ready' để không bao giờ lọt placeholder vào nguồn gửi AI dù lỡ quên await ở đâu đó.
 async function handleFiles(files) {
   // FIX P0: chờ storage khởi tạo xong (migration/load từ IndexedDB) trước khi đụng vào state.docs
   // và sourceCounter — tránh mất document vừa upload nếu người dùng thao tác quá nhanh lúc app
@@ -831,21 +884,72 @@ async function handleFiles(files) {
   if (state.docsReadyPromise) { try { await state.docsReadyPromise; } catch (e) { /* đã tự xử lý lỗi trong loadAll() */ } }
   for (const file of files) {
     const ext = file.name.split('.').pop().toLowerCase();
-    const doc = { id: ++sourceCounter, name: file.name, ext, chunks: [{ id: 1, text: '⏳ Đang đọc…' }] };
+    const doc = { id: ++sourceCounter, name: file.name, ext, status: 'loading', chunks: [{ id: 1, text: '⏳ Đang đọc…' }] };
     state.docs.push(doc);
     renderSources();
-    try {
-      let text = '';
-      if (ext === 'pdf') text = await parsePDF(file);
-      else if (ext === 'docx') text = await parseDocx(file);
-      else text = await parseTxt(file);
-      doc.chunks = chunkText(text);
-    } catch (e) {
-      doc.chunks = [{ id: 1, text: '⚠️ Không đọc được nội dung file này.' }];
-      console.error(e);
-    }
-    renderSources();
+    const parsePromise = (async () => {
+      try {
+        if (ext === 'pdf') {
+          const result = await parsePDF(file);
+          if (result.isImageOnly) {
+            doc.pageImages = result.pageImages;
+            doc.sourceType = 'image-pdf';
+            const note = result.pageImages.length
+              ? `📄 PDF này là bản scan/ảnh chụp (không có chữ để trích) — đã gửi ${result.renderedPages}/${result.totalPages} trang đầu dưới dạng hình ảnh để AI đọc trực tiếp.`
+              : '⚠️ PDF này là bản scan/ảnh chụp nhưng không render được trang nào — vui lòng thử lại hoặc đổi file khác.';
+            doc.chunks = [{ id: 1, text: note, garbled: false }];
+          } else {
+            doc.chunks = chunkText(result.text);
+          }
+        } else {
+          let text = '';
+          if (ext === 'docx') text = await parseDocx(file);
+          else text = await parseTxt(file);
+          doc.chunks = chunkText(text);
+        }
+        doc.status = 'ready';
+      } catch (e) {
+        doc.chunks = [{ id: 1, text: '⚠️ Không đọc được nội dung file này.' }];
+        doc.status = 'error';
+        console.error(e);
+      }
+      renderSources();
+    })();
+    state.docParsePromises.push(parsePromise);
+    // Tự dọn khỏi mảng theo dõi khi xong (thành công lẫn lỗi), tránh mảng phình to vô hạn qua nhiều
+    // lượt upload trong 1 phiên — waitForPendingDocs() chỉ cần quan tâm các Promise CHƯA settle.
+    parsePromise.finally(() => {
+      const idx = state.docParsePromises.indexOf(parsePromise);
+      if (idx !== -1) state.docParsePromises.splice(idx, 1);
+    });
   }
+  // Không await từng parsePromise ở đây (giữ hành vi cũ: nhiều file đọc song song, UI cập nhật dần
+  // từng file một qua renderSources() bên trong closure) — nơi GỬI câu hỏi mới là nơi cần chờ, qua
+  // waitForPendingDocs().
+}
+
+/** Chờ mọi file đang đọc dở (nếu có) xong hẳn trước khi lấy nguồn cho câu hỏi hiện tại. Dùng
+ * allSettled để 1 file lỗi không chặn các file khác/không làm treo việc gửi câu hỏi. */
+async function waitForPendingDocs() {
+  if (!state.docParsePromises.length) return;
+  await Promise.allSettled(state.docParsePromises.slice());
+}
+
+/** Gom ảnh trang PDF-chỉ-ảnh từ mọi doc 'ready' để gửi kèm request (xem parsePDF()/handleFiles()).
+ * Giới hạn tổng số ảnh gửi đi (khớp MAX_SOURCE_IMAGES ở server) — PDF nhiều trang/nhiều nguồn cùng
+ * lúc vẫn không đội token quá đà cho 1 lượt hỏi. */
+const MAX_TOTAL_SOURCE_IMAGES = 6;
+function collectSourceImages() {
+  const out = [];
+  for (const doc of state.docs) {
+    if (doc.status && doc.status !== 'ready') continue;
+    if (doc.sourceType !== 'image-pdf' || !doc.pageImages || !doc.pageImages.length) continue;
+    for (let i = 0; i < doc.pageImages.length && out.length < MAX_TOTAL_SOURCE_IMAGES; i++) {
+      out.push({ ...doc.pageImages[i], doc: doc.name, page: i + 1 });
+    }
+    if (out.length >= MAX_TOTAL_SOURCE_IMAGES) break;
+  }
+  return out;
 }
 el('addSourceBtn').onclick = () => el('fileInput').click();
 el('dropHint').onclick = () => el('fileInput').click();
@@ -1148,7 +1252,15 @@ function retrieveContext(query, limit = 4) {
   const qWords = query.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
   // Mọi nguồn đã tải lên đều tự động tham gia truy hồi — không lọc theo cờ "included" nữa (đã bỏ
   // cơ chế tick chọn thủ công); muốn loại 1 nguồn thì xóa hẳn nó khỏi danh sách.
-  const activeDocs = state.docs;
+  // Chỉ dùng doc đã đọc XONG THẬT ('ready') — bỏ qua doc còn 'loading' (chunk vẫn là placeholder "⏳
+  // Đang đọc…") hoặc 'error' (chunk là thông báo lỗi), nếu không 2 loại chunk này có thể bị gửi thẳng
+  // cho AI như thể là nội dung nguồn thật (xem comment FIX ở handleFiles()). Doc cũ tải từ trước khi
+  // có field `status` (khôi phục từ IndexedDB) không có `status` — coi như 'ready' để không loại oan.
+  // Doc 'image-pdf' (PDF chỉ ảnh, không có text thật) cũng bị loại khỏi truy hồi TEXT ở đây — nội
+  // dung của nó được gửi cho AI qua ảnh (xem collectSourceImages()), không qua trích dẫn [n] theo
+  // đoạn text như các nguồn khác, nên không nên lọt vào danh sách "contexts" (chunk của nó chỉ là 1
+  // câu ghi chú, không phải nội dung thật, đưa vào contexts sẽ khiến model trích dẫn nhầm câu ghi chú).
+  const activeDocs = state.docs.filter((doc) => (!doc.status || doc.status === 'ready') && doc.sourceType !== 'image-pdf');
   if (activeDocs.length === 0) return [];
   const allChunks = [];
   activeDocs.forEach((doc) => {
@@ -3487,6 +3599,7 @@ async function sendMessage() {
     return;
   }
 
+  await waitForPendingDocs(); // fix: đừng lấy nguồn khi file vừa upload còn đang đọc dở
   const contexts = retrieveContext(query, 4);
   // imageId gắn thêm vào chính aiMsgObj (không chỉ userMsgObj) — để fetchDetail()/renderStoredAiMessage()
   // sau F5 tra được ảnh cần khôi phục ngay từ message AI mà không phải dò ngược message user liền trước.
@@ -3521,6 +3634,7 @@ async function sendMessage() {
     const data = await streamViaProviderRouter('/api/chat', {
       query, deepThinking: state.deepThinking, crossCheck: state.crossCheck, stage: 'approach',
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
+      sourceImages: collectSourceImages(),
       rules: state.rules, contexts, settings: settingsSnapshot, history: state.history
     }, {
       onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
@@ -3652,6 +3766,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
     const data = await streamViaProviderRouter('/api/chat', {
       query: msgObj.query, deepThinking, crossCheck, stage: 'detail', approachText: msgObj.approach,
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
+      sourceImages: collectSourceImages(),
       rules: state.rules, contexts: msgObj.contexts, settings: settingsSnapshot, history: state.history
     }, {
       onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
@@ -3731,6 +3846,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
  * trả lời đã giải).
  */
 async function handleOutlineOnlyTurn(query, conv) {
+  await waitForPendingDocs(); // fix: đừng lấy nguồn khi file vừa upload còn đang đọc dở
   const contexts = retrieveContext(query, 4);
   const aiMsgObj = { id: uid(), role: 'ai', query, approach: '', detail: null, contexts: [], crossChecked: false, outlineSpec: null };
   const aiRow = addAiMsg('Đề cương');
@@ -3744,7 +3860,7 @@ async function handleOutlineOnlyTurn(query, conv) {
     const sourceContent = contexts.length
       ? query + '\n\nNguồn tài liệu liên quan đã nạp:\n' + contexts.map((c, i) => `[${i + 1}] (${c.doc}) ${c.text}`).join('\n')
       : query;
-    const spec = await apiPost('/api/generate/outline', { content: sourceContent, includeExercises });
+    const spec = await apiPost('/api/generate/outline', { content: sourceContent, includeExercises, sourceImages: collectSourceImages() });
 
     aiMsgObj.outlineSpec = spec;
     aiMsgObj.approach = outlineSpecToPlainText(spec); // dùng làm ngữ cảnh (state.history) cho câu hỏi tiếp theo
@@ -4809,6 +4925,7 @@ function isMindmapRequest(text) {
 }
 
 async function handleMindmapOnlyTurn(query, conv) {
+  await waitForPendingDocs(); // fix: đừng lấy nguồn khi file vừa upload còn đang đọc dở
   const contexts = retrieveContext(query, 4);
   // mindmapOnly: true đánh dấu đây là tin nhắn CHỈ có mindmap (không có Hướng giải/Lời giải chi
   // tiết riêng) — dùng để renderStoredAiMessage() phân biệt với trường hợp mindmap được vẽ THÊM vào
@@ -4825,7 +4942,7 @@ async function handleMindmapOnlyTurn(query, conv) {
     const sourceContent = contexts.length
       ? query + '\n\nNguồn tài liệu liên quan đã nạp:\n' + contexts.map((c, i) => `[${i + 1}] (${c.doc}) ${c.text}`).join('\n')
       : query;
-    const spec = await apiPost('/api/generate/mindmap', { content: sourceContent });
+    const spec = await apiPost('/api/generate/mindmap', { content: sourceContent, sourceImages: collectSourceImages() });
 
     aiMsgObj.mindmapSpec = spec;
     aiMsgObj.approach = mindmapSpecToPlainText(spec);
