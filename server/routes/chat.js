@@ -972,7 +972,8 @@ router.post('/', async (req, res, next) => {
             hasWebSearch,
             deepThinking: input.deepThinking,
             agreement,
-            subjectId: input.subjectId
+            subjectId: input.subjectId,
+            sourceManifest: input.sourceManifest
           });
 
           sseWrite(res, 'status', { message: agreement ? 'Các hướng giải đã khớp nhau, đang trình bày lại…' : 'Đang tổng hợp lời giải cuối cùng…' });
@@ -1279,7 +1280,8 @@ router.post('/', async (req, res, next) => {
         hasWebSearch,
         deepThinking: input.deepThinking,
         agreement,
-        subjectId: input.subjectId
+        subjectId: input.subjectId,
+        sourceManifest: input.sourceManifest
       });
 
       const initial = await callWithFailover(

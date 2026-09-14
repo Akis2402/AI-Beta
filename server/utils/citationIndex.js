@@ -110,7 +110,12 @@ function buildCitationIndex(contexts) {
       citeNo: c.citeNo,
       originalIndexes: c.originalIndexes || [],
       doc: c.doc || '',
-      id: c.id != null ? c.id : 1
+      id: c.id != null ? c.id : 1,
+      // mục A9: truyền page/startPage/endPage để frontend hiển thị đúng "trang X" trong khối trích
+      // dẫn khi mở lại hội thoại cũ (renderCitations() đọc từ citationMap đã lưu, không suy luận lại).
+      page: c.page != null ? c.page : null,
+      startPage: c.startPage != null ? c.startPage : null,
+      endPage: c.endPage != null ? c.endPage : null
     })),
     validCiteNos: effectiveContexts.map((c) => c.citeNo),
     aliasOf,

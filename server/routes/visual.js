@@ -195,15 +195,25 @@ router.post('/hq', express.json({ limit: '4kb' }), async (req, res) => {
 // MỤC 7 — GET /api/visual/status : DEBUG/OBSERVABILITY AN TOÀN (KHÔNG BAO GIỜ LỘ API KEY)
 // ============================================================================================
 router.get('/status', (req, res) => {
-  const providers = imageClient.listImageProviders().map((p) => ({
-    name: p.name,
-    configured: true,
-    model: p.model,
-    keySource: p.keySource, // 'image_specific' | 'text_reuse' — không phải khóa, chỉ nguồn gốc.
-    capability: 'text-to-image',
-    costClass: p.costClass,
-    status: 'ready'
-  }));
+  const circuits = imageClient.circuitSnapshot();
+  const providers = imageClient.listImageProviders().map((p) => {
+    const c = circuits[p.name];
+    return {
+      name: p.name,
+      configured: true,
+      model: p.model,
+      keySource: p.keySource, // 'image_specific' | 'text_reuse' — không phải khóa, chỉ nguồn gốc.
+      capability: 'text-to-image',
+      costClass: p.costClass,
+      // MỤC XXII/XXIII (đợt audit 6): trạng thái self-healing circuit breaker — 'cooldown' nghĩa là
+      // provider vừa lỗi liên tiếp và đang bị hạ ưu tiên tạm thời, KHÔNG phải bị loại vĩnh viễn.
+      status: imageClient.isCircuitOpen(p.name) ? 'cooldown' : 'ready',
+      circuitState: c ? c.state : 'closed',
+      failureCount: c ? c.consecutiveFailures : 0,
+      lastSuccess: c ? c.lastSuccess : null,
+      lastFailure: c ? c.lastFailure : null
+    };
+  });
   res.json({
     imageGenerationEnabled: imageClient.isConfigured(),
     activeProvider: imageClient.activeProviderName(),

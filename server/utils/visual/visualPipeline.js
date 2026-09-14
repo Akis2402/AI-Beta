@@ -270,7 +270,12 @@ async function runVisualPipeline(args) {
           telemetry.visualError = 'degraded_no_time_for_image';
           continue;
         }
-        const imageSize = degrade === 'low' ? '512x512' : '1024x1024';
+        // PHẦN X/XI (đợt audit 6): size không còn CỐ ĐỊNH vuông ('1024x1024'/'512x512' cho mọi loại
+        // hình) — nay suy ra từ spec.aspectRatio (PHẦN XI) + quality mode (PHẦN X, mặc định
+        // 'standard', hạ về 'fast' khi degrade==='low' — vẫn giữ đúng bất biến cũ: mức low hạ kích
+        // thước chứ không bỏ hẳn ảnh cho necessity cao).
+        const sizing = imageClient.sizeForRequest({ aspectRatio: spec.aspectRatio, quality: 'standard', degrade });
+        const imageSize = sizing.size;
         // B9.15: visual benefit THẤP (OPTIONAL, không phải USER_REQUESTED/NECESSARY) mà chi phí ảnh
         // CAO -> không đốt tiền cho một hình "có cũng được". Yêu cầu tường minh vẫn được ưu tiên,
         // nhưng vẫn chịu deadline/budget guard ở trên (không bypass hoàn toàn).
@@ -286,7 +291,8 @@ async function runVisualPipeline(args) {
         const prompt = specBuilder.buildImagePrompt(spec, { maxChars });
         telemetry.visualPromptTokens = Math.ceil(prompt.length / 3.2);
         const img = await imageClient.generateImage({
-          prompt, signal, size: imageSize, timeoutMs: Math.max(2000, visualDeadlineAt - Date.now()),
+          prompt, signal, size: imageSize, aspectRatio: sizing.aspectRatio, quality: sizing.quality,
+          timeoutMs: Math.max(2000, visualDeadlineAt - Date.now()),
           deadlineAt: visualDeadlineAt // A4: failover sang provider 2 chỉ khi còn đủ thời gian
         });
         telemetry.visualProvidersTried = img.providersTried || [];

@@ -218,7 +218,27 @@ function citeNoRangeLabel(contexts) {
   return nos.map((n) => `[${n}]`).join(', ');
 }
 
-function buildSourcePolicyBlock({ hasContexts, hasWebSearch }) {
+// PHẦN A9: dòng trích đoạn gửi cho model — thêm số trang khi chunk có metadata trang (PDF), dùng
+// CHUNG ở mọi nơi build context block (approach/detail/cache/reconcile) để không lệch định dạng.
+function formatContextLine(c, i) {
+  const num = c.citeNo != null ? c.citeNo : i + 1;
+  const pageLabel = c.page != null
+    ? (c.startPage != null && c.endPage != null && c.startPage !== c.endPage
+      ? `, trang ${c.startPage}-${c.endPage}` : `, trang ${c.page}`)
+    : '';
+  return `[${num}] (Nguồn: ${c.doc}${pageLabel}, đoạn ${c.id}) ${c.text}`;
+}
+
+// PHẦN A3/E: khối SOURCE MANIFEST — chèn NGUYÊN VĂN manifest nhẹ do client gửi (tổng số trang/đoạn/
+// % coverage của từng nguồn), để model KHÔNG BAO GIỜ tự suy luận "chỉ có vài đoạn = đó là toàn bộ
+// tài liệu" (đây là nguyên nhân trực tiếp của lỗi "AI nói chưa cung cấp nội dung" dù nguồn đã có và
+// đã xử lý xong — xem PHẦN E). Không phải nội dung thật — chỉ vài dòng thống kê.
+function buildSourceManifestBlock(sourceManifest) {
+  if (!sourceManifest) return '';
+  return `\n\n${sourceManifest}\nLƯU Ý: bảng trên là THỐNG KÊ COVERAGE của các nguồn đã tải lên — KHÔNG phải toàn bộ nội dung. Nếu số đoạn trích bên dưới có vẻ ít hơn coverage này, đó là do hệ thống đã CHỌN LỌC đoạn liên quan nhất cho câu hỏi hiện tại (không phải do PDF chỉ có từng đó nội dung) — TUYỆT ĐỐI KHÔNG kết luận "chưa cung cấp nội dung"/"tài liệu không có phần này" chỉ vì không thấy trong các đoạn trích hiện tại; nếu nghi ngờ thiếu, hãy nói rõ phần nào chưa chắc thay vì khẳng định tài liệu không có.`;
+}
+
+function buildSourcePolicyBlock({ hasContexts, hasWebSearch, hasSourceNoContext = false }) {
   // MỤC (đợt audit 4, nâng cấp cơ chế trích nguồn) — ROOT CAUSE của "trích nguồn web nhưng không
   // nói rõ nguồn nào": bản CŨ chỉ yêu cầu 1 câu MẪU CỐ ĐỊNH duy nhất ("🌐 Đã tra cứu thêm trên web để
   // bổ sung phần thông tin tài liệu chưa có.") — câu này không hề chứa TÊN trang/nguồn thật, dù model
@@ -232,7 +252,7 @@ function buildSourcePolicyBlock({ hasContexts, hasWebSearch }) {
     : `\n4. Lượt này KHÔNG được cấp công cụ tìm kiếm web — nếu đoạn trích không đủ, giải bằng kiến thức chuẩn, không bịa thêm nguồn/link nào.`;
   return `
 QUY TẮC NGUỒN THAM KHẢO (Sources) — thứ tự ưu tiên BẮT BUỘC, đọc kỹ trước khi trả lời:
-1. ${hasContexts ? 'Có đoạn trích đánh số [1]-[n] bên dưới, trích từ tài liệu người dùng ĐÃ TẢI LÊN — đây là nguồn ƯU TIÊN TUYỆT ĐỐI.' : 'Người dùng CHƯA tải tài liệu nào liên quan cho câu hỏi này.'} ${hasContexts ? 'PHẢI đọc và kiểm tra các đoạn trích này TRƯỚC TIÊN để tìm công thức/định nghĩa/quy tắc/dữ kiện liên quan tới bài, ưu tiên dùng chúng khi phù hợp. Khi dùng đoạn nào làm căn cứ, chèn đúng số [n] ngay sau câu/ý liên quan. Nếu các đoạn trích đã ĐỦ để giải trọn vẹn câu hỏi, CHỈ dùng đúng các đoạn đó làm nguồn — không dùng thêm nguồn nào khác dù có công cụ tìm kiếm web.' : ''}
+1. ${hasContexts ? 'Có đoạn trích đánh số [1]-[n] bên dưới, trích từ tài liệu người dùng ĐÃ TẢI LÊN — đây là nguồn ƯU TIÊN TUYỆT ĐỐI.' : (hasSourceNoContext ? 'Người dùng ĐÃ TẢI tài liệu lên (xem SOURCE MANIFEST bên dưới) nhưng lượt này KHÔNG có đoạn trích cụ thể nào được chọn cho câu hỏi — KHÔNG được kết luận "chưa cung cấp nội dung"/"tài liệu chưa có nội dung cụ thể"; chỉ được nói rõ là chưa xác định được đoạn liên quan, đề nghị người dùng nêu rõ hơn (số bài/trang/mục) hoặc dùng kiến thức chuẩn cho lượt này.' : 'Người dùng CHƯA tải tài liệu nào liên quan cho câu hỏi này.')} ${hasContexts ? 'PHẢI đọc và kiểm tra các đoạn trích này TRƯỚC TIÊN để tìm công thức/định nghĩa/quy tắc/dữ kiện liên quan tới bài, ưu tiên dùng chúng khi phù hợp. Khi dùng đoạn nào làm căn cứ, chèn đúng số [n] ngay sau câu/ý liên quan. Nếu các đoạn trích đã ĐỦ để giải trọn vẹn câu hỏi, CHỈ dùng đúng các đoạn đó làm nguồn — không dùng thêm nguồn nào khác dù có công cụ tìm kiếm web.' : ''}
 2. Nếu có đoạn trích nhưng KHÔNG đoạn nào thực sự liên quan tới câu hỏi này: KHÔNG được ép chèn [n] một cách gượng ép chỉ để có vẻ có nguồn — coi như câu hỏi này không có nguồn tài liệu phù hợp và chuyển sang dùng kiến thức chuẩn (mục 3).
 3. Không có đoạn trích liên quan (hoặc chưa tải tài liệu nào): giải bằng kiến thức chuẩn, KHÔNG chèn [n].${webRule}
 5. TUYỆT ĐỐI KHÔNG BAO GIỜ: tự bịa số [n] không tương ứng đoạn trích thật nào bên dưới; bịa tên tài liệu/website/URL không có thật; hoặc nhắc tới/chèn [n] một nguồn chỉ để câu trả lời "trông có vẻ đáng tin" trong khi thực ra không dùng đoạn đó để giải bài.`;
@@ -377,7 +397,7 @@ function buildChatSystemPrompt(input) {
   return buildChatSystemPromptParts(input).text;
 }
 
-function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null }) {
+function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, sourceManifest = '' }) {
   const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId);
   const drawingNeeded = needsDrawingInstructions({ problemText, approachText, hasImage: !!image });
   let contextBlock = '';
@@ -385,7 +405,12 @@ function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, 
     contextBlock =
       '\n\nTrích đoạn liên quan từ các nguồn đang bật, đánh số ' + citeNoRangeLabel(contexts) +
       ']. Khi dùng thông tin nào làm căn cứ, chèn đúng số [n] ngay sau câu liên quan:\n' +
-      contexts.map((c, i) => `[${c.citeNo != null ? c.citeNo : i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n');
+      contexts.map((c, i) => formatContextLine(c, i)).join('\n---\n') +
+      buildSourceManifestBlock(sourceManifest);
+  } else if (sourceManifest) {
+    // mục PHẦN E, CASE 2 (có source nhưng retrieval chưa tìm được đoạn liên quan): manifest vẫn
+    // chèn để model biết nguồn THẬT SỰ tồn tại và đã xử lý — không được coi như "chưa tải tài liệu".
+    contextBlock = buildSourceManifestBlock(sourceManifest);
   }
 
   const rulesBlock = rules.length
@@ -411,7 +436,7 @@ ${h.summary}
 Diễn đạt lại ngắn gọn đề bài và dữ kiện đã cho (2-4 câu). Nếu đề chưa rõ, nêu giả định hợp lý.
 ${h.approach}
 Nếu đề là bài hình học, chèn hình minh họa NGAY ĐẦU mục này (xem quy tắc bắt buộc bên dưới) trước khi liệt kê gạch đầu dòng. Sau đó liệt kê TỐI ĐA 5 gạch đầu dòng, MỖI gạch đầu dòng CHỈ 1 CÂU NGẮN, KHÔNG câu phụ/diễn giải thêm: công thức/định lý/phương pháp sẽ dùng, thứ tự các bước chính, và điều kiện/lưu ý quan trọng không được bỏ sót (đơn vị, điều kiện xác định, trường hợp đặc biệt...). Ưu tiên GỌN — cắt hết từ thừa, không lặp ý, không giải thích lý do hiển nhiên — nhưng TUYỆT ĐỐI KHÔNG được lược bỏ một bước/điều kiện quan trọng nào chỉ để cho ngắn: gọn về CÂU CHỮ, không gọn về NỘI DUNG khoa học. TUYỆT ĐỐI KHÔNG thực hiện phép tính chi tiết, KHÔNG đưa ra đáp số cuối cùng — chỉ định hướng cách làm để người học có thể tự thử trước.
-${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false })}${drawingNeeded ? buildDrawInstructions({ stageLabel: 'hướng giải' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${contextBlock}`;
+${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false, hasSourceNoContext: !contexts.length && !!sourceManifest })}${drawingNeeded ? buildDrawInstructions({ stageLabel: 'hướng giải' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${contextBlock}`;
   }
 
   // ---------- Giai đoạn "detail" (mặc định): lời giải đầy đủ ----------
@@ -459,7 +484,7 @@ Liệt kê 2-4 gạch đầu dòng NGẮN GỌN về những lỗi HỌC SINH th
 Quy tắc khác:
 1. Không bỏ bước lập luận quan trọng, dựa trên kiến thức chuẩn hoặc dữ liệu cung cấp.
 2. Nếu đề chưa rõ, nêu giả định hợp lý trong "Tóm tắt đề bài" rồi vẫn giải.
-${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false })}${drawingNeeded ? '\n' + buildDrawInstructions({ stageLabel: 'lời giải chi tiết' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${approachBlock}${contextBlock}`;
+${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false, hasSourceNoContext: !contexts.length && !!sourceManifest })}${drawingNeeded ? '\n' + buildDrawInstructions({ stageLabel: 'lời giải chi tiết' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${approachBlock}${contextBlock}`;
 }
 
 // ---------- Đối chiếu đa hướng (dùng khi bật "Suy nghĩ sâu" ở giai đoạn giải chi tiết) ----------
@@ -480,11 +505,12 @@ function buildVariantAddendum() {
  * @returns {{staticPart:string, cachedContextPart:string, dynamicPart:string, text:string}}
  */
 function buildReconcileSystemPromptParts(input) {
-  const { contexts = [] } = input;
+  const { contexts = [], sourceManifest = '' } = input;
   const cachedContextPart = contexts.length
     ? '\n\nTrích đoạn liên quan từ các nguồn tài liệu người dùng cung cấp, đánh số ' + citeNoRangeLabel(contexts) + ':\n' +
-      contexts.map((c, i) => `[${c.citeNo != null ? c.citeNo : i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n')
-    : '';
+      contexts.map((c, i) => formatContextLine(c, i)).join('\n---\n') +
+      buildSourceManifestBlock(sourceManifest)
+    : buildSourceManifestBlock(sourceManifest);
   const dynamicPart = buildReconcileDynamicPart(input);
   return {
     staticPart: STATIC_RECONCILE_PREFIX,
@@ -499,7 +525,7 @@ function buildReconcileSystemPrompt(input) {
   return buildReconcileSystemPromptParts(input).text;
 }
 
-function buildReconcileDynamicPart({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null }) {
+function buildReconcileDynamicPart({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null, sourceManifest = '' }) {
   const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId);
   // Dữ liệu thô của các đoạn trích (nếu có) — tách riêng khỏi phần CHỈ THỊ ưu tiên nguồn (đã gộp
   // chung 1 chỗ ở buildSourcePolicyBlock, dùng đồng nhất với cả 2 giai đoạn approach/detail, để sửa
@@ -508,7 +534,7 @@ function buildReconcileDynamicPart({ candidates, contexts, settings, hasWebSearc
   // hasWebSearch giờ KHÔNG còn đồng nghĩa với "không có tài liệu" (xem chat.js) — công cụ web_search
   // có thể được cấp CÙNG LÚC với đoạn trích tài liệu, dùng để bổ sung phần tài liệu còn thiếu (quy
   // tắc ưu tiên #4 trong buildSourcePolicyBlock) hoặc dùng để xác minh khi hoàn toàn không có tài liệu.
-  const sourcePolicyBlock = buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch });
+  const sourcePolicyBlock = buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch, hasSourceNoContext: !contexts.length && !!sourceManifest });
 
   const distinctModels = new Set(candidates.map((c) => c.label)).size > 1;
   const introLine = distinctModels

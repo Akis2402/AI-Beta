@@ -10,18 +10,34 @@ class ValidationError extends Error {
 const MAX_QUERY = 4000;
 const MAX_RULE_LEN = 300;
 const MAX_RULES = 20;
-const MAX_CONTEXTS = 8;
-const MAX_CONTEXT_LEN = 1200;
+// PHẦN A8 (SOURCE-COMPLETE): TRƯỚC đây MAX_CONTEXTS/MAX_CONTEXT_LEN là 1 CẶP SỐ DUY NHẤT làm luôn cả
+// 2 việc — "chặn payload quá tải" (security) VÀ "AI chỉ được thấy N đoạn trong toàn bộ PDF" (source
+// processing) — ROOT CAUSE khiến dù client đã sửa retrieveContext() gửi nhiều đoạn hơn, server vẫn
+// âm thầm cắt về đúng 8. NAY tách rõ 2 tầng: SECURITY_* là trần THẬT SỰ vì lý do bảo mật/DoS (chặn 1
+// request cố tình gửi hàng chục nghìn context để làm nghẽn server) — đặt CAO hơn hẳn nhu cầu bình
+// thường, không phải "mức nên đạt tới"; nhu cầu SOURCE PROCESSING thật (client giờ có thể gửi hàng
+// chục/hàng trăm đoạn cho 1 PDF dài) được phục vụ TRONG trần security đó, không bị coi là 2 khái
+// niệm trùng nhau nữa.
+const SECURITY_MAX_CONTEXTS = 300; // trần bảo mật cứng — KHÔNG được xuống dưới nhu cầu 1 PDF dài thật
+const SECURITY_MAX_CONTEXT_LEN = 4000; // trần bảo mật/đơn vị 1 đoạn — cao hơn hẳn 1200 cũ để giảm số
+// context bị đánh dấu `truncated` (mục A7: "LOSSLESS FOR EVIDENCE, LOSSY ONLY FOR REDUNDANCY"), vẫn
+// giữ 1 trần hữu hạn để 1 đoạn dị thường không tự nó nuốt hết ngân sách token của cả request.
+// Giữ tên cũ làm alias (tương thích ngược với nơi khác trong code còn require đúng tên cũ).
+const MAX_CONTEXTS = SECURITY_MAX_CONTEXTS;
+const MAX_CONTEXT_LEN = SECURITY_MAX_CONTEXT_LEN;
 const MAX_DOC_NAME = 120;
 const MAX_HISTORY = 20;
 const MAX_HISTORY_ITEM = 4000;
 const MAX_GENERATE_CONTENT = 6000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB sau khi giải mã base64
+const MAX_SOURCE_MANIFEST_LEN = 4000; // mục A3: manifest chỉ là vài dòng thống kê nhẹ, không phải nội dung
 // PDF chỉ chứa ảnh scan (không trích được text): client rasterize từng trang thành ảnh và gửi kèm
 // làm "nguồn" cho model đọc trực tiếp bằng vision, thay vì trích dẫn theo đoạn text như PDF thường.
-// Giới hạn số lượng + dung lượng riêng (nhẹ hơn ảnh chụp bài đơn lẻ) để không đội token/cost quá đà
-// khi 1 PDF nhiều trang.
-const MAX_SOURCE_IMAGES = 6;
+// PHẦN A10/A8: trước đây 6 — cùng gốc với PDF_MAX_RASTER_PAGES ở client, ROOT CAUSE thứ hai của "PDF
+// scan bị cụt". Nay client tự chọn trang liên quan nhất cho 1 lượt hỏi (xem collectSourceImages() ở
+// app.js) trong trần này — nâng trần lên đủ rộng để 1 câu hỏi có thể kéo nhiều trang khi cần (vd hỏi
+// "trang 12 đến 20") mà vẫn chặn được 1 request cố tình nhồi hàng trăm ảnh.
+const MAX_SOURCE_IMAGES = 24;
 const MAX_SOURCE_IMAGE_BYTES = 2 * 1024 * 1024; // 2MB/trang sau khi giải mã base64 (đã downscale ở client)
 const MAX_APPROACH_LEN = 3000;
 const ALLOWED_STAGES = ['approach', 'detail'];
@@ -165,21 +181,34 @@ function validateChatBody(body) {
   const rules = normalizeRules(body.rules);
 
   const contexts = Array.isArray(body.contexts)
-    ? body.contexts.slice(0, MAX_CONTEXTS).map((c) => {
+    ? body.contexts.slice(0, SECURITY_MAX_CONTEXTS).map((c) => {
         const rawText = String((c && c.text) || '');
+        const page = Number.isFinite(Number(c && c.page)) ? Number(c.page) : null;
+        const startPage = Number.isFinite(Number(c && c.startPage)) ? Number(c.startPage) : page;
+        const endPage = Number.isFinite(Number(c && c.endPage)) ? Number(c.endPage) : page;
         return {
           doc: clip(String((c && c.doc) || ''), MAX_DOC_NAME),
           id: Number.isFinite(Number(c && c.id)) ? Number(c.id) : 1,
-          text: clip(rawText, MAX_CONTEXT_LEN),
+          text: clip(rawText, SECURITY_MAX_CONTEXT_LEN),
+          // mục A2/A9: giữ metadata trang/vị trí chunk để citation truy nguyên đúng trang, và để
+          // sourceCoverage/completenessCheck biết đúng đoạn nào thuộc trang nào khi báo cáo coverage.
+          page, startPage, endPage,
+          sourceId: (c && c.sourceId != null) ? clip(String(c.sourceId), MAX_DOC_NAME) : null,
+          chunkIndex: Number.isFinite(Number(c && c.chunkIndex)) ? Number(c.chunkIndex) : null,
+          totalChunks: Number.isFinite(Number(c && c.totalChunks)) ? Number(c.totalChunks) : null,
           // mục 9: RAW SOURCE vs RETRIEVED/SELECTED/COMPRESSED CONTEXT — client gửi context đã là 1
           // EXCERPT chọn sẵn, KHÔNG phải toàn bộ tài liệu gốc. Đánh dấu rõ khi excerpt này còn bị cắt
-          // thêm ở đây (vượt MAX_CONTEXT_LEN) — downstream (sourceCoverage.js) PHẢI coi trường hợp
-          // này là "còn khả năng thiếu", KHÔNG được kết luận "source không có X" chỉ vì X nằm ngoài
-          // đúng phần excerpt hiện có.
-          truncated: rawText.length > MAX_CONTEXT_LEN
+          // thêm ở đây (vượt SECURITY_MAX_CONTEXT_LEN) — downstream (sourceCoverage.js) PHẢI coi
+          // trường hợp này là "còn khả năng thiếu", KHÔNG được kết luận "source không có X" chỉ vì X
+          // nằm ngoài đúng phần excerpt hiện có.
+          truncated: rawText.length > SECURITY_MAX_CONTEXT_LEN
         };
       }).filter((c) => c.text)
     : [];
+
+  // mục A3: SOURCE MANIFEST — metadata nhẹ tóm tắt coverage (số trang/đoạn/% đã đọc) của các nguồn
+  // đang active, KHÔNG phải nội dung thật (nội dung thật vẫn nằm trong `contexts`/`sourceImages`).
+  const sourceManifest = clip(String(body.sourceManifest || '').trim(), MAX_SOURCE_MANIFEST_LEN);
 
   const bodySettings = body.settings || {};
   const school = Object.prototype.hasOwnProperty.call(SCHOOL_GRADES, bodySettings.school)
@@ -205,7 +234,7 @@ function validateChatBody(body) {
       })).filter((h) => h.content)
     : [];
 
-  return { query, deepThinking, crossCheck, image, sourceImages, rules, contexts, settings, history, stage, approachText };
+  return { query, deepThinking, crossCheck, image, sourceImages, rules, contexts, sourceManifest, settings, history, stage, approachText };
 }
 
 /** Validate body của các endpoint /api/generate/* (flashcards + mindmap dùng chung) */
@@ -268,6 +297,7 @@ module.exports = {
   ALLOWED_DETAIL,
   LIMITS: {
     MAX_QUERY, MAX_RULE_LEN, MAX_RULES, MAX_CONTEXTS, MAX_CONTEXT_LEN,
+    SECURITY_MAX_CONTEXTS, SECURITY_MAX_CONTEXT_LEN, MAX_SOURCE_IMAGES,
     MAX_HISTORY, MAX_IMAGE_BYTES, MAX_GENERATE_CONTENT
   }
 };

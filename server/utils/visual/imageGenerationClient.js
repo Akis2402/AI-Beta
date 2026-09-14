@@ -222,6 +222,95 @@ function classifyImageCost({ provider, size = '1024x1024', renderer } = {}) {
   return pixels >= 1024 * 1024 ? IMAGE_COST.HIGH : IMAGE_COST.MEDIUM;
 }
 
+// ============================================================================================
+// MỤC (đợt audit 6) — QUALITY MODES + ASPECT-RATIO → SIZE THẬT (mục X/XI yêu cầu audit).
+// ============================================================================================
+// FAST/STANDARD/HIGH/ULTRA quyết định CẠNH DÀI của ảnh (không phải chỉ 1 hằng số 1024/512 như bản
+// cũ). USER_REQUESTED mặc định STANDARD (không phải ULTRA — mục X: "không dùng 4K mặc định vì tốn
+// tiền và chậm"); `degrade==='low'` (ngân sách thời gian cạn) hạ xuống FAST bất kể quality gốc.
+const IMAGE_QUALITY_LONG_EDGE = { fast: 512, standard: 1024, high: 1536, ultra: 2048 };
+function resolveQualityMode(requested, degrade) {
+  if (degrade === 'low') return 'fast';
+  const q = String(requested || 'standard').toLowerCase();
+  return IMAGE_QUALITY_LONG_EDGE[q] ? q : 'standard';
+}
+const ASPECT_WH_RATIO = {
+  '1:1': [1, 1], '16:9': [16, 9], '9:16': [9, 16], '4:3': [4, 3], '3:4': [3, 4], '3:2': [3, 2], '2:3': [2, 3]
+};
+/**
+ * sizeForRequest() — cạnh dài theo quality mode, cạnh ngắn theo aspect ratio thật (làm tròn bội 64
+ * vì hầu hết model image yêu cầu kích thước chia hết cho 1 số nhỏ).
+ * @returns {{size:string, aspectRatio:string, quality:string}} size dạng "WxH".
+ */
+function sizeForRequest({ aspectRatio = '1:1', quality = 'standard', degrade } = {}) {
+  const q = resolveQualityMode(quality, degrade);
+  const longEdge = IMAGE_QUALITY_LONG_EDGE[q];
+  const [rw, rh] = ASPECT_WH_RATIO[aspectRatio] || ASPECT_WH_RATIO['1:1'];
+  const round64 = (n) => Math.max(64, Math.round(n / 64) * 64);
+  let w, h;
+  if (rw >= rh) { w = longEdge; h = round64(longEdge * (rh / rw)); }
+  else { h = longEdge; w = round64(longEdge * (rw / rh)); }
+  return { size: `${w}x${h}`, aspectRatio, quality: q };
+}
+/** openaiSizeFor() — gpt-image-1 CHỈ chấp nhận 3 giá trị cố định; ánh xạ theo hướng gần đúng nhất
+ *  (không gửi WxH tuỳ ý, provider sẽ trả lỗi tham số). */
+function openaiSizeFor(aspectRatio) {
+  const [rw, rh] = ASPECT_WH_RATIO[aspectRatio] || ASPECT_WH_RATIO['1:1'];
+  if (rw === rh) return '1024x1024';
+  return rw > rh ? '1536x1024' : '1024x1536';
+}
+/** geminiImageSizeLabel() — nhãn image_size mà Interactions API hiểu ('512'|'1K'|'2K'|'4K'). */
+function geminiImageSizeLabel(quality) {
+  return { fast: '512', standard: '1K', high: '2K', ultra: '4K' }[quality] || '1K';
+}
+
+// ============================================================================================
+// MỤC XXII (đợt audit 6) — SELF-HEALING PROVIDER: circuit breaker riêng cho image provider.
+// ============================================================================================
+// ROOT CAUSE: listImageProviders() TRƯỚC ĐÂY luôn thử theo đúng 1 thứ tự `order` cố định — nếu
+// provider ưu tiên #1 đang lỗi liên tục (model bị rút, hết quota...), MỌI request vẫn tốn 1 lượt
+// gọi thất bại vào nó trước khi failover, tăng latency và phí gọi API vô ích. Nay: 3 lần fail LIÊN
+// TIẾP -> hạ ưu tiên tạm thời (đẩy xuống cuối danh sách thử) trong COOLDOWN_MS; hết cooldown thì
+// trở lại vị trí gốc. State giữ TRONG TIẾN TRÌNH (module-level Map, không cần store ngoài) — đúng
+// mức cần thiết cho 1 serverless instance; khác instance có bảng riêng, tự phục hồi độc lập, không
+// cần đồng bộ chéo (không giống rotationManager của text vốn cần fairness liên-instance).
+const CIRCUIT_FAIL_THRESHOLD = Number(process.env.IMAGE_CIRCUIT_FAIL_THRESHOLD) || 3;
+const CIRCUIT_COOLDOWN_MS = Number(process.env.IMAGE_CIRCUIT_COOLDOWN_MS) || 5 * 60 * 1000;
+const circuitState = new Map(); // providerName -> {consecutiveFailures, downUntil, lastFailure, lastSuccess}
+
+function getCircuit(name) {
+  if (!circuitState.has(name)) circuitState.set(name, { consecutiveFailures: 0, downUntil: 0, lastFailure: 0, lastSuccess: 0 });
+  return circuitState.get(name);
+}
+/** recordProviderResult() — cập nhật circuit SAU mỗi lệnh gọi thật (không gọi cho lệnh bị skip). */
+function recordProviderResult(name, ok) {
+  const c = getCircuit(name);
+  if (ok) { c.consecutiveFailures = 0; c.downUntil = 0; c.lastSuccess = Date.now(); return; }
+  c.consecutiveFailures += 1;
+  c.lastFailure = Date.now();
+  if (c.consecutiveFailures >= CIRCUIT_FAIL_THRESHOLD) c.downUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+}
+/** isCircuitOpen() — true nghĩa là provider đang trong cooldown, nên hạ ưu tiên (KHÔNG loại hẳn —
+ *  nếu mọi provider khác cũng down, vẫn phải còn cơ hội thử lại provider này). */
+function isCircuitOpen(name) {
+  const c = circuitState.get(name);
+  return !!(c && c.downUntil && c.downUntil > Date.now());
+}
+/** circuitSnapshot() — dùng cho /api/visual/status (mục XXIII), KHÔNG lộ gì nhạy cảm. */
+function circuitSnapshot() {
+  const out = {};
+  for (const [name, c] of circuitState.entries()) {
+    out[name] = {
+      state: isCircuitOpen(name) ? 'open' : 'closed',
+      consecutiveFailures: c.consecutiveFailures,
+      downUntil: c.downUntil || null,
+      lastFailure: c.lastFailure || null,
+      lastSuccess: c.lastSuccess || null
+    };
+  }
+  return out;
+}
+
 /**
  * listImageProviders() — provider ảnh KHẢ DỤNG, đã sắp theo thứ tự ưu tiên.
  * Một provider chỉ vào danh sách khi: (a) phân giải được khóa, và (b) xác định được model.
@@ -293,7 +382,7 @@ function activePromptCharLimit() {
  * @returns {Promise<{ok:boolean, format?:'data_url', url?:string, model?:string, reason?:string,
  *   latencyMs:number, promptChars:number}>}
  */
-async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, size = '1024x1024', deadlineAt }) {
+async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, size = '1024x1024', aspectRatio = '1:1', quality = 'standard', deadlineAt }) {
   const startedAt = Date.now();
   const base = { latencyMs: 0, promptChars: String(prompt || '').length, providersTried: [] };
   if (!prompt || prompt.length < 10) return { ...base, ok: false, reason: 'empty_prompt', latencyMs: 0 };
@@ -313,11 +402,14 @@ async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, siz
 
     providersTried.push(p.name);
     try {
-      last = await p.call({ prompt, timeoutMs: callTimeout, signal, size });
+      last = await p.call({ prompt, timeoutMs: callTimeout, signal, size, aspectRatio, quality });
     } catch (e) {
       // Kể cả huỷ (abort) cũng KHÔNG throw lên trên — text answer không được phụ thuộc vào ảnh.
       last = { ok: false, reason: (e && e.cancelled) ? 'cancelled' : 'provider_error' };
     }
+    // MỤC XXII: cancelled không tính là lỗi PROVIDER (người dùng/hệ thống huỷ, không phải provider
+    // hỏng) -> không đốt vào circuit breaker của provider đó.
+    if (last.reason !== 'cancelled') recordProviderResult(p.name, last.ok);
     if (last.ok) {
       return {
         ...base, ...last, providersTried,
@@ -421,7 +513,7 @@ function geminiBlockReason(data) {
   return null;
 }
 
-async function callGeminiImage({ prompt, timeoutMs, signal, apiKey, model }) {
+async function callGeminiImage({ prompt, timeoutMs, signal, apiKey, model, aspectRatio }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const linked = createLinkedAbort(timeoutMs, signal);
   try {
@@ -436,9 +528,14 @@ async function callGeminiImage({ prompt, timeoutMs, signal, apiKey, model }) {
     // Luôn xin CẢ 'TEXT' lẫn 'IMAGE': một số version model bắt buộc phải có TEXT trong danh sách
     // modality được yêu cầu (chỉ xin IMAGE đơn độc bị model từ chối ở một số backend), và code parser
     // (extractGeminiInline) đã bỏ qua mọi phần TEXT để chỉ lấy phần ảnh nên không ảnh hưởng output.
+    // MỤC XI: yêu cầu tỉ lệ khung hình TƯỜNG MINH qua imageConfig.aspectRatio thay vì luôn mặc định
+    // vuông — field ADDITIVE (không thay contract cũ), model bỏ qua an toàn nếu không hỗ trợ giá trị.
     const body = {
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
+      generationConfig: {
+        responseModalities: ['TEXT', 'IMAGE'],
+        ...(aspectRatio ? { imageConfig: { aspectRatio } } : {})
+      }
     };
     const res = await fetch(url, {
       method: 'POST',
@@ -502,13 +599,21 @@ function interactionsBlockReason(data) {
   return null;
 }
 
-async function callGeminiInteractionsImage({ prompt, timeoutMs, signal, apiKey, model }) {
+async function callGeminiInteractionsImage({ prompt, timeoutMs, signal, apiKey, model, aspectRatio, quality }) {
   const url = 'https://generativelanguage.googleapis.com/v1beta/interactions';
   const linked = createLinkedAbort(timeoutMs, signal);
   try {
+    // MỤC IV (đợt audit 6) — ROOT CAUSE: request CŨ chỉ gửi {model, input} và PHÓ MẶC model "tự
+    // hiểu" phải trả ảnh — đúng chống-chỉ-định mà audit yêu cầu sửa. Nay khai báo TƯỜNG MINH
+    // response_format với type:'image' + aspect_ratio + image_size, đúng cấu trúc tài liệu hoá.
     const body = {
       model,
-      input: [{ type: 'text', text: prompt }]
+      input: [{ type: 'text', text: prompt }],
+      response_format: {
+        type: 'image',
+        aspect_ratio: aspectRatio || '1:1',
+        image_size: geminiImageSizeLabel(quality || 'standard')
+      }
     };
     const res = await fetch(url, {
       method: 'POST',
@@ -549,16 +654,19 @@ function isLikelyBase64(s) {
  * @param {object} opts {prompt, timeoutMs, signal, size, apiKey, model}
  * @param {string} endpoint URL đầy đủ của endpoint images/generations
  */
-async function callOpenAICompatibleImage({ prompt, timeoutMs, signal, size, apiKey, model, extraBody }, endpoint) {
+async function callOpenAICompatibleImage({ prompt, timeoutMs, signal, size, aspectRatio, apiKey, model, extraBody }, endpoint) {
   const linked = createLinkedAbort(timeoutMs, signal);
   try {
+    // MỤC XI — gpt-image-1 chỉ nhận 3 giá trị size CỐ ĐỊNH (không nhận WxH tuỳ ý như size tính từ
+    // sizeForRequest()); dùng aspectRatio để chọn giá trị hợp lệ GẦN ĐÚNG nhất thay vì luôn vuông.
+    const openaiSize = aspectRatio ? openaiSizeFor(aspectRatio) : (size || '1024x1024');
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       // extraBody (vd {quality:'high'}) được GỘP CHỨ KHÔNG GHI ĐÈ field lõi (model/prompt/size/n) —
       // caller (listImageProviders) đã tự đảm bảo field đúng cho đúng provider/model, xem mục
       // "extraBody: field bổ sung AN TOÀN THEO TỪNG PROVIDER" ở registry phía trên.
-      body: JSON.stringify({ model, prompt, size, n: 1, ...(extraBody || {}) }),
+      body: JSON.stringify({ model, prompt, size: openaiSize, n: 1, ...(extraBody || {}) }),
       signal: linked.signal
     });
     if (!res.ok) return { ok: false, reason: 'http_' + res.status };
@@ -624,5 +732,9 @@ module.exports = {
   extractGeminiInline, geminiBlockReason, isLikelyBase64, detectImageSignature, verifyImageBytes,
   // Mục 2.1a: registry mở rộng + phân giải khóa — export để test kiểm chứng trực tiếp.
   IMAGE_PROVIDER_DEFS, resolveImageKey, callOpenAICompatibleImage, callOpenAIImage, callGeminiImage,
-  callGeminiInteractionsImage, extractInteractionsImage, interactionsBlockReason
+  callGeminiInteractionsImage, extractInteractionsImage, interactionsBlockReason,
+  // Mục X/XI (đợt audit 6): quality mode + aspect-ratio -> size thật.
+  sizeForRequest, openaiSizeFor, geminiImageSizeLabel, resolveQualityMode, IMAGE_QUALITY_LONG_EDGE,
+  // Mục XXII (đợt audit 6): self-healing circuit breaker theo provider.
+  recordProviderResult, isCircuitOpen, circuitSnapshot
 };

@@ -62,6 +62,43 @@ const STYLE_PROFILES = {
   }
 };
 
+// ============================================================================================
+// MỤC (đợt audit 6) — ASPECT RATIO INTELLIGENCE (mục XI yêu cầu audit).
+// ============================================================================================
+// ROOT CAUSE: pipeline TRƯỚC ĐÂY luôn gửi '1024x1024' (vuông) cho MỌI loại hình, kể cả sơ đồ
+// mạch điện ngang, lược đồ dọc, cảnh landscape... khiến ảnh AI bị crop/bóp méo bố cục. Chọn tỉ lệ
+// THEO LOẠI HÌNH (spec.type) — đây là quyết định CHỈ PHỤ THUỘC cấu trúc câu hỏi, không phụ thuộc
+// provider, nên đặt ở spec builder (1 nguồn sự thật), imageGenerationClient chỉ ĐỌC giá trị này.
+const ASPECT_RATIO_BY_TYPE = {
+  circuit_diagram: '4:3',
+  optics_diagram: '16:9',
+  physics_diagram: '4:3',
+  mathematical_plot: '4:3',
+  geometry_diagram: '1:1',
+  geometry_3d: '4:3',
+  chemistry_structure: '1:1',
+  apparatus_diagram: '4:3',
+  biology_diagram: '3:4',
+  flowchart: '9:16',
+  architecture_diagram: '16:9',
+  data_structure_diagram: '16:9',
+  network_diagram: '16:9',
+  map_diagram: '4:3',
+  chart: '4:3',
+  concept_illustration: '1:1',
+  __concept_card__: '1:1'
+};
+const VALID_ASPECT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'];
+
+/**
+ * aspectRatioFor() — PHẦN XI: tự chọn tỉ lệ khung hình theo loại hình, không luôn dùng 1:1.
+ * @param {string} type spec.type (vd 'circuit_diagram', 'flowchart'...)
+ * @returns {string} một trong VALID_ASPECT_RATIOS
+ */
+function aspectRatioFor(type) {
+  return ASPECT_RATIO_BY_TYPE[type] || '1:1';
+}
+
 /**
  * styleProfileFor() — chọn cụm phong cách theo MÔN (PHẦN 6).
  * @param {string} subject
@@ -340,6 +377,9 @@ function buildVisualSpec({ decision, finalAnswer = '', question = '', subject = 
     // PHẦN 6: style theo môn. `style` (id) đi vào cache key nên đổi môn = key khác, không trả nhầm.
     style: styleProfile.id,
     stylePrompt: styleProfile.prompt,
+    // PHẦN XI: tỉ lệ khung hình theo LOẠI hình, đi vào cache key (aspectRatio khác nhau -> ảnh
+    // khác nhau) và được imageGenerationClient dùng để chọn size/response_format thật.
+    aspectRatio: aspectRatioFor(type),
     // Rủi ro #3: đánh dấu tường minh những đề mà sơ đồ SVG không đủ trung thực.
     realismRequired: needsRealism(source, subject),
     language: language === 'English' || language === 'en' ? 'en' : 'vi',
@@ -516,6 +556,7 @@ module.exports = {
   needsRealism,
   REALISM_REQUIRED_RE,
   VISUAL_PROMPT_VERSION, STYLE_PROFILES, styleProfileFor,
+  ASPECT_RATIO_BY_TYPE, VALID_ASPECT_RATIOS, aspectRatioFor,
   computeNeedsPreciseGeometry, buildVisualOverlay,
   IMAGE_SAFETY_CONSTRAINT, IMAGE_QUALITY_BOOST, DEFAULT_PROMPT_CHAR_LIMIT,
   buildVisualSpec, buildImagePrompt, specFingerprint,
