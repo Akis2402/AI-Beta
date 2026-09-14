@@ -1388,18 +1388,18 @@ function extractRequirementLabels(query) {
 // suy luận sai "chỉ có vài đoạn = đó là toàn bộ tài liệu". KHÔNG gộp toàn bộ PDF thành 1 chuỗi khổng
 // lồ (mục A3 cấm) — đây chỉ là vài dòng thống kê, nội dung thật vẫn nằm trong các chunk/ảnh riêng.
 function buildSourceManifest() {
-  const activeDocs = state.docs.filter((d) => !d.status || d.status === 'ready');
+  const activeDocs = state.docs.filter((doc) => !doc.status || doc.status === 'ready');
   if (!activeDocs.length) return '';
   const lines = ['SOURCE MANIFEST'];
-  activeDocs.forEach((d) => {
-    if (d.sourceType === 'image-pdf' && d.pageCoverage) {
-      const pc = d.pageCoverage;
-      lines.push(`- ${d.name}: PDF scan, ${pc.totalPages} trang, đã xử lý ${pc.renderedPages}/${pc.totalPages} (${pc.coveragePercent}%)${pc.failedPages.length ? `, lỗi trang: ${pc.failedPages.join(',')}` : ''}`);
+  activeDocs.forEach((doc) => {
+    if (doc.sourceType === 'image-pdf' && doc.pageCoverage) {
+      const pc = doc.pageCoverage;
+      lines.push(`- ${doc.name}: PDF scan, ${pc.totalPages} trang, đã xử lý ${pc.renderedPages}/${pc.totalPages} (${pc.coveragePercent}%)${pc.failedPages.length ? `, lỗi trang: ${pc.failedPages.join(',')}` : ''}`);
       return;
     }
-    const pages = d.chunks.map((c) => c.page).filter((p) => p != null);
-    const totalPages = pages.length ? Math.max(...pages) : (d.pageCoverage ? d.pageCoverage.totalPages : null);
-    lines.push(`- ${d.name}: ${d.chunks.length} đoạn${totalPages ? `, ${totalPages} trang` : ''}, coverage 100% (toàn bộ nội dung đã parse, có thể truy hồi bất kỳ đoạn nào)`);
+    const pages = doc.chunks.map((c) => c.page).filter((p) => p != null);
+    const totalPages = pages.length ? Math.max(...pages) : (doc.pageCoverage ? doc.pageCoverage.totalPages : null);
+    lines.push(`- ${doc.name}: ${doc.chunks.length} đoạn${totalPages ? `, ${totalPages} trang` : ''}, coverage 100% (toàn bộ nội dung đã parse, có thể truy hồi bất kỳ đoạn nào)`);
   });
   return lines.join('\n');
 }
