@@ -3037,14 +3037,33 @@ function boxCommonMistakes(root) {
 // Tách riêng dòng này khỏi nội dung chính (để không lẫn vào phần lập luận) và lưu lại làm 1 trường
 // riêng trên message — dùng để hiển thị TÁCH BIỆT với nguồn tài liệu trong khối "Nguồn tham khảo",
 // đúng yêu cầu "phải phân biệt rõ nguồn nội bộ và nguồn Internet".
-const WEB_SOURCE_LINE_RE = /^[ \t]*🌐.*$/m;
+// MỤC (đợt audit 4, nâng cấp cơ chế trích nguồn) — TRƯỚC ĐÂY chỉ bắt ĐÚNG 1 dòng "🌐 ..." đầu tiên
+// (flag /m không /g): nếu AI dùng web để đối chiếu NHIỀU nguồn khác nhau trong cùng 1 câu trả lời
+// (thường gặp ở "Suy nghĩ sâu"/đối chiếu đa mô hình — mỗi model có thể tra 1 trang khác nhau), mọi
+// dòng nguồn TỪ THỨ 2 TRỞ ĐI bị coi là văn bản thường và không hiện trong khối "Nguồn web bổ sung" —
+// người dùng THẤY có tra web nhưng KHÔNG biết đã tra ở đâu ngoài dòng đầu. NAY: bắt TOÀN BỘ (flag
+// /g), giữ đúng thứ tự xuất hiện, loại trùng lặp (model lặp lại đúng 1 câu ở 2 chỗ vẫn chỉ hiện 1
+// lần). Trả về MẢNG (không phải chuỗi đơn) để renderCitations() liệt kê riêng từng nguồn — đúng yêu
+// cầu "khi trích nguồn phải nói rõ lấy từ nguồn nào", áp dụng cho CẢ 3 chế độ (Nhanh/Sâu/đối chiếu
+// đa hướng) vì cả 3 đều đi qua đúng 1 hàm này (xem promptBuilder.js#webRule để biết định dạng AI
+// phải tuân theo: mỗi nguồn thật sự dùng ra đúng 1 dòng "🌐 Nguồn: <tên trang> — <ý ngắn>").
+const WEB_SOURCE_LINE_RE = /^[ \t]*🌐.*$/gm;
 function extractWebSourceNote(text) {
   if (!text) return { clean: text, webNote: null };
-  const m = text.match(WEB_SOURCE_LINE_RE);
-  if (!m) return { clean: text, webNote: null };
-  const clean = text.replace(m[0], '').replace(/\n{3,}/g, '\n\n').trim();
-  const webNote = m[0].replace(/^[ \t]*🌐\s*/, '').trim();
-  return { clean, webNote: webNote || null };
+  const matches = text.match(WEB_SOURCE_LINE_RE);
+  if (!matches || !matches.length) return { clean: text, webNote: null };
+  let clean = text;
+  const notes = [];
+  for (const line of matches) {
+    clean = clean.replace(line, '');
+    const note = line.replace(/^[ \t]*🌐\s*/, '').trim();
+    if (note) notes.push(note);
+  }
+  clean = clean.replace(/\n{3,}/g, '\n\n').trim();
+  const dedup = [...new Set(notes)];
+  // webNote nay là MẢNG (hoặc null nếu rỗng) — renderCitations() chuẩn hoá cho cả 2 dạng (mảng mới
+  // lẫn chuỗi đơn cũ, để tương thích ngược với lịch sử hội thoại đã lưu TRƯỚC bản nâng cấp này).
+  return { clean, webNote: dedup.length ? dedup : null };
 }
 
 // Đối chiếu đúng những đoạn context nào AI THỰC SỰ trích dẫn bằng [n] trong answerText (chỉ tính
@@ -3087,8 +3106,12 @@ function getUsedContexts(contexts, answerText, citationMap) {
 // "🌐 ..." đã tách ra từ extractWebSourceNote(), nếu có, hiển thị ở mục riêng "Nguồn web bổ sung".
 function renderCitations(container, contexts, query, answerText, webNote, citationMap) {
   const used = getUsedContexts(contexts, answerText, citationMap);
+  // Chuẩn hoá: webNote có thể là MẢNG (định dạng mới, xem extractWebSourceNote) hoặc CHUỖI ĐƠN
+  // (dữ liệu lịch sử đã lưu từ TRƯỚC bản nâng cấp này) — luôn quy về 1 mảng đã lọc rỗng để phần hiển
+  // thị bên dưới không cần phân biệt 2 dạng.
+  const webNotes = Array.isArray(webNote) ? webNote.filter(Boolean) : (webNote ? [webNote] : []);
 
-  if (!used.length && !webNote) {
+  if (!used.length && !webNotes.length) {
     // Có tài liệu đã tải lên nhưng KHÔNG đoạn nào thực sự được dùng cho câu hỏi này — nêu rõ thay
     // vì im lặng, đúng yêu cầu "phải thể hiện đúng rằng không tìm thấy thông tin phù hợp".
     if (contexts && contexts.length) {
