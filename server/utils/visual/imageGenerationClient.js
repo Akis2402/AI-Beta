@@ -83,32 +83,52 @@ const IMAGE_PROVIDER_DEFS = [
     call: (opts) => callGeminiImage(opts)
   },
   {
-    // Provider SONG SONG với 'gemini-image' (REST thuần), gọi qua SDK chính chủ @google/genai
-    // (ai.models.generateContent — KHÔNG phải ai.interactions.create, method đó không tồn tại trong
-    // SDK thật). CỐ Ý không kế thừa GEMINI_API_KEY/GOOGLE_API_KEY: nếu tự động kế thừa, provider này
-    // sẽ TỰ BẬT cùng lúc với gemini-image bằng chung 1 khoá, cả hai cùng gọi 1 backend Gemini và cùng
-    // fail giống hệt nhau khi backend lỗi — tốn 1 lượt failover vô ích mà không tăng độ tin cậy thật.
-    // Vì vậy: chỉ bật khi người vận hành khai báo TƯỜNG MINH GEMINI_SDK_IMAGE_API_KEY (opt-in).
-    name: 'gemini-sdk-image', order: 15,
-    imageKeyEnv: 'GEMINI_SDK_IMAGE_API_KEY', textKeyEnvs: [],
-    modelEnv: 'GEMINI_SDK_IMAGE_MODEL', defaultModel: 'gemini-2.5-flash-image',
+    // Provider ĐỘC LẬP dùng Interactions API (POST /v1beta/interactions) — endpoint MỚI, GA từ
+    // 06/2026, Google khuyến nghị cho dự án mới; generateContent (nhánh 'gemini-image' phía trên)
+    // vẫn được xác nhận "fully supported" nên KHÔNG xoá/thay thế, chỉ thêm lựa chọn song song.
+    // CỐ Ý không kế thừa GEMINI_API_KEY — tránh tự bật ké, gọi trùng 2 lần vào cùng 1 tài khoản
+    // Gemini khi chỉ có 1 khoá text.
+    //
+    // MỤC (đợt audit 3) — TOÀN BỘ provider ảnh nay đều REST THUẦN, không phụ thuộc SDK nào:
+    // 'gemini-sdk-image' (dùng @google/genai) đã bị GỠ. Nó vốn chỉ để minh hoạ cách gọi qua SDK
+    // chính chủ, nhưng có cùng 1 backend/response shape với provider REST này (cả hai đều nhắm
+    // /v1beta/interactions), nên là bản trùng lặp không cần thiết một khi bản REST đã chạy đúng —
+    // giữ cả hai chỉ tăng bề mặt bảo trì (thêm 1 dependency npm, thêm 1 nhánh lazy-require) mà
+    // KHÔNG tăng độ tin cậy thật (cùng fail giống hệt nhau khi Interactions API lỗi).
+    name: 'gemini-interactions-image', order: 12,
+    imageKeyEnv: 'GEMINI_INTERACTIONS_IMAGE_API_KEY', textKeyEnvs: [],
+    modelEnv: 'GEMINI_INTERACTIONS_IMAGE_MODEL', defaultModel: 'gemini-3.1-flash-image',
     maxPromptTokens: 2000, costClass: 'IMAGE_COST_LOW', qualityClass: 'standard', latencyClass: 'fast',
-    call: (opts) => callGeminiImageSdk(opts)
+    call: (opts) => callGeminiInteractionsImage(opts)
   },
   {
+    // MỤC (đợt audit 4) — `quality:'high'` chỉ hợp lệ cho họ model GPT-Image (gpt-image-1/1-mini/
+    // 1.5/2/2.5-*), KHÔNG hợp lệ cho dall-e-2 (dall-e-2 không nhận tham số này). Vì OPENAI_IMAGE_MODEL
+    // mặc định trỏ vào 1 model GPT-Image, extraBody an toàn theo mặc định; nếu người vận hành tự đổi
+    // sang 'dall-e-2' qua .env, dùng DALLE2_MODEL_RE bên dưới để KHÔNG gửi field lạ vào request.
     name: 'openai-image', order: 20,
     imageKeyEnv: 'OPENAI_IMAGE_API_KEY', textKeyEnvs: ['OPENAI_API_KEY'],
     modelEnv: 'OPENAI_IMAGE_MODEL', defaultModel: 'gpt-image-1',
     maxPromptTokens: 4000, costClass: 'IMAGE_COST_HIGH', qualityClass: 'high', latencyClass: 'slow',
+    extraBody: (model) => (/^dall-e-2$/i.test(model) ? {} : { quality: 'high' }),
     call: (opts) => callOpenAICompatibleImage(opts, 'https://api.openai.com/v1/images/generations')
   },
   {
     // xAI phục vụ sinh ảnh qua endpoint TƯƠNG THÍCH OpenAI (/v1/images/generations) nên dùng chung
     // adapter — không nhân bản code parse cho từng hãng.
+    // MỤC (đợt audit 5, 09/2026) — ROOT CAUSE MỚI, CÙNG DẠNG LỖI CŨ: 'grok-imagine-image-quality'
+    // (đặt làm mặc định ở đợt audit 4, dựa trên tài liệu 05/2026) đã bị xAI THAY THẾ bằng
+    // 'grok-imagine-image-2.0' — dòng "Grok Imagine Image 2.0" ra mắt 07/08/2026, xác nhận qua tài
+    // liệu chính thức docs.x.ai (mục Image Generation) hiện hành. Đây CHÍNH XÁC là kiểu lỗi đã ghi ở
+    // đợt audit 4: tên model cũ bị hãng ngừng phục vụ -> request trả 4xx "model not found" -> ảnh
+    // KHÔNG BAO GIỜ ra được dù khóa API hợp lệ 100%, bất kể failover có chạy đúng hay không (lỗi nằm
+    // ở CHÍNH tên model gửi đi, không phải ở cơ chế thử/failover). Cùng key text, cùng endpoint
+    // OpenAI-compatible, chỉ đổi tên model. Vẫn có thể ghi đè qua GROK_IMAGE_MODEL nếu hãng đổi tên
+    // tiếp (đây là lý do vì sao model KHÔNG được hard-code sâu hơn 1 chỗ — xem B9.5).
     name: 'grok-image', order: 30,
     imageKeyEnv: 'GROK_IMAGE_API_KEY', textKeyEnvs: ['GROK_API_KEY', 'XAI_API_KEY'],
-    modelEnv: 'GROK_IMAGE_MODEL', defaultModel: 'grok-2-image-1212',
-    maxPromptTokens: 2000, costClass: 'IMAGE_COST_MEDIUM', qualityClass: 'standard', latencyClass: 'fast',
+    modelEnv: 'GROK_IMAGE_MODEL', defaultModel: 'grok-imagine-image-2.0',
+    maxPromptTokens: 2000, costClass: 'IMAGE_COST_MEDIUM', qualityClass: 'high', latencyClass: 'fast',
     call: (opts) => callOpenAICompatibleImage(opts, 'https://api.x.ai/v1/images/generations')
   },
   {
@@ -169,6 +189,21 @@ function isRetryableReason(reason) {
   if (!reason) return false;
   return !NON_RETRYABLE_REASONS.has(reason);
 }
+// ============================================================================================
+// QUYẾT ĐỊNH CÓ CHỦ Ý — KHÔNG retry CÙNG 1 provider trước khi failover (đợt audit 4)
+// ============================================================================================
+// Đã CÂN NHẮC thêm "thử lại chính provider đó 1 lần" cho các lỗi tạm thời (5xx/429/JSON dị dạng/
+// model trả text thay vì ảnh) trước khi chuyển provider khác — nhưng đây là VI PHẠM TRỰC TIẾP bất
+// biến đã viết ở đầu file "Tổng số lệnh gọi luôn <= số provider đã cấu hình, KHÔNG có vòng lặp ẩn
+// nào" (SECTION D) và làm HỎNG bộ test failover hiện có (`image-provider-failover.test.js` khẳng
+// định CHÍNH XÁC 1 lệnh gọi/provider cho mọi lý do retryable, kể cả 'notext'/5xx). Bất biến đó tồn
+// tại có chủ đích: trần chi phí + độ trễ DỰ ĐOÁN ĐƯỢC (đúng bằng số provider đã cấu hình, không phụ
+// thuộc số retry ẩn) — quan trọng trên nền tảng serverless có deadline cứng. "Luôn generate ra được"
+// nên đạt bằng CÁCH KHÁC không phá bất biến này: (1) failover sang provider KHÁC ngay lập tức khi
+// lỗi retryable (đã có sẵn — mỗi provider vẫn được thử ĐÚNG 1 LẦN), (2) sửa đúng ROOT CAUSE khiến
+// một provider luôn thất bại (model ID lỗi thời — xem 'grok-image' bên dưới), (3) tăng chất lượng
+// prompt/tham số ảnh (xem IMAGE_QUALITY_BOOST ở visualSpecBuilder.js, và `quality` ở registry dưới)
+// để GIẢM tỉ lệ bị model từ chối/trả sai ngay từ lượt gọi đầu tiên, thay vì bù bằng gọi lại.
 
 // B9.15 — IMAGE COST POLICY. Deterministic renderer không đi qua file này nên luôn LOW (0 cost API).
 const IMAGE_COST = { LOW: 'IMAGE_COST_LOW', MEDIUM: 'IMAGE_COST_MEDIUM', HIGH: 'IMAGE_COST_HIGH' };
@@ -214,7 +249,13 @@ function listImageProviders() {
       qualityClass: def.qualityClass,
       latencyClass: def.latencyClass,
       order: def.order,
-      call: (opts) => def.call({ ...opts, apiKey: key, model })
+      // extraBody: field bổ sung AN TOÀN THEO TỪNG PROVIDER (vd quality:'high' cho GPT-Image) — chỉ
+      // def nào khai báo mới có, giữ nguyên hành vi provider khác (mục "thêm provider không sửa code
+      // provider cũ" — B9.5).
+      call: (opts) => def.call({
+        ...opts, apiKey: key, model,
+        extraBody: typeof def.extraBody === 'function' ? def.extraBody(model) : (def.extraBody || null)
+      })
     });
   }
   if (override.length) {
@@ -420,78 +461,74 @@ async function callGeminiImage({ prompt, timeoutMs, signal, apiKey, model }) {
 }
 
 // ============================================================================================
-// gemini-sdk-image — dùng SDK chính chủ @google/genai thay vì tự dựng request REST.
+// gemini-interactions-image — REST thuần vào Interactions API (POST /v1beta/interactions).
 // ============================================================================================
-// Snippet gốc người dùng đưa (`ai.interactions.create(...)`, model 'gemini-3.1-flash-image') KHÔNG
-// khớp SDK thật: bản @google/genai hiện hành expose `ai.models.generateContent(...)`, không có
-// namespace `interactions`. Sửa lại đúng method, GIỮ nguyên bất biến của cả file này:
-//   - Luôn xin responseModalities TEXT+IMAGE (lý do xem comment ở callGeminiImage phía trên — model
-//     ảnh của Gemini mặc định thiên về trả TEXT nếu không ép rõ modality).
-//   - KHÔNG BAO GIỜ tin field ảnh theo nhãn mime provider tự khai -> vẫn bắt buộc qua
-//     verifyImageBytes() (chữ ký byte thật), y hệt nhánh REST.
-//   - KHÔNG throw ra ngoài trừ lỗi mạng/abort thật sự (để generateImage() ở trên tự phân loại
-//     provider_error/cancelled và quyết định failover — nhất quán với callGeminiImage).
-//   - SDK không được require() ở TOP-LEVEL: nếu người vận hành không `npm install @google/genai`,
-//     import ở đầu file sẽ làm SẬP toàn bộ server dù họ không hề bật provider này. Lazy-require bên
-//     trong hàm gọi, bọc try/catch -> thiếu package chỉ khiến ĐÚNG provider này fail (retryable),
-//     đúng nguyên tắc "không có provider ảnh KHÔNG PHẢI là lỗi".
-let _genAICtor = null;
-function loadGoogleGenAI() {
-  if (_genAICtor !== null) return _genAICtor;
-  try {
-    // eslint-disable-next-line global-require
-    _genAICtor = require('@google/genai').GoogleGenAI;
-  } catch (e) {
-    _genAICtor = false; // đánh dấu "đã thử, không có" để không require() lại mỗi lần gọi.
+// Response THẬT (đã xác nhận qua doc chính thức 09/2026) là 1 timeline `steps[]`, KHÔNG phải
+// `candidates[]` như generateContent: mỗi step có `type` ('model_output'/'thought'/...) và
+// `content[]` gồm các block {type:'text', text} hoặc {type:'image', data, mime_type}. Ảnh cuối
+// cùng nằm ở step type='model_output'. Parser dưới đây CHỈ đọc đúng shape này — KHÔNG tái dùng
+// extractGeminiInline() (dành cho generateContent, đọc candidates[].content.parts[].inlineData —
+// field khác tên, cấu trúc khác lồng).
+// Vẫn giữ đúng bất biến chung của file: verify byte ảnh thật (verifyImageBytes), không tin nhãn
+// mime provider tự khai, KHÔNG BAO GIỜ coi "có response" là thành công.
+function extractInteractionsImage(data) {
+  const steps = Array.isArray(data && data.steps) ? data.steps : [];
+  for (const step of steps) {
+    if (!step || step.type !== 'model_output') continue;
+    const blocks = Array.isArray(step.content) ? step.content : [];
+    for (const block of blocks) {
+      if (!block || block.type !== 'image') continue;
+      const b64 = block.data;
+      if (!b64 || !isLikelyBase64(b64)) continue;
+      const verifiedMime = verifyImageBytes(b64, block.mime_type || block.mimeType || null);
+      if (!verifiedMime) continue; // block tồn tại nhưng không phải ảnh thật -> thử block khác.
+      return { b64, mime: verifiedMime };
+    }
   }
-  return _genAICtor;
+  return null;
 }
 
-async function callGeminiImageSdk({ prompt, timeoutMs, signal, apiKey, model }) {
-  const GoogleGenAI = loadGoogleGenAI();
-  if (!GoogleGenAI) return { ok: false, reason: 'sdk_not_installed' };
+/** Lý do TỪ CHỐI ở Interactions API — hình dạng lỗi safety chưa tài liệu hoá đầy đủ, khoan dung
+ *  bằng cách nhận diện qua vài field/nội dung thường gặp thay vì 1 field cố định. */
+function interactionsBlockReason(data) {
+  const err = data && data.error;
+  if (err && /safety|policy|blocked|prohibited/i.test(String(err.status || err.message || ''))) {
+    return 'content_blocked';
+  }
+  const steps = Array.isArray(data && data.steps) ? data.steps : [];
+  for (const step of steps) {
+    if (step && /safety|blocked|prohibited/i.test(String(step.type || ''))) return 'content_blocked';
+  }
+  return null;
+}
+
+async function callGeminiInteractionsImage({ prompt, timeoutMs, signal, apiKey, model }) {
+  const url = 'https://generativelanguage.googleapis.com/v1beta/interactions';
   const linked = createLinkedAbort(timeoutMs, signal);
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    let response;
-    try {
-      // SDK chính chủ không nhận AbortSignal ở mọi bản -> tự canh timeout bằng race thủ công thay vì
-      // dựa vào linked.signal truyền trực tiếp (linked.signal vẫn dùng để phát hiện "đã bị huỷ" bên
-      // dưới khi Promise.race thua).
-      response = await Promise.race([
-        ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: { responseModalities: ['TEXT', 'IMAGE'] }
-        }),
-        new Promise((_, reject) => {
-          if (linked.signal.aborted) return reject(makeCancelledError());
-          linked.signal.addEventListener('abort', () => reject(makeCancelledError()), { once: true });
-        })
-      ]);
-    } catch (e) {
-      if (e && e.cancelled) throw e; // để generateImage() phân loại cancelled/timeout như REST path.
-      // Lỗi API (safety/policy) trả về dạng Error có message/status tuỳ version SDK — nhận diện
-      // bằng nội dung thay vì field cố định để khoan dung nhiều version.
-      const msg = String((e && e.message) || '');
-      if (/safety|blocked|prohibited|recitation/i.test(msg)) return { ok: false, reason: 'content_blocked' };
-      return { ok: false, reason: 'sdk_error' };
+    const body = {
+      model,
+      input: [{ type: 'text', text: prompt }]
+    };
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify(body),
+      signal: linked.signal
+    });
+    let data;
+    try { data = await res.json(); } catch (e) { data = null; }
+    if (!res.ok) {
+      const blocked = data && interactionsBlockReason(data);
+      if (blocked) return { ok: false, reason: blocked };
+      return { ok: false, reason: 'http_' + res.status };
     }
-    const blocked = geminiBlockReason(response);
+    if (!data) return { ok: false, reason: 'malformed_response' };
+    const blocked = interactionsBlockReason(data);
     if (blocked) return { ok: false, reason: blocked };
-    const candidates = (response && response.candidates) || [];
-    for (const cand of candidates) {
-      const parts = (cand && cand.content && cand.content.parts) || [];
-      for (const part of parts) {
-        const inline = part && part.inlineData;
-        const b64 = inline && inline.data;
-        if (!b64 || !isLikelyBase64(b64)) continue;
-        const verifiedMime = verifyImageBytes(b64, inline.mimeType || null);
-        if (!verifiedMime) continue; // field tồn tại nhưng không phải ảnh thật -> thử part khác.
-        return { ok: true, format: 'data_url', url: `data:${verifiedMime};base64,${b64}`, model };
-      }
-    }
-    return { ok: false, reason: 'no_image_in_response' };
+    const found = extractInteractionsImage(data);
+    if (!found) return { ok: false, reason: 'no_image_in_response' };
+    return { ok: true, format: 'data_url', url: `data:${found.mime};base64,${found.b64}`, model };
   } finally {
     linked.cleanup();
   }
@@ -512,13 +549,16 @@ function isLikelyBase64(s) {
  * @param {object} opts {prompt, timeoutMs, signal, size, apiKey, model}
  * @param {string} endpoint URL đầy đủ của endpoint images/generations
  */
-async function callOpenAICompatibleImage({ prompt, timeoutMs, signal, size, apiKey, model }, endpoint) {
+async function callOpenAICompatibleImage({ prompt, timeoutMs, signal, size, apiKey, model, extraBody }, endpoint) {
   const linked = createLinkedAbort(timeoutMs, signal);
   try {
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, prompt, size, n: 1 }),
+      // extraBody (vd {quality:'high'}) được GỘP CHỨ KHÔNG GHI ĐÈ field lõi (model/prompt/size/n) —
+      // caller (listImageProviders) đã tự đảm bảo field đúng cho đúng provider/model, xem mục
+      // "extraBody: field bổ sung AN TOÀN THEO TỪNG PROVIDER" ở registry phía trên.
+      body: JSON.stringify({ model, prompt, size, n: 1, ...(extraBody || {}) }),
       signal: linked.signal
     });
     if (!res.ok) return { ok: false, reason: 'http_' + res.status };
@@ -584,5 +624,5 @@ module.exports = {
   extractGeminiInline, geminiBlockReason, isLikelyBase64, detectImageSignature, verifyImageBytes,
   // Mục 2.1a: registry mở rộng + phân giải khóa — export để test kiểm chứng trực tiếp.
   IMAGE_PROVIDER_DEFS, resolveImageKey, callOpenAICompatibleImage, callOpenAIImage, callGeminiImage,
-  callGeminiImageSdk
+  callGeminiInteractionsImage, extractInteractionsImage, interactionsBlockReason
 };

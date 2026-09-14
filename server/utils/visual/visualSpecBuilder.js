@@ -446,6 +446,12 @@ function buildTitle({ type, question, language }) {
 // đã verify được overlay phía client (mục 1.3).
 const IMAGE_SAFETY_CONSTRAINT = 'Không vẽ chữ số, không viết công thức, không nhãn văn bản dài, '
   + 'không watermark. Nền trắng, nét sạch.';
+// MỤC (đợt audit 4) — "cải tiến mạnh chất lượng ảnh": cụm chỉ dẫn CHẤT LƯỢNG THUẦN TRỰC QUAN, KHÔNG
+// đụng tới quy tắc "không số liệu/không công thức" ở trên (2 cụm tách biệt, cụm này CHỈ nói về độ nét/
+// bố cục/ánh sáng — không thể vô tình làm model vẽ số/chữ trở lại). Ngắn có chủ ý: prompt ảnh vẫn bị
+// giới hạn ký tự cứng theo provider (activePromptCharLimit), thêm cụm dài sẽ lấn chỗ phần mô tả cảnh.
+const IMAGE_QUALITY_BOOST = 'Chất lượng cao, độ chi tiết rõ, bố cục cân đối, ánh sáng đều dịu, '
+  + 'không nhiễu hạt, không méo hình, đường nét sắc nét như minh hoạ sách giáo khoa cao cấp.';
 // Ngưỡng mặc định khi không biết provider nào đang chạy — lấy mức CHẶT nhất (Gemini 2000).
 const DEFAULT_PROMPT_CHAR_LIMIT = 2000;
 
@@ -482,7 +488,11 @@ function buildImagePrompt(spec, opts = {}) {
     .filter((c) => !/số liệu|đơn vị/i.test(c));
   if (visualOnlyConstraints.length) scene.push(visualOnlyConstraints.join(' '));
 
-  const tail = IMAGE_SAFETY_CONSTRAINT;
+  // Ghép 2 cụm ràng buộc CỐ ĐỊNH (chất lượng + an toàn) làm 1 khối "tail" không bao giờ bị cắt — chỉ
+  // phần mô tả cảnh (`body`) bị cắt khi vượt hạn mức ký tự của provider. An toàn đặt SAU CÙNG (giữ
+  // đúng bất biến cũ `prompt.endsWith(IMAGE_SAFETY_CONSTRAINT)` mà test đã kiểm chứng — ràng buộc an
+  // toàn là ràng buộc QUAN TRỌNG NHẤT, phải luôn là câu cuối, không phụ thuộc cụm nào thêm vào sau nó).
+  const tail = `${IMAGE_QUALITY_BOOST} ${IMAGE_SAFETY_CONSTRAINT}`;
   let body = scene.join('\n');
   const budgetForBody = maxChars - tail.length - 1;
   if (budgetForBody > 0 && body.length > budgetForBody) body = body.slice(0, budgetForBody).trimEnd();
@@ -507,7 +517,7 @@ module.exports = {
   REALISM_REQUIRED_RE,
   VISUAL_PROMPT_VERSION, STYLE_PROFILES, styleProfileFor,
   computeNeedsPreciseGeometry, buildVisualOverlay,
-  IMAGE_SAFETY_CONSTRAINT, DEFAULT_PROMPT_CHAR_LIMIT,
+  IMAGE_SAFETY_CONSTRAINT, IMAGE_QUALITY_BOOST, DEFAULT_PROMPT_CHAR_LIMIT,
   buildVisualSpec, buildImagePrompt, specFingerprint,
   extractPointLabels, extractQuantities, extractEquations, extractSteps, extractPlottableFunction,
   extractNamedParts, extractMolecularFormula, extractRegions,

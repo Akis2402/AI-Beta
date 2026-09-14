@@ -219,8 +219,16 @@ function citeNoRangeLabel(contexts) {
 }
 
 function buildSourcePolicyBlock({ hasContexts, hasWebSearch }) {
+  // MỤC (đợt audit 4, nâng cấp cơ chế trích nguồn) — ROOT CAUSE của "trích nguồn web nhưng không
+  // nói rõ nguồn nào": bản CŨ chỉ yêu cầu 1 câu MẪU CỐ ĐỊNH duy nhất ("🌐 Đã tra cứu thêm trên web để
+  // bổ sung phần thông tin tài liệu chưa có.") — câu này không hề chứa TÊN trang/nguồn thật, dù model
+  // đã thực sự tra cứu và CÓ trong ngữ cảnh của nó tên miền/tiêu đề trang thật (kết quả tool
+  // web_search của chính lượt gọi này). Bản cũ cố ý cấm bịa tên miền nhưng lại không tận dụng tên
+  // miền THẬT sẵn có, nên chọn giải pháp an toàn nhưng vô danh. NAY: bắt buộc liệt kê ĐÚNG tên
+  // nguồn thật (domain/tên trang) cho TỪNG nguồn khác nhau thực sự dùng — vẫn giữ nguyên lệnh cấm
+  // bịa đặt, chỉ đổi từ "1 câu chung chung" thành "1 dòng riêng mỗi nguồn thật đã tra được".
   const webRule = hasWebSearch
-    ? `\n4. Nếu các đoạn trích trên CHỈ cung cấp MỘT PHẦN thông tin cần thiết (thiếu một phần công thức/dữ kiện), được phép dùng công cụ tìm kiếm web (đã được cấp cho lượt này) để bổ sung ĐÚNG phần còn thiếu đó — không dùng web để thay thế phần đã có sẵn trong đoạn trích tài liệu. Khi có thực sự dùng web, thêm ĐÚNG MỘT dòng riêng ở cuối toàn bộ câu trả lời (sau mục cuối cùng), đúng nguyên văn định dạng: "🌐 Đã tra cứu thêm trên web để bổ sung phần thông tin tài liệu chưa có." — KHÔNG thêm dòng này nếu không thực sự có dùng web ở lượt này. TUYỆT ĐỐI KHÔNG bịa tên miền/URL/tên trang cụ thể trong câu trả lời trừ khi đó chắc chắn là kết quả THẬT bạn vừa tra cứu được qua chính công cụ tìm kiếm của lượt gọi này.`
+    ? `\n4. Nếu các đoạn trích trên CHỈ cung cấp MỘT PHẦN thông tin cần thiết (thiếu một phần công thức/dữ kiện), được phép dùng công cụ tìm kiếm web (đã được cấp cho lượt này) để bổ sung ĐÚNG phần còn thiếu đó — không dùng web để thay thế phần đã có sẵn trong đoạn trích tài liệu. Khi có thực sự dùng web VÀ công cụ trả về kết quả thật, ở CUỐI toàn bộ câu trả lời (sau mục cuối cùng), thêm MỖI NGUỒN THẬT ĐÃ DÙNG một dòng riêng theo đúng định dạng: "🌐 Nguồn: <tên trang/tên miền thật lấy từ chính kết quả tìm kiếm vừa tra được> — <tóm tắt cực ngắn (dưới 12 từ) thông tin đã lấy từ nguồn đó>". Ví dụ: "🌐 Nguồn: vi.wikipedia.org — định nghĩa định luật bảo toàn động lượng". Nếu dùng từ 2 nguồn khác nhau trở lên, viết đủ TỪNG dòng, không gộp chung 1 dòng. KHÔNG thêm dòng nào nếu không thực sự có dùng web ở lượt này. Nếu công cụ tìm kiếm không trả về kết quả nào dùng được (lỗi/rỗng), KHÔNG được tự chế tên trang — bỏ qua bước này, coi như không dùng web. TUYỆT ĐỐI KHÔNG bịa tên miền/URL/tên trang không có thật hoặc không xuất hiện trong chính kết quả tìm kiếm THẬT của lượt gọi này.`
     : `\n4. Lượt này KHÔNG được cấp công cụ tìm kiếm web — nếu đoạn trích không đủ, giải bằng kiến thức chuẩn, không bịa thêm nguồn/link nào.`;
   return `
 QUY TẮC NGUỒN THAM KHẢO (Sources) — thứ tự ưu tiên BẮT BUỘC, đọc kỹ trước khi trả lời:
