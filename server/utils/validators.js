@@ -17,6 +17,12 @@ const MAX_HISTORY = 20;
 const MAX_HISTORY_ITEM = 4000;
 const MAX_GENERATE_CONTENT = 6000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB sau khi giải mã base64
+// PDF chỉ chứa ảnh scan (không trích được text): client rasterize từng trang thành ảnh và gửi kèm
+// làm "nguồn" cho model đọc trực tiếp bằng vision, thay vì trích dẫn theo đoạn text như PDF thường.
+// Giới hạn số lượng + dung lượng riêng (nhẹ hơn ảnh chụp bài đơn lẻ) để không đội token/cost quá đà
+// khi 1 PDF nhiều trang.
+const MAX_SOURCE_IMAGES = 6;
+const MAX_SOURCE_IMAGE_BYTES = 2 * 1024 * 1024; // 2MB/trang sau khi giải mã base64 (đã downscale ở client)
 const MAX_APPROACH_LEN = 3000;
 const ALLOWED_STAGES = ['approach', 'detail'];
 // PHẦN 27: chế độ hình minh hoạ do người dùng chọn (đi vào cache key — xem routes/chat.js).
@@ -87,6 +93,30 @@ function clip(str, max) {
 }
 
 /**
+ * sourceImages: dùng chung cho /api/chat VÀ /api/generate/outline + /api/generate/mindmap (PDF-chỉ-
+ * ảnh cũng cần đọc được khi soạn đề cương/mindmap, không chỉ lúc giải bài) — tách thành hàm dùng
+ * chung để các nơi validate luôn NHẤT QUÁN 1 bộ giới hạn, không lệch nhau nếu sau này chỉnh ngưỡng.
+ */
+function parseSourceImages(body) {
+  return Array.isArray(body && body.sourceImages)
+    ? body.sourceImages.slice(0, MAX_SOURCE_IMAGES).map((img) => {
+        const mediaType = img && img.mediaType;
+        const base64 = img && img.base64;
+        if (!ALLOWED_IMAGE_TYPES.includes(mediaType)) return null;
+        if (typeof base64 !== 'string' || base64.length === 0) return null;
+        const approxBytes = Math.floor(base64.length * 0.75);
+        if (approxBytes > MAX_SOURCE_IMAGE_BYTES) return null; // âm thầm bỏ qua trang lỗi/quá nặng, không chặn cả yêu cầu
+        return {
+          mediaType,
+          base64,
+          doc: clip(String((img && img.doc) || ''), MAX_DOC_NAME),
+          page: Number.isFinite(Number(img && img.page)) ? Number(img.page) : null
+        };
+      }).filter(Boolean)
+    : [];
+}
+
+/**
  * Validate + sanitize body của POST /api/chat.
  * QUAN TRỌNG: client KHÔNG được phép tự gửi "system prompt" — server luôn tự dựng lại
  * system prompt từ các trường đã được kiểm duyệt bên dưới (xem promptBuilder.js).
@@ -127,6 +157,10 @@ function validateChatBody(body) {
   if (!query && !image) {
     throw new ValidationError('Vui lòng nhập câu hỏi hoặc đính kèm ảnh.');
   }
+
+  // sourceImages: ảnh các trang PDF-chỉ-ảnh (scan), KHÁC với `image` (ảnh đề bài người dùng chụp/dán
+  // trực tiếp) — validate qua parseSourceImages() dùng chung với /api/generate/*.
+  const sourceImages = parseSourceImages(body);
 
   const rules = normalizeRules(body.rules);
 
@@ -171,24 +205,26 @@ function validateChatBody(body) {
       })).filter((h) => h.content)
     : [];
 
-  return { query, deepThinking, crossCheck, image, rules, contexts, settings, history, stage, approachText };
+  return { query, deepThinking, crossCheck, image, sourceImages, rules, contexts, settings, history, stage, approachText };
 }
 
-/** Validate body của các endpoint /api/generate/* */
+/** Validate body của các endpoint /api/generate/* (flashcards + mindmap dùng chung) */
 function validateGenerateBody(body) {
   if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
   const content = clip(String(body.content || '').trim(), MAX_GENERATE_CONTENT);
-  if (!content) throw new ValidationError('Thiếu nội dung để tạo slide/flashcard/mindmap.');
-  return { content };
+  const sourceImages = parseSourceImages(body);
+  if (!content && !sourceImages.length) throw new ValidationError('Thiếu nội dung để tạo slide/flashcard/mindmap.');
+  return { content, sourceImages };
 }
 
 /** Validate body của POST /api/generate/outline (đề cương .docx) */
 function validateOutlineBody(body) {
   if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
   const content = clip(String(body.content || '').trim(), MAX_GENERATE_CONTENT);
-  if (!content) throw new ValidationError('Thiếu nội dung để tạo đề cương.');
+  const sourceImages = parseSourceImages(body);
+  if (!content && !sourceImages.length) throw new ValidationError('Thiếu nội dung để tạo đề cương.');
   const includeExercises = body.includeExercises === true;
-  return { content, includeExercises };
+  return { content, sourceImages, includeExercises };
 }
 
 // ---------- Mục 3A/3C: payload TỐI THIỂU cho self-check / similar ----------

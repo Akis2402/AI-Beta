@@ -94,13 +94,65 @@ const STRAY_PUNCT_ONLY_RE = /^\s*[-*]?\s*[.]\s*$/;
 //       Yes/No/Có/Không ngay sau), KHÔNG phải một câu hỏi học thuật dài có ngữ cảnh.
 //   (2) CHỨA danh từ META nói về ĐỊNH DẠNG ĐẦU RA (tiêu đề, chữ thừa, markdown, footer...), không
 //       phải nội dung môn học — một câu hỏi ôn tập thật như "Có bao nhiêu proton?" không khớp (2).
-const SELF_CHECK_LINE_RE = /^\s*[-*]\s*(?:no|not|have|has|is|are|include[sd]?|avoid|ensure|did|does|any)\b[^?\n]{0,80}\?\s*(?:yes|no|đúng|không|có|chưa)?\.?\s*$/i;
+// Cụm xác nhận cuối câu hỏi — BAN ĐẦU chỉ có yes/no/đúng/không/có/chưa. Ảnh lỗi mới (đợt audit
+// "tạo hình ảnh cấu tạo cơ thể người") cho thấy model cũng tự xác nhận bằng "Checked."/"Done."/
+// "Confirmed." — những từ này CHỈ có nghĩa "đã tự kiểm tra xong", không bao giờ xuất hiện tự nhiên
+// làm từ xác nhận cuối 1 câu hỏi ngắn dạng checklist trong một câu trả lời học thuật thật.
+const SELF_CHECK_LINE_RE = /^\s*[-*]\s*(?:no|not|have|has|is|are|include[sd]?|avoid|ensure|did|does|any)\b[^?\n]{0,80}\?\s*(?:yes|no|đúng|không|có|chưa|checked|confirmed|done|ok(?:ay)?|complete[d]?|verified)?\.?\s*$/i;
 const SELF_CHECK_META_RE = /\b(?:titles?|headers?|heading|extra\s+text|extra\s+content|markdown|footer|disclaimer|placeholder|format(?:ting)?|word\s+count)\b/i;
 
 function isSelfCheckLine(line) {
   const t = String(line == null ? '' : line).trim();
   if (!t || t.length > 120) return false;
   if (!SELF_CHECK_LINE_RE.test(t)) return false;
+  return SELF_CHECK_META_RE.test(t);
+}
+
+// ============================================================================================
+// LỚP PHÒNG VỆ THỨ 5 — XÁC NHẬN TRẦN TRỤI ("Checked.") ĐỨNG RIÊNG 1 DÒNG
+// ============================================================================================
+// NGUYÊN NHÂN GỐC (ảnh người dùng gửi, yêu cầu "tạo hình ảnh cấu tạo cơ thể người"): dòng ĐẦU TIÊN
+// của phản hồi chỉ là "Checked." — mảnh còn lại của một mục checklist tự-kiểm sau khi phần câu hỏi
+// (vd "No titles/headers?") đã bị cắt mất ở đầu stream, hoặc model chỉ in ra đúng từ xác nhận. Danh
+// sách từ CỐ Ý đóng kín (không nhận diện theo khuôn mẫu mở) để tối thiểu hoá dương tính giả: một
+// dòng chỉ có "Checked." hay "Done." đứng riêng biệt gần như không bao giờ là nội dung học thuật
+// thật (không mang thông tin gì để dạy).
+const BARE_CONFIRMATION_RE = /^\s*(?:[-*]\s*|\d+[.)]\s*)?(?:checked|confirmed|verified|done|ok(?:ay)?|complete[d]?)\.?\s*$/i;
+
+function isBareConfirmationLine(line) {
+  return BARE_CONFIRMATION_RE.test(String(line == null ? '' : line));
+}
+
+// ============================================================================================
+// LỚP PHÒNG VỆ THỨ 6 — TIÊU ĐỀ BƯỚC XỬ LÝ NỘI BỘ ĐÁNH SỐ + IN ĐẬM
+// ============================================================================================
+// NGUYÊN NHÂN GỐC (cùng ảnh trên): "5. **Final Output Generation (" — model liệt kê các bước quy
+// trình SINH RA CHÍNH CÂU TRẢ LỜI của nó (không phải các bước giải bài) rồi lộ ra ngoài. Chỉ khớp
+// khi có CẢ đánh số + in đậm + cụm từ nói thẳng về việc sinh output cuối cùng — một tiêu đề bước
+// giải bài thật ("5. **Bước cuối: Kết luận**") không chứa các cụm này nên không bị đụng tới.
+const NUMBERED_PROCESS_HEADER_RE = /^\s*\d+[.)]\s*\*{1,2}\s*(?:final\s+(?:output|answer|response|check|step)|output\s+generation)\b/i;
+
+function isNumberedProcessHeader(line) {
+  return NUMBERED_PROCESS_HEADER_RE.test(String(line == null ? '' : line));
+}
+
+// ============================================================================================
+// LỚP PHÒNG VỆ THỨ 7 — MẢNH CÂU-HỎI-TỰ-KIỂM BỊ NGẮT DÒNG GIỮA CHỪNG
+// ============================================================================================
+// NGUYÊN NHÂN GỐC (cùng ảnh trên): ', no steps, no headers? Yes (ensure no "Giới thiệu:" or
+// "Thành phần:" headers).' — phần ĐẦU câu hỏi tự-kiểm nằm ở dòng TRƯỚC (đã bị loại), phần ĐUÔI trôi
+// sang dòng sau, không còn bullet/opener nào để LỚP 3/4 nhận ra. CHỈ được loại khi đứng NGAY SAU một
+// dòng vừa bị loại (cascading — cùng nguyên tắc với SEPARATOR_ONLY_RE/STRAY_PUNCT_ONLY_RE), và phải
+// vừa (a) không mở đầu bằng chữ hoa (không phải câu văn mới) vừa (b) chứa dấu "?" vừa (c) chứa danh
+// từ META về định dạng đầu ra — ba điều kiện cộng dồn với "cascading" giữ dương tính giả gần như 0.
+const CONTINUATION_FRAGMENT_START_RE = /^\s*[a-z,;:)\]-]/;
+
+function isMetaContinuationFragment(line) {
+  const raw = String(line == null ? '' : line);
+  const t = raw.trim();
+  if (!t || t.length > 200) return false;
+  if (!/\?/.test(t)) return false;
+  if (!CONTINUATION_FRAGMENT_START_RE.test(raw)) return false;
   return SELF_CHECK_META_RE.test(t);
 }
 
@@ -114,6 +166,8 @@ function isMetaPlanningLine(line) {
   if (t.length > 600) return false;               // đoạn rất dài gần như chắc chắn là nội dung thật
   if (/^\s*(?:#{1,6}\s|\|)/.test(t)) return false; // tiêu đề markdown / hàng bảng: nội dung thật
   if (isSelfCheckLine(t)) return true;             // LỚP 4: checklist tự-kiểm về định dạng
+  if (isBareConfirmationLine(t)) return true;       // LỚP 5: "Checked."/"Done." đứng riêng
+  if (isNumberedProcessHeader(t)) return true;      // LỚP 6: tiêu đề bước sinh output đánh số+đậm
   if (!PLANNING_OPENER_RE.test(t)) return false;
   return META_OBJECT_RE.test(t);
 }
@@ -135,7 +189,7 @@ function stripMetaPlanning(text) {
     if (/^\s*```/.test(line)) { insideFence = !insideFence; kept.push(line); lastWasDropped = false; continue; }
     if (insideFence) { kept.push(line); lastWasDropped = false; continue; }
     if (isMetaPlanningLine(line)) { lastWasDropped = true; continue; }
-    if (lastWasDropped && (SEPARATOR_ONLY_RE.test(line) || STRAY_PUNCT_ONLY_RE.test(line))) { continue; }
+    if (lastWasDropped && (SEPARATOR_ONLY_RE.test(line) || STRAY_PUNCT_ONLY_RE.test(line) || isMetaContinuationFragment(line))) { continue; } // LỚP 7
     if (lastWasDropped && !line.trim()) { continue; } // không để lại khoảng trống lạ ở chỗ vừa cắt
     lastWasDropped = false;
     kept.push(line);
@@ -171,7 +225,7 @@ function createMetaPlanningFilter(onVisible) {
     if (/^\s*```/.test(line)) { insideFence = !insideFence; lastWasDropped = false; onVisible(line); return; }
     if (insideFence) { lastWasDropped = false; onVisible(line); return; }
     if (isMetaPlanningLine(line)) { lastWasDropped = true; return; }
-    if (lastWasDropped && (SEPARATOR_ONLY_RE.test(line) || STRAY_PUNCT_ONLY_RE.test(line) || !line.trim())) return;
+    if (lastWasDropped && (SEPARATOR_ONLY_RE.test(line) || STRAY_PUNCT_ONLY_RE.test(line) || isMetaContinuationFragment(line) || !line.trim())) return; // LỚP 7
     lastWasDropped = false;
     onVisible(line);
   }
@@ -201,5 +255,11 @@ module.exports = {
   META_OBJECT_RE,
   isSelfCheckLine,
   SELF_CHECK_LINE_RE,
-  SELF_CHECK_META_RE
+  SELF_CHECK_META_RE,
+  isBareConfirmationLine,
+  BARE_CONFIRMATION_RE,
+  isNumberedProcessHeader,
+  NUMBERED_PROCESS_HEADER_RE,
+  isMetaContinuationFragment,
+  CONTINUATION_FRAGMENT_START_RE
 };

@@ -754,7 +754,7 @@ function runTokenEconomyPipeline(input) {
   // truyền cacheKeyExtra.imageFp (fingerprint THẬT của đúng ảnh này), cache key đã phân biệt đúng
   // theo từng ảnh cụ thể -> AN TOÀN để dùng cache bình thường. Nếu hasImage=true mà KHÔNG có imageFp
   // (caller cũ chưa cập nhật) -> vẫn bypass như cũ (an toàn tuyệt đối, KHÔNG đổi hành vi mặc định).
-  const cacheBypassed = hasImage && !cacheKeyExtra.imageFp;
+  const cacheBypassed = hasImage && !cacheKeyExtra.imageFp && !cacheKeyExtra.sourceImagesFp;
   const cached = cacheBypassed ? null : globalCache.get('L1', cacheKeyParts);
 
   // COMPRESS CONTEXT — dedupe tổng quát trên contexts (bổ sung compressHistoryForBudget đã lo history).

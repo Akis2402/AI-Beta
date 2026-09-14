@@ -475,6 +475,17 @@ router.post('/', async (req, res, next) => {
         source: { type: 'base64', media_type: input.image.mediaType, data: input.image.base64 }
       });
     }
+    // PDF-chỉ-ảnh (scan, không trích được text): gửi thẳng từng trang cho model đọc bằng vision,
+    // ngay sau ảnh đề bài (nếu có) và trước phần text câu hỏi — model thấy ảnh trước khi đọc yêu cầu.
+    if (input.sourceImages && input.sourceImages.length) {
+      input.sourceImages.forEach((img) => {
+        userContent.push({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.base64 }
+        });
+      });
+    }
+    const hasAnyImage = !!input.image || (input.sourceImages && input.sourceImages.length > 0);
     const problemText = input.query || 'Hãy đọc kỹ và giải chi tiết bài tập có trong hình ảnh này.';
     userContent.push({ type: 'text', text: problemText });
 
@@ -483,7 +494,7 @@ router.post('/', async (req, res, next) => {
     // buildReconcileSystemPrompt bên dưới đều spread `input` nên tự động nhận subjectId, không phải
     // sửa từng điểm gọi riêng lẻ.
     const subjectResolved = resolveSubject({
-      manualSubjectId: input.settings.subject, problemText, hasImage: !!input.image
+      manualSubjectId: input.settings.subject, problemText, hasImage: hasAnyImage
     });
     input.subjectId = subjectResolved.subjectId;
     input.secondarySubjectId = subjectResolved.secondarySubjectId;
@@ -665,7 +676,7 @@ router.post('/', async (req, res, next) => {
         provider: representativeProvider,
         capabilities: representativeCapabilities,
         stage, problemText, historyText, contextsText, approachText: input.approachText,
-        hasImage: !!input.image, deepThinking: !!input.deepThinking, crossCheck: !!input.crossCheck,
+        hasImage: hasAnyImage, deepThinking: !!input.deepThinking, crossCheck: !!input.crossCheck,
         problemClass: currentProblemClass,
         remainingMs: globalDeadline.remaining(),
         // PHẦN J: throughput ĐO THẬT của các target đang khả dụng thay cho hằng số 60 tok/s — quyết
@@ -713,7 +724,7 @@ router.post('/', async (req, res, next) => {
     const tePlan = tokenEconomy.runTokenEconomyPipeline({
       problemText, historyText, contextsText, approachText: input.approachText,
       contexts: input.contexts, history: compressedHistory, stage: input.stage,
-      hasImage: !!input.image, hasDrawing: /```(shape|solid3d|plot)/.test(problemText + input.approachText),
+      hasImage: hasAnyImage, hasDrawing: /```(shape|solid3d|plot)/.test(problemText + input.approachText),
       deepThinking: !!input.deepThinking, crossCheck: !!input.crossCheck,
       remainingMs: globalDeadline.remaining(), requirements: requirementsList,
       cacheKeyExtra: {
@@ -733,7 +744,14 @@ router.post('/', async (req, res, next) => {
         contextsFp: tokenEconomy.fingerprint(contextsText),
         // PHẦN 20 FIX: fingerprint THẬT (SHA-256) của đúng ảnh này khi có — cho phép cache an toàn
         // theo từng ảnh cụ thể thay vì bypass hoàn toàn L1 (xem tokenEconomy.runTokenEconomyPipeline).
-        ...(input.image ? { imageFp: tokenEconomy.imageFingerprint(input.image.base64, input.image.mediaType) } : {})
+        // sourceImages (PDF-chỉ-ảnh): gộp fingerprint từng trang theo thứ tự cố định để 2 PDF khác
+        // nhau (hoặc cùng PDF, trang khác nhau) không bao giờ đụng cache key của nhau.
+        ...(input.image ? { imageFp: tokenEconomy.imageFingerprint(input.image.base64, input.image.mediaType) } : {}),
+        ...(input.sourceImages && input.sourceImages.length
+          ? { sourceImagesFp: tokenEconomy.fingerprint(
+              input.sourceImages.map((img) => tokenEconomy.imageFingerprint(img.base64, img.mediaType)).join('|')
+            ) }
+          : {})
       }
     });
     // A5: từ đây trở đi budgetPlanOf() biết lớp bài -> câu MICRO không còn mua ngân sách native
@@ -905,7 +923,7 @@ router.post('/', async (req, res, next) => {
               deepThinking: input.deepThinking,
               onStatus: (message) => sseWrite(res, 'status', { message }),
               deadline: globalDeadline, // mục 4/6: dùng chung 1 đồng hồ với toàn bộ request, không tự tạo riêng
-              requireVision: !!input.image,
+              requireVision: hasAnyImage,
               signal
             });
             candidates = gathered.candidates;
@@ -992,7 +1010,7 @@ router.post('/', async (req, res, next) => {
               webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS,
               requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal
             }),
-            streamOpts: { preferWebSearch: hasWebSearch, requireVision: !!input.image },
+            streamOpts: { preferWebSearch: hasWebSearch, requireVision: hasAnyImage },
             onDelta: (piece) => sseWrite(res, 'delta', { text: piece }),
             onStatus: (st) => sseWrite(res, 'status', { state: STATES.RECOVERING, message: st.message }),
             evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
@@ -1112,7 +1130,7 @@ router.post('/', async (req, res, next) => {
             }),
             deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal
           }),
-          streamOpts: { requireVision: !!input.image },
+          streamOpts: { requireVision: hasAnyImage },
           onDelta: (piece) => sseWrite(res, 'delta', { text: piece }),
           onStatus: (st) => sseWrite(res, 'status', { state: STATES.RECOVERING, message: st.message }),
           evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
@@ -1232,7 +1250,7 @@ router.post('/', async (req, res, next) => {
         requestId: reqLogger.requestId,
         deepThinking: input.deepThinking,
         deadline: globalDeadline, // mục 4/6
-        requireVision: !!input.image,
+        requireVision: hasAnyImage,
         signal
       });
       accumulateUsage(requestUsage, crossCheckUsage && { ...crossCheckUsage });
@@ -1267,7 +1285,7 @@ router.post('/', async (req, res, next) => {
       const initial = await callWithFailover(
         activeProviders,
         { system: reconcileSystem, messages, maxTokens: budgetOf(reconcileStage).coreBudget, reasoningBudget: budgetOf(reconcileStage).reasoningBudget, telemetryStage: 'reconcile', webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
-        { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image } // mục 4/6
+        { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: hasAnyImage } // mục 4/6
       );
 
       // FIX PHẦN 3/6 + mục 4 audit continuation: continuation dùng RESERVE (lô nhỏ dần), có thể MỞ
@@ -1281,7 +1299,7 @@ router.post('/', async (req, res, next) => {
         (msgs, _currentCompleteness, grantedMaxTokens) => callWithFailover(
           activeProviders,
           { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'reconcile_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: budgetOf(reconcileStage).complexityLevel, problemClass: currentProblemClass, mode: 'CONTINUATION' }), webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
-          { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image }
+          { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: hasAnyImage }
         ),
         initial,
         {
@@ -1345,7 +1363,7 @@ router.post('/', async (req, res, next) => {
     const initialDirect = await directCaller(
       activeProviders,
       { system, messages, maxTokens: directBudget.coreBudget, reasoningBudget: directBudget.reasoningBudget, telemetryStage: 'direct', fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
-      { deadline: globalDeadline, requireVision: !!input.image } // mục 4/6
+      { deadline: globalDeadline, requireVision: hasAnyImage } // mục 4/6
     );
 
     // FIX PHẦN 3/6 + mục 4 audit continuation: continuation dùng RESERVE (lô nhỏ dần), có thể MỞ
@@ -1359,7 +1377,7 @@ router.post('/', async (req, res, next) => {
       (msgs, _currentCompleteness, grantedMaxTokens) => directCaller(
         activeProviders,
         { system, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'direct_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass, mode: 'CONTINUATION' }), fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
-        { deadline: globalDeadline, requireVision: !!input.image }
+        { deadline: globalDeadline, requireVision: hasAnyImage }
       ),
       initialDirect,
       {
