@@ -32,7 +32,7 @@
      'self' — không cần SRI (không còn nguy cơ MITM ở CDN thứ 3), không còn timeout/DNS/content-
      blocker/Safari-cache-bug nào có thể chặn được nữa. Version pin y hệt trước (KaTeX 0.16.9). -->
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/css/styles.1bfde1a281.css">
+<link rel="stylesheet" href="/css/styles.2f5d90544c.css">
 </head>
 <body>
 <div id="app">
@@ -233,6 +233,32 @@
   </div>
 </div>
 
+<!-- PHẦN B: panel "Thêm nguồn" (upload + Nguồn gần đây, tối đa 3) — thay cho việc bấm nút cũ mở
+     thẳng file picker hệ điều hành. Dùng chung motion/CSS pattern với settings/note/practice
+     overlay (mục B9: responsive — modal giữa màn hình ở desktop, bottom-sheet full-width ở mobile;
+     mục B10: role=dialog/aria-modal, Esc + click backdrop để đóng, focus quay lại nút mở khi đóng). -->
+<div id="addSourceOverlay" role="dialog" aria-modal="true" aria-labelledby="addSourceTitle">
+  <div id="addSourceModal">
+    <div class="set-head">
+      <h2 id="addSourceTitle"><span class="modal-ic" id="icAddSourceModal"></span><span data-i18n="sources.add">＋ Thêm nguồn</span></h2>
+      <button class="set-close" id="addSourceCloseBtn" data-i18n-aria-label="a11y.closeDialog" aria-label="Đóng">✕</button>
+    </div>
+    <div class="set-section">
+      <div id="addSourceDropZone" tabindex="0" role="button"
+        data-i18n-aria-label="sources.dropTitle" aria-label="Thả tài liệu vào đây hoặc bấm để chọn file">
+        <span class="drop-ic" id="icAddSourceDrop"></span><br>
+        <b data-i18n="sources.dropTitle">Thả tài liệu vào đây</b><br>
+        <span class="drop-sub" data-i18n="sources.dropSub">PDF, DOCX hoặc TXT — hoặc bấm "Thêm nguồn"</span>
+      </div>
+    </div>
+    <div class="set-section" id="recentSourcesSection">
+      <h3 data-i18n="recentSources.title">Nguồn gần đây</h3>
+      <ul id="recentSourcesList" aria-label="Nguồn gần đây"></ul>
+      <p class="set-empty" id="recentSourcesEmpty" data-i18n="recentSources.empty">Chưa có nguồn nào được dùng trước đây.</p>
+    </div>
+  </div>
+</div>
+
 <div id="noteOverlay">
   <div id="noteModal">
     <div class="set-head">
@@ -352,7 +378,7 @@
      nội dung khác nhau -> an toàn cache "immutable" vĩnh viễn (xem vercel.json). File nguồn ở đây
      CỐ Ý giữ tên KHÔNG hash (đây là template — build step ghi đè bản có hash vào output deploy,
      KHÔNG commit ngược lại repo). -->
-<script src="/js/i18n/translations.e11956bf52.js"></script>
+<script src="/js/i18n/translations.0b37d52243.js"></script>
 <script src="/js/i18n/languageStore.763a541496.js"></script>
 <script src="/js/i18n/i18n.bcc564c301.js"></script>
 <script src="/js/storage.1d27028cd0.js"></script>
@@ -367,6 +393,6 @@
 <script src="/js/tasks/conversationTaskManager.d85a7b02e0.js"></script>
 <script src="/js/voiceInput.66463c87c2.js"></script>
 <script src="/js/geo2d-engine.b1cd4669fc.js"></script>
-<script src="/js/app.a8b4a2a46b.js"></script>
+<script src="/js/app.5a65cd48bf.js"></script>
 </body>
 </html>
