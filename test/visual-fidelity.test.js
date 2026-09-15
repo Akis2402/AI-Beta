@@ -1,20 +1,21 @@
 'use strict';
 
 // ============================================================================================
-// RỦI RO #3 — RENDERER SINH HỌC/ĐỊA LÝ CHỈ Ở MỨC SƠ ĐỒ: định tuyến đúng + nói thật
+// FIDELITY — ĐỀ CẦN HÌNH THẬT (lát cắt/giải phẫu/tiêu bản/bản đồ) ĐƯỢC NHẬN RA VÀ NÓI THẬT
 // ============================================================================================
-// Cách xử lý ĐÚNG không phải là làm renderer đoán hình giải phẫu (hình sai còn tệ hơn không hình).
-// Ba việc kiểm ở đây:
-//   1. Nhận ra đề nào thực sự cần hình THẬT (lát cắt, giải phẫu, tiêu bản, bản đồ địa hình).
-//   2. Có image provider -> đi đường image generation, không phải sơ đồ SVG.
-//   3. Không có provider -> vẫn có hình sơ đồ (tốt hơn không có gì) NHƯNG caption nói thẳng đó là
-//      sơ đồ khái niệm, telemetry ghi 'schematic_only', và có gợi ý nâng cấp đúng hướng.
+// Kiến trúc AI image-first: mọi hình 2D tĩnh đều là ảnh AI, nên `realismRequired` không còn để
+// chọn renderer nữa mà để SIẾT PROMPT (yêu cầu hình tả thực thay vì sơ đồ khối). Ba việc kiểm:
+//   1. Nhận ra đề nào thực sự cần hình THẬT.
+//   2. Cờ đó đi vào route + prompt ảnh.
+//   3. Không có image provider -> KHÔNG có hình (blocked) + gợi ý cấu hình; TUYỆT ĐỐI không dựng
+//      sơ đồ SVG thay thế.
 
 const assert = require('assert');
 const specBuilder = require('../server/utils/visual/visualSpecBuilder');
 const router = require('../server/utils/visual/visualRendererRouter');
 const pipeline = require('../server/utils/visual/visualPipeline');
 const cache = require('../server/utils/visual/visualCache');
+const { loadVisualModules, withFetch, geminiImageResponse } = require('./_imageMock');
 
 const results = [];
 async function test(name, fn) {
@@ -46,74 +47,98 @@ const SCHEMATIC_CASES = [
     SCHEMATIC_CASES.forEach(([subject, q]) => {
       assert.strictEqual(specBuilder.needsRealism(q, subject), false, 'không được đòi hình thật: ' + q);
     });
-    // Môn mà deterministic vốn đã chính xác (toán/lý) thì không bao giờ rơi vào nhánh này.
+    // Môn mà 'lát cắt' mang nghĩa hình học thuần tuý (toán/lý) thì không rơi vào nhánh này.
     assert.strictEqual(specBuilder.needsRealism('Vẽ lát cắt của hình chóp theo mặt phẳng (P)', 'math'), false);
   });
 
-  await test('R3-3. CÓ image provider -> đi đường image generation, không dùng sơ đồ SVG', () => {
+  await test('R3-3. CÓ image provider -> ảnh AI, không còn khái niệm "sơ đồ SVG"', () => {
     const spec = { type: 'biology_diagram', realismRequired: true, style: 'educational_scientific' };
     const route = router.chooseVisualRenderer(spec, { imageProviderAvailable: true });
+    assert.strictEqual(route.renderer, 'generated_image');
     assert.strictEqual(route.primary, 'image_generation');
-    assert.strictEqual(route.fidelity, 'illustrative');
+    assert.strictEqual(route.fidelity, 'ai_generated');
+    assert.strictEqual(route.realismRequired, true);
     assert.strictEqual(route.upgradeHint, null, 'đã có provider thì không còn gì để gợi ý nâng cấp');
   });
 
-  await test('R3-4. KHÔNG có provider -> vẫn có sơ đồ, nhưng đánh dấu schematic_only + gợi ý đúng hướng', () => {
+  await test('R3-4. KHÔNG có provider -> blocked + gợi ý đúng hướng, KHÔNG dựng hình thay thế', () => {
     const spec = { type: 'biology_diagram', realismRequired: true, style: 'educational_scientific' };
     const route = router.chooseVisualRenderer(spec, { imageProviderAvailable: false });
-    assert.strictEqual(route.primary, 'deterministic', 'vẫn phải có hình, không bỏ trắng');
-    assert.strictEqual(route.fidelity, 'schematic_only');
-    assert.strictEqual(route.reason, 'conceptual_realism_needed_no_provider');
+    assert.strictEqual(route.renderer, 'generated_image', 'renderer không đổi theo cấu hình hạ tầng');
+    assert.strictEqual(route.primary, 'image_generation');
+    assert.strictEqual(route.blocked, 'no_image_provider');
+    assert.strictEqual(route.reason, 'no_image_provider');
     assert.ok(/IMAGE_API_KEY/.test(route.upgradeHint), 'gợi ý phải chỉ đúng đường nâng cấp');
-    assert.ok(/KHÔNG khắc phục bằng cách để renderer tự đoán hình/.test(route.upgradeHint),
-      'phải nói rõ hướng SAI để không ai đi làm renderer đoán hình');
+    assert.ok(/KHÔNG dựng hình thay thế bằng SVG/.test(route.upgradeHint),
+      'phải nói rõ hệ thống không còn dựng SVG thay thế');
   });
 
-  await test('R3-5. Đề chỉ cần sơ đồ -> fidelity "schematic", KHÔNG có cảnh báo thừa', () => {
-    const spec = { type: 'biology_diagram', realismRequired: false, style: 'educational_scientific' };
-    const route = router.chooseVisualRenderer(spec, { imageProviderAvailable: false });
-    assert.strictEqual(route.fidelity, 'schematic');
-    assert.strictEqual(route.upgradeHint, null, 'không dọa người dùng khi sơ đồ vốn đã là đáp án đúng');
-  });
-
-  await test('R3-6. Loại accuracy-critical KHÔNG bị nhánh realism kéo sang image generation', () => {
-    const spec = { type: 'geometry_diagram', realismRequired: true, style: 'educational_scientific' };
-    const route = router.chooseVisualRenderer(spec, { imageProviderAvailable: true });
-    assert.strictEqual(route.primary, 'deterministic');
-    assert.strictEqual(route.accuracyCritical, true);
-    assert.ok(!route.fallbacks.includes('image_generation'), 'hình học chính xác không bao giờ giao cho image model');
-  });
-
-  await test('R3-7. Pipeline: caption NÓI THẲNG đây là sơ đồ khái niệm + telemetry schematic_only', async () => {
-    cache._resetForTest();
-    const r = await pipeline.runVisualPipeline({
-      question: 'Quan sát tiêu bản lá cắt ngang, mô tả và vẽ hình cấu tạo các lớp mô của lá.',
-      finalAnswer: 'Lá gồm biểu bì trên, mô giậu, mô xốp và biểu bì dưới. Lục lạp tập trung ở mô giậu.',
-      answerComplete: true, subject: 'biology', language: 'vi'
+  await test('R3-5. realismRequired đi THẲNG vào prompt ảnh (yêu cầu hình tả thực)', () => {
+    const spec = specBuilder.buildVisualSpec({
+      decision: { visualType: 'biology_diagram', visualPurpose: 'cấu tạo lá' },
+      question: 'Quan sát tiêu bản lá cắt ngang và nhận dạng các lớp mô của lá.',
+      finalAnswer: 'Lá gồm biểu bì trên, mô giậu, mô xốp và biểu bì dưới.',
+      subject: 'biology'
     });
-    assert.strictEqual(r.telemetry.visualRealismRequired, true);
-    if (r.status === 'ready') {
-      assert.strictEqual(r.telemetry.visualFidelity, 'schematic_only');
-      assert.ok(/sơ đồ khái niệm/.test(r.visuals[0].caption),
-        'caption phải nói rõ mức trung thực, không để người học tưởng đây là hình giải phẫu thật');
-      assert.strictEqual(r.visuals[0].fidelity, 'schematic_only');
-    }
-    assert.ok(r.telemetry.visualUpgradeHint, 'telemetry phải mang gợi ý nâng cấp cho người vận hành');
+    assert.strictEqual(spec.realismRequired, true);
+    const prompt = specBuilder.buildImagePrompt(spec);
+    assert.ok(/tả thực/.test(prompt), 'prompt phải yêu cầu hình tả thực, không phải sơ đồ khối');
+    assert.ok(!/<svg/i.test(prompt));
   });
 
-  await test('R3-8. Cache: bản "schematic_only" KHÔNG được trả lại sau khi đã có image provider', () => {
+  await test('R3-6. Loại đòi độ chính xác cao vẫn đi ảnh AI, chỉ khác ở cờ + chỉ thị siết', () => {
+    const spec = { type: 'geometry_diagram', realismRequired: true, style: 'educational_scientific', language: 'vi', labels: ['A'], objects: [], data: {} };
+    const route = router.chooseVisualRenderer(spec, { imageProviderAvailable: true });
+    assert.strictEqual(route.renderer, 'generated_image');
+    assert.strictEqual(route.highPrecisionRequired, true);
+    const prompt = specBuilder.buildImagePrompt({ ...spec, title: 'Hình', purpose: 'p', aspectRatio: '1:1' });
+    assert.ok(prompt.includes(specBuilder.GEOMETRY_STRICT_DIRECTIVES),
+      'hình học phải kèm chỉ thị exact topology/preserve measurements');
+  });
+
+  await test('R3-7. Pipeline: có provider -> ẢNH AI thật; telemetry ghi nhận realism', async () => {
+    const { pipeline: pl, restore } = loadVisualModules({ GEMINI_IMAGE_API_KEY: 'k' });
+    try {
+      const r = await withFetch(async () => geminiImageResponse(), () => pl.runVisualPipeline({
+        question: 'Quan sát tiêu bản lá cắt ngang, mô tả và vẽ hình cấu tạo các lớp mô của lá.',
+        finalAnswer: 'Lá gồm biểu bì trên, mô giậu, mô xốp và biểu bì dưới. Lục lạp tập trung ở mô giậu.',
+        answerComplete: true, subject: 'biology', language: 'vi'
+      }));
+      assert.strictEqual(r.telemetry.visualRealismRequired, true);
+      assert.strictEqual(r.status, 'ready', JSON.stringify(r.telemetry));
+      assert.strictEqual(r.visuals[0].renderer, 'generated_image');
+      assert.strictEqual(r.visuals[0].fidelity, 'ai_generated');
+      assert.notStrictEqual(r.visuals[0].format, 'svg');
+    } finally { restore(); }
+  });
+
+  await test('R3-7b. Pipeline: KHÔNG có provider -> failed + hint, KHÔNG có visual nội dung', async () => {
+    const { pipeline: pl, restore } = loadVisualModules({});
+    try {
+      const r = await pl.runVisualPipeline({
+        question: 'Quan sát tiêu bản lá cắt ngang, mô tả và vẽ hình cấu tạo các lớp mô của lá.',
+        finalAnswer: 'Lá gồm biểu bì trên, mô giậu, mô xốp và biểu bì dưới.',
+        answerComplete: true, subject: 'biology', language: 'vi'
+      });
+      assert.strictEqual(r.status, 'failed');
+      assert.strictEqual(r.visuals[0].renderFailed, true);
+      assert.ok(r.telemetry.visualUpgradeHint, 'telemetry phải mang gợi ý nâng cấp cho người vận hành');
+    } finally { restore(); }
+  });
+
+  await test('R3-8. Cache key phủ aspect ratio/style — ảnh khác tham số KHÔNG dùng chung bản cũ', () => {
     const base = {
       promptVersion: 'v8', specFingerprint: 'sp', answerStructureHash: 'a', subject: 'biology',
-      language: 'vi', renderer: 'svg_diagram', model: 'deterministic', sourceFingerprint: '',
+      language: 'vi', renderer: 'generated_image', model: 'gemini', sourceFingerprint: '',
       imageFingerprint: '', userPreference: 'auto'
     };
-    const before = cache.buildKey({ ...base, style: 'educational_scientific#schematic_only' });
-    const after = cache.buildKey({ ...base, style: 'educational_scientific#illustrative' });
-    assert.notStrictEqual(before, after, 'fidelity phải nằm trong cache key');
+    const a = cache.buildKey({ ...base, style: 'biology_anatomical#3:4' });
+    const b = cache.buildKey({ ...base, style: 'biology_anatomical#1:1' });
+    assert.notStrictEqual(a, b, 'style+aspectRatio phải nằm trong cache key');
   });
 
   let p = 0, f = 0;
-  console.log('\n== RỦI RO #3: mức trung thực của hình sinh học/địa lý ==');
+  console.log('\n== FIDELITY: đề cần hình thật + không còn đường SVG thay thế ==');
   results.forEach((r) => {
     if (r.pass) { p++; console.log('  ok  - ' + r.name); }
     else { f++; console.log(' FAIL - ' + r.name + '\n        ' + r.error); }

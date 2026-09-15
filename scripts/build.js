@@ -41,7 +41,6 @@ const CORE_JS = [
   'solid3d.js',
   'scene3d.js', // PHẦN J-S: engine 3D mới (compact scene JSON + patch)
   'voiceInput.js', // PHẦN D: nhập bằng giọng nói (Web Speech API, xử lý hoàn toàn trong trình duyệt)
-  'geo2d-engine.js',
   'app.js',
 ];
 // PHẦN T-AZ (i18n) / A-C (Puter) / E-I (task manager): asset mới nằm ở thư mục con riêng —

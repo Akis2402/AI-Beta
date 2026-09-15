@@ -11,7 +11,6 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const renderer = require('../server/utils/visual/deterministicRenderer');
 
 let passed = 0;
 let failed = 0;
@@ -101,53 +100,28 @@ test('M8. dải "Đang nghe…" được phép xuống dòng, không đẩy layo
   assert.ok(/#voiceStatus\s*\{[^}]*flex-wrap:\s*wrap/.test(MOBILE_CSS));
 });
 
-test('M9. nhãn "sơ đồ thay thế" xuống dòng riêng thay vì bóp tiêu đề hình', () => {
-  assert.ok(/\.visual-fallback-badge\s*\{[^}]*display:\s*block/.test(MOBILE_CSS),
-    'trên màn hình hẹp badge nằm cùng dòng sẽ cắt cụt tiêu đề');
+test('M9. KHÔNG còn nhãn "sơ đồ thay thế" (cơ chế fallback SVG đã bị loại bỏ)', () => {
+  assert.ok(!/visual-fallback-badge/.test(css), 'CSS còn tàn dư của cơ chế fallback SVG');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');
+  assert.ok(!/fallbackSchematic/.test(app), 'app.js còn tàn dư fallbackSchematic');
 });
 
 console.log('\n== Hình minh hoạ trên màn hình hẹp ==');
 
-function buildParts(n) {
-  return Array.from({ length: n }, (_, i) => ({
-    name: `Hệ cơ quan ${i + 1}`,
-    note: 'Mô tả chức năng chính của hệ cơ quan này trong cơ thể người, đủ dài để cần xuống dòng.'
-  }));
-}
-
-test('M10. bảng thành phần dùng MỘT cột — lưới 2 cột co xuống 360px là không đọc nổi', () => {
-  const svg = renderer.renderDeterministic({
-    type: 'biology_diagram', title: 'Cấu tạo cơ thể người', data: { parts: buildParts(6) }
-  }).content;
-  // Một cột => mọi thẻ có cùng toạ độ x.
-  const xs = [...svg.matchAll(/<rect x="([\d.]+)" y="[\d.]+" width="([\d.]+)" height="\d+" rx="10"/g)]
-    .map((m) => ({ x: Number(m[1]), w: Number(m[2]) }));
-  assert.ok(xs.length >= 6, `thiếu thẻ thành phần, thấy ${xs.length}`);
-  assert.strictEqual(new Set(xs.map((c) => c.x)).size, 1, 'còn nhiều hơn một cột');
-  assert.ok(xs[0].w > 500, `thẻ chỉ rộng ${xs[0].w}/720 — quá hẹp khi co về 360px`);
+test('M10. thẻ hình AI co theo bề ngang, không tràn ngang trên điện thoại', () => {
+  assert.ok(/\.visual-card-image img\s*\{[^}]*max-width:\s*100%/.test(MOBILE_CSS)
+    || /\.visual-img\s*\{[^}]*max-width:\s*100%/.test(css),
+  'ảnh AI phải co theo bề ngang màn hình');
 });
 
-test('M11. SVG co theo bề ngang (width=100% + viewBox), không cố định pixel', () => {
-  const svg = renderer.renderDeterministic({
-    type: 'biology_diagram', title: 'X', data: { parts: buildParts(3) }
-  }).content;
-  // Chỉ xét THẺ <svg> MỞ ĐẦU — các <rect> bên trong tất nhiên có width pixel, đó là toạ độ trong
-  // hệ viewBox chứ không phải kích thước hiển thị.
-  const openTag = /<svg\b[^>]*>/.exec(svg)[0];
-  assert.ok(/width="100%"/.test(openTag), 'width cố định sẽ tràn ngang trên điện thoại');
-  assert.ok(/viewBox="0 0 \d+ \d+"/.test(openTag));
-  assert.ok(!/\swidth="\d+(?:px)?"/.test(openTag), 'không được có width pixel cứng ở thẻ svg gốc');
-  assert.ok(!/\sheight="\d+(?:px)?"/.test(openTag), 'height pixel cứng phá tỉ lệ khi co ngang');
+test('M11. KHÔNG còn CSS phục vụ hình SVG minh hoạ (.visual-svg, .draw-wrap svg)', () => {
+  assert.ok(!/\.visual-svg/.test(css), 'CSS còn selector của hình SVG cũ');
+  assert.ok(!/\.draw-wrap svg/.test(css), 'CSS còn selector của hình SVG cũ');
 });
 
-test('M12. hình cao lên theo số thành phần, không nhồi chữ vào khung cố định', () => {
-  const h = (n) => {
-    const svg = renderer.renderDeterministic({
-      type: 'biology_diagram', title: 'X', data: { parts: buildParts(n) }
-    }).content;
-    return Number(/viewBox="0 0 \d+ (\d+)"/.exec(svg)[1]);
-  };
-  assert.ok(h(6) > h(3), 'nhiều thành phần hơn phải cao hơn');
+test('M12. CSS 3D tương tác vẫn còn nguyên (không xoá nhầm khi dọn SVG)', () => {
+  ['.draw-wrap-3d', '.scene3d-wrap', '.scene3d-toolbar', '.scene3d-canvas-host', '.scene3d-fallback']
+    .forEach((sel) => assert.ok(css.includes(sel), 'mất CSS 3D: ' + sel));
 });
 
 test('M13. ảnh AI bị giới hạn chiều cao để không chiếm trọn màn hình dọc', () => {

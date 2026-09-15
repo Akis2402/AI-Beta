@@ -19,10 +19,14 @@ async function test(name, fn) {
 
 const PARTS = {
   promptVersion: 'chat-prompt-v8', specFingerprint: 'spec-abc', answerStructureHash: 'ans-1',
-  subject: 'math', language: 'vi', style: 'clean', renderer: 'deterministic',
-  model: 'deterministic', sourceFingerprint: 's1', imageFingerprint: '', userPreference: 'auto'
+  subject: 'math', language: 'vi', style: 'clean#4:3', renderer: 'generated_image',
+  model: 'gemini-image', sourceFingerprint: 's1', imageFingerprint: '', userPreference: 'auto'
 };
-const VALUE = { content: '<svg width="10"/>', renderer: 'deterministic', format: 'svg' };
+// Kiến trúc AI image-first: cache CHỈ chứa ảnh AI thật (renderer/origin/format đã qua quality gate).
+const VALUE = {
+  url: 'data:image/png;base64,iVBORw0KGgo=', renderer: 'generated_image',
+  origin: 'ai_generated', format: 'data_url', model: 'gemini-image', provider: 'gemini'
+};
 const OK = { validated: true, answerComplete: true };
 
 /** Driver giả mô phỏng 1 Redis dùng chung giữa các instance. */

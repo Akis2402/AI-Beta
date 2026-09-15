@@ -5,8 +5,8 @@
 // ============================================================================================
 //   (A) Nháp lập kế hoạch tiếng Anh ("We need to continue from that point...") stream thẳng ra
 //       làm câu trả lời ở lượt tiếp nối.
-//   (B) Sơ đồ Sinh học là một hình elip rỗng với các chấm đánh số đặt ở vị trí BỊA, nhãn bị cắt
-//       cụt ở 22/28 ký tự.
+//   (B) Sơ đồ Sinh học cũ (deterministic SVG) vẽ elip rỗng + chấm đánh số ở vị trí BỊA, nhãn cắt
+//       cụt. Cơ chế đó ĐÃ BỊ XOÁ: nay dữ kiện sinh học đi vào prompt ảnh AI, đầy đủ, không bịa.
 //   (C) "Tạo cho tôi hình ảnh cấu tạo con người" bị ép qua pipeline giải bài hai giai đoạn.
 
 const assert = require('assert');
@@ -15,7 +15,7 @@ const path = require('path');
 
 const meta = require('../server/utils/metaPlanningFilter');
 const { stripThinkingTags } = require('../server/utils/thinkingFilter');
-const renderer = require('../server/utils/visual/deterministicRenderer');
+const specBuilder = require('../server/utils/visual/visualSpecBuilder');
 const decisionEngine = require('../server/utils/visual/visualDecisionEngine');
 
 let passed = 0;
@@ -112,75 +112,71 @@ test('A9. aiProviders mắc bộ lọc vào ĐÚNG chuỗi stream (trước safe
 });
 
 // ============================================================================================
-console.log('\n== (B) Sơ đồ Sinh học: KHÔNG vẽ hình giả, KHÔNG cắt cụt nhãn ==');
+console.log('\n== (B) Sơ đồ Sinh học: dữ kiện đi vào PROMPT ẢNH đầy đủ, không bịa, không cắt cụt ==');
 
 // Đúng nội dung trong ảnh chụp màn hình.
-const BIO_SPEC = {
-  type: 'biology_diagram',
-  title: 'Sơ đồ cấu trúc sinh học',
-  data: {
-    parts: [
-      { name: 'Phân loại', note: 'Cơ thể người có 4 nhóm mô chính: biểu mô, mô liên kết, mô cơ và mô thần kinh.' },
-      { name: 'Hệ vận động', note: 'Gồm hệ xương và hệ cơ, giúp cơ thể di chuyển và giữ hình dạng.' },
-      { name: 'Hệ sinh dục', note: 'Thực hiện chức năng sinh sản, duy trì nòi giống.' },
-      { name: 'Hệ bì (da)', note: 'Bảo vệ cơ thể, điều hòa thân nhiệt và cảm nhận xúc giác.' }
-    ]
-  }
-};
+const BIO_ANSWER = [
+  '- **Phân loại**: Cơ thể người có 4 nhóm mô chính: biểu mô, mô liên kết, mô cơ và mô thần kinh.',
+  '- **Hệ vận động**: Gồm hệ xương và hệ cơ, giúp cơ thể di chuyển và giữ hình dạng.',
+  '- **Hệ sinh dục**: Thực hiện chức năng sinh sản, duy trì nòi giống.',
+  '- **Hệ bì (da)**: Bảo vệ cơ thể, điều hòa thân nhiệt và cảm nhận xúc giác.'
+].join('\n');
 
-function svgText(svg) {
-  return String(svg).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+function bioSpec() {
+  return specBuilder.buildVisualSpec({
+    decision: { visualType: 'biology_diagram', visualPurpose: 'cấu tạo cơ thể người' },
+    question: 'Trình bày cấu tạo cơ thể người',
+    finalAnswer: BIO_ANSWER,
+    subject: 'biology'
+  });
 }
 
-test('B1. KHÔNG có toạ độ thật -> KHÔNG vẽ elip/chấm đánh số ở vị trí bịa', () => {
-  const out = renderer.renderDeterministic(BIO_SPEC);
-  assert.ok(out.ok, 'renderer phải trả về được thứ gì đó');
-  assert.ok(!/<ellipse/.test(out.content),
-    'vẫn vẽ hình elip rỗng — hình này không đại diện cho bất cứ thứ gì và ngụ ý vị trí giải phẫu giả');
+test('B1. KHÔNG còn renderer SVG nào trong hệ thống hình (module đã bị xoá hẳn)', () => {
+  assert.throws(
+    () => require('../server/utils/visual/deterministicRenderer'),
+    /Cannot find module/,
+    'deterministicRenderer.js phải bị xoá, không được để lại dead code'
+  );
+  const visualDir = path.join(__dirname, '..', 'server', 'utils', 'visual');
+  const files = fs.readdirSync(visualDir);
+  assert.ok(!files.includes('deterministicRenderer.js'));
 });
 
-test('B2. mô tả dài KHÔNG bị cắt cụt — phải XUỐNG DÒNG', () => {
-  const text = svgText(renderer.renderDeterministic(BIO_SPEC).content);
-  assert.ok(/Cơ thể người có 4 nhóm mô chính/.test(text),
-    `mô tả vẫn bị cắt: "${text.slice(0, 160)}"`);
-  assert.ok(/biểu mô/.test(text), 'phần đuôi của mô tả bị mất');
+test('B2. mọi tên thành phần trong lời giải đều vào spec, KHÔNG cắt cụt', () => {
+  const spec = bioSpec();
+  const names = spec.data.parts.map((p) => p.name);
+  ['Phân loại', 'Hệ vận động', 'Hệ sinh dục', 'Hệ bì (da)'].forEach((n) => {
+    assert.ok(names.includes(n), 'thiếu thành phần: ' + n);
+  });
 });
 
-test('B3. mọi tên thành phần đều xuất hiện đầy đủ', () => {
-  const text = svgText(renderer.renderDeterministic(BIO_SPEC).content);
-  ['Phân loại', 'Hệ vận động', 'Hệ sinh dục', 'Hệ bì (da)']
-    .forEach((n) => assert.ok(text.includes(n), `thiếu "${n}"`));
+test('B3. prompt ảnh liệt kê ĐỦ thành phần bắt buộc (Required objects)', () => {
+  const prompt = specBuilder.buildImagePrompt(bioSpec());
+  assert.ok(/Required objects:/.test(prompt));
+  ['Phân loại', 'Hệ vận động', 'Hệ sinh dục'].forEach((n) => {
+    assert.ok(prompt.includes(n), 'prompt thiếu thành phần: ' + n);
+  });
 });
 
-test('B4. CÓ toạ độ giải phẫu thật -> VẪN dựng sơ đồ định vị (không mất tính năng)', () => {
-  const positioned = {
-    ...BIO_SPEC,
-    data: {
-      parts: BIO_SPEC.data.parts.map((p, i) => ({ ...p, pos: { x: 0.3 + i * 0.1, y: 0.2 + i * 0.15 } }))
-    }
-  };
-  assert.strictEqual(renderer.hasAnatomicalPositions(positioned.data.parts), true);
-  const out = renderer.renderDeterministic(positioned);
-  assert.ok(/<circle/.test(out.content) && /<line/.test(out.content), 'mất sơ đồ định vị hợp lệ');
+test('B4. prompt CẤM bịa dữ kiện — nguồn gốc lỗi "chấm đánh số ở vị trí bịa"', () => {
+  const prompt = specBuilder.buildImagePrompt(bioSpec());
+  assert.ok(/No invented data/.test(prompt));
+  assert.ok(/Do not replace or omit required labels/.test(prompt));
 });
 
-test('B5. toạ độ thiếu/sai miền -> KHÔNG được coi là toạ độ thật', () => {
-  const parts = BIO_SPEC.data.parts.map((p) => ({ ...p }));
-  assert.strictEqual(renderer.hasAnatomicalPositions(parts), false, 'thiếu pos mà vẫn nhận');
-  parts.forEach((p, i) => { p.pos = { x: i === 0 ? 5 : 0.4, y: 0.4 }; });
-  assert.strictEqual(renderer.hasAnatomicalPositions(parts), false, 'pos ngoài miền 0..1 mà vẫn nhận');
+test('B5. prompt ảnh KHÔNG BAO GIỜ chứa markup SVG', () => {
+  const prompt = specBuilder.buildImagePrompt(bioSpec());
+  assert.ok(!/<svg|<ellipse|<circle/i.test(prompt));
 });
 
-test('B6. wrapText cắt ở RANH GIỚI TỪ, không cắt giữa chữ', () => {
-  const lines = renderer.wrapText('Bảo vệ cơ thể, điều hòa thân nhiệt và cảm nhận xúc giác.', 20, 3);
-  assert.ok(lines.length > 1, 'phải xuống dòng');
-  lines.forEach((l) => assert.ok(l.length <= 21, `dòng quá dài: "${l}"`));
-  assert.ok(!/\S…\S/.test(lines.join(' ')), 'cắt giữa từ');
-});
-
-test('B7. dưới 2 thành phần -> không dựng gì (không bịa hình từ 1 dữ kiện)', () => {
-  const out = renderer.renderBiology({ type: 'biology_diagram', data: { parts: [{ name: 'Hệ cơ' }] } });
-  assert.strictEqual(out, null);
+test('B6. lời giải không có thành phần nào -> spec không bịa ra parts', () => {
+  const spec = specBuilder.buildVisualSpec({
+    decision: { visualType: 'biology_diagram', visualPurpose: 'khái niệm' },
+    question: 'Minh họa khái niệm sự sống',
+    finalAnswer: 'Sự sống là một khái niệm rộng.',
+    subject: 'biology'
+  });
+  assert.deepStrictEqual(spec.data.parts, [], 'không được tự sinh thành phần không có trong lời giải');
 });
 
 // ============================================================================================
@@ -287,16 +283,14 @@ test('D3. stripMetaPlanning loại sạch checklist, giữ nguyên "Lời giải
   assert.ok(/Sự sống là một khái niệm rộng/.test(out), 'mất nội dung thật');
 });
 
-test('D4. renderConceptCard KHÔNG lặp lại title làm thân card khi thiếu purpose', () => {
-  const out = renderer.renderDeterministic({
-    type: 'concept_illustration', title: 'Sơ đồ cấu trúc sinh học', purpose: '', data: {}
+test('D4. prompt ảnh KHÔNG lặp lại title khi thiếu purpose (nguồn của card lặp chữ)', () => {
+  const prompt = specBuilder.buildImagePrompt({
+    type: 'concept_illustration', title: 'Sơ đồ cấu trúc sinh học', purpose: '',
+    labels: [], objects: [], relationships: [], requiredEquations: [], data: {},
+    language: 'vi', subject: 'biology', aspectRatio: '1:1'
   });
-  assert.ok(out.ok, 'phải vẫn dựng được thẻ tối thiểu');
-  // Chỉ đếm phần TEXT HIỂN THỊ (svgText strip hết tag/attribute, kể cả aria-label) — aria-label
-  // trùng title là hợp lệ (a11y), thứ KHÔNG được lặp là phần thân card NHÌN THẤY ĐƯỢC.
-  const visible = svgText(out.content);
-  const bodyMatches = (visible.match(/Sơ đồ cấu trúc sinh học/g) || []).length;
-  assert.strictEqual(bodyMatches, 1, `title phải chỉ xuất hiện đúng 1 lần (heading) trong phần nhìn thấy, thực tế ${bodyMatches} lần: "${visible}"`);
+  const hits = (prompt.match(/Sơ đồ cấu trúc sinh học/g) || []).length;
+  assert.strictEqual(hits, 1, `title chỉ được xuất hiện 1 lần, thực tế ${hits}`);
 });
 
 test('D5. visualPipeline không gửi caption trùng y hệt title xuống client', () => {

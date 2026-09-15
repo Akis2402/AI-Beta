@@ -83,7 +83,7 @@ vm.createContext(win);
 loadScript(win, 'js/boot.js');
 loadScript(win, 'js/subjects.js');
 loadScript(win, 'js/formulas.js');
-loadScript(win, 'js/geo2d-engine.js');
+
 loadScript(win, 'js/solid3d.js');
 loadScript(win, 'js/storage.js');
 loadScript(win, 'js/app.js');

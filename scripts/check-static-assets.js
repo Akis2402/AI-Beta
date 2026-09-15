@@ -64,7 +64,7 @@ for (const [logicalName, urlPath] of Object.entries(manifest.assets)) {
 
 // ---------- 3: không có logical script nào bị nạp trùng dưới URL KHÁC (vd tên cũ còn sót) ----------
 const CORE_NAMES = ['boot.js', 'storage.js', 'imageStorage.js', 'config.js', 'formulas.js',
-  'subjects.js', 'solid3d.js', 'geo2d-engine.js', 'app.js'];
+  'subjects.js', 'solid3d.js', 'app.js'];
 for (const name of CORE_NAMES) {
   const stem = name.replace(/\.js$/, '');
   const re = new RegExp(`src="/js/${stem}(?:\\.[0-9a-f]{10})?\\.js(?:\\?[^"]*)?"`, 'g');

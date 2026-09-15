@@ -103,7 +103,7 @@ console.log('\n-- Kịch bản A: 6 thư viện optional HOÀN TOÀN VẮNG MẶ
     // Không load pdf.min.js/mammoth/katex/math.js/three.min.js/docx — mô phỏng đúng CDN bị chặn.
     loadScript(win, 'js/subjects.js');
     loadScript(win, 'js/formulas.js');
-    loadScript(win, 'js/geo2d-engine.js');
+
     loadScript(win, 'js/solid3d.js');
     loadScript(win, 'js/storage.js');
     loadScript(win, 'js/app.js');

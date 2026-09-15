@@ -106,16 +106,22 @@ test('11. index.html có đủ 3 lựa chọn cài đặt hình minh họa', () 
   ['data-val="auto"', 'data-val="always"', 'data-val="never"'].forEach((v) => assert.ok(html.includes(v), v));
 });
 
-test('12. renderVisuals chặn SVG đáng ngờ ở tầng client (phòng thủ nhiều lớp)', () => {
+test('12. client KHÔNG còn bất kỳ đường nhúng SVG nào cho hình minh hoạ', () => {
   const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');
-  // Sau đợt nâng cấp (mục 1.4), renderVisuals() được tách thành các hàm con; chốt chặn SVG nằm ở
-  // renderVisualSvg(). Vẫn kiểm tra đúng chốt chặn đó, chỉ đổi nơi tìm.
-  const idx = appSrc.indexOf('function renderVisualSvg(') !== -1
-    ? appSrc.indexOf('function renderVisualSvg(')
-    : appSrc.indexOf('function renderVisuals(');
-  const body = appSrc.slice(idx, idx + 2000);
-  assert.ok(/<script\|javascript:/.test(body) || body.includes('foreignObject'),
-    'client phải kiểm tra lại nội dung SVG trước khi nhúng, không tin tuyệt đối payload mạng');
+  // Kiến trúc AI image-first: renderVisualSvg()/drawPlot()/drawShape() đã bị xoá hẳn; thân card chỉ
+  // còn renderVisualImage() và nó chỉ nhận data:image/ hoặc https (isGeneratedImageVisual).
+  ['function renderVisualSvg(', 'function drawPlot(', 'function drawShape(', 'Geo2D'].forEach((needle) => {
+    assert.ok(!appSrc.includes(needle), 'app.js còn tàn dư đường SVG: ' + needle);
+  });
+  const idx = appSrc.indexOf('function renderVisualCard(');
+  assert.ok(idx !== -1, 'phải còn renderVisualCard()');
+  const body = appSrc.slice(idx, idx + 1200);
+  assert.ok(body.includes('renderVisualImage(v)'), 'thân card phải là ảnh AI');
+  assert.ok(!body.includes('renderVisualSvg'), 'không còn nhánh SVG trong card');
+  // Cổng chấp nhận payload: chỉ data:image/ hoặc https.
+  const gate = appSrc.slice(appSrc.indexOf('function isGeneratedImageVisual('), appSrc.indexOf('function isGeneratedImageVisual(') + 400);
+  assert.ok(/data:image\\\//.test(gate) && /https/.test(gate),
+    'client phải tự kiểm tra lại payload trước khi nhúng, không tin tuyệt đối payload mạng');
 });
 
 let passed = 0, failed = 0;

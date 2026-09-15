@@ -2,7 +2,7 @@
 
 // ---------- TOKEN OPTIMIZATION TEST SUITE (mục 22) ----------
 // Chạy qua test/run-all.js — mỗi hàm test() ném lỗi nếu fail, không dùng framework ngoài (đồng bộ
-// style với các file test khác trong repo: geo2d-engine.test.js, storage.test.js...).
+// style với các file test khác trong repo: storage.test.js, rotation.test.js...).
 
 const assert = require('assert');
 const te = require('../server/utils/tokenEconomy');

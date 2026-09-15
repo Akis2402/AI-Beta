@@ -4,20 +4,23 @@
 // TEST — HỆ THỐNG HÌNH MINH HỌA (PHẦN 12 → 32)
 // ============================================================================================
 // Bất biến quan trọng nhất được khoá ở đây:
-//   (a) KHÔNG tạo hình cho câu hỏi mà hình không giúp gì (PHẦN 14).
-//   (b) Hình accuracy-critical KHÔNG BAO GIỜ đi qua image generation (PHẦN 18/19).
-//   (c) Ảnh lỗi KHÔNG BAO GIỜ làm hỏng/chặn câu trả lời (PHẦN 20/32).
-//   (d) Hình chỉ được dựng từ FINAL VERIFIED FACTS, sau reconciliation (PHẦN 24).
-//   (e) Chỉ cache hình đã VALIDATED + câu trả lời đã COMPLETED (PHẦN 22).
+//   (a) KHÔNG tạo hình cho câu hỏi mà hình không giúp gì.
+//   (b) MỌI hình 2D tĩnh đều là ẢNH AI — không còn renderer SVG/deterministic nào trong pipeline.
+//   (c) Ảnh lỗi KHÔNG BAO GIỜ làm hỏng/chặn câu trả lời (text giữ nguyên + stub retry).
+//   (d) Hình chỉ được dựng từ FINAL VERIFIED FACTS, sau reconciliation.
+//   (e) Chỉ cache hình đã VALIDATED + câu trả lời đã COMPLETED, và chỉ cache ẢNH AI THẬT.
 
 const assert = require('assert');
 const de = require('../server/utils/visual/visualDecisionEngine');
 const sb = require('../server/utils/visual/visualSpecBuilder');
 const router = require('../server/utils/visual/visualRendererRouter');
-const dr = require('../server/utils/visual/deterministicRenderer');
 const validator = require('../server/utils/visual/visualValidator');
 const cache = require('../server/utils/visual/visualCache');
 const pipeline = require('../server/utils/visual/visualPipeline');
+const {
+  PNG_DATA_URL, loadVisualModules, withFetch, geminiImageResponse, geminiTextResponse,
+  httpErrorResponse, validImageOutput
+} = require('./_imageMock');
 
 const results = [];
 function test(name, fn) {
@@ -128,81 +131,90 @@ test('13. specFingerprint ổn định và phân biệt được spec khác nhau
   assert.notStrictEqual(sb.specFingerprint(base), sb.specFingerprint({ ...base, labels: ['B'] }));
 });
 
-// ================= PHẦN 18/19: routing =================
-test('14. PHẦN 18/19: loại accuracy-critical KHÔNG BAO GIỜ dùng image generation', () => {
+// ================= ROUTING: chỉ còn generated_image | interactive_3d | no_visual =================
+test('14. loại đòi độ chính xác cao VẪN đi ảnh AI, chỉ được đánh cờ highPrecisionRequired', () => {
   ['mathematical_plot', 'geometry_diagram', 'circuit_diagram', 'chart', 'flowchart'].forEach((type) => {
     const r = router.chooseVisualRenderer({ type }, { imageProviderAvailable: true });
-    assert.strictEqual(r.accuracyCritical, true, type);
-    assert.strictEqual(r.primary, 'deterministic', type + ' phải đi đường deterministic');
-    assert.ok(!r.fallbacks.includes('image_generation'), type + ': hình sai còn tệ hơn không có hình');
+    assert.strictEqual(r.renderer, 'generated_image', type + ' phải đi ảnh AI');
+    assert.strictEqual(r.primary, 'image_generation', type);
+    assert.strictEqual(r.highPrecisionRequired, true, type + ' phải được đánh cờ độ chính xác cao');
+    assert.deepStrictEqual(r.fallbacks, [], type + ': KHÔNG còn renderer thay thế nào');
   });
 });
 
-test('15. PHẦN 19: loại conceptual mới được dùng image generation (khi có provider)', () => {
+test('15. loại conceptual cũng đi ảnh AI; không có provider -> blocked, KHÔNG dựng SVG', () => {
   const withProvider = router.chooseVisualRenderer({ type: 'biology_diagram' }, { imageProviderAvailable: true });
+  assert.strictEqual(withProvider.renderer, 'generated_image');
   assert.strictEqual(withProvider.primary, 'image_generation');
+  assert.strictEqual(withProvider.blocked, null);
+
   const without = router.chooseVisualRenderer({ type: 'biology_diagram' }, { imageProviderAvailable: false });
-  assert.strictEqual(without.primary, 'deterministic', 'không có provider ảnh -> fallback deterministic, KHÔNG phải lỗi');
+  assert.strictEqual(without.renderer, 'generated_image', 'renderer không đổi theo cấu hình');
+  assert.strictEqual(without.blocked, 'no_image_provider', 'không có provider = không có hình');
+  assert.ok(without.upgradeHint, 'phải nói rõ cần cấu hình gì');
 });
 
-// ================= Deterministic renderer =================
-test('16. đồ thị hàm số: dựng SVG hợp lệ từ biểu thức', () => {
-  const out = dr.renderDeterministic({
-    type: 'mathematical_plot', title: 'Đồ thị', labels: [], objects: [],
-    relationships: [], requiredEquations: [], data: { plotExpr: 'x^2-2x-3' }
+test('16. router KHÔNG BAO GIỜ trả renderer SVG/deterministic/concept_card', () => {
+  const types = ['mathematical_plot', 'geometry_diagram', 'physics_diagram', 'optics_diagram',
+    'circuit_diagram', 'chart', 'flowchart', 'biology_diagram', 'chemistry_structure',
+    'map_diagram', 'concept_illustration', 'network_diagram', 'apparatus_diagram'];
+  types.forEach((type) => {
+    [true, false].forEach((imageProviderAvailable) => {
+      const r = router.chooseVisualRenderer({ type }, { imageProviderAvailable });
+      assert.ok(['generated_image', 'interactive_3d', 'no_visual'].includes(r.renderer), type + ': ' + r.renderer);
+      assert.notStrictEqual(r.primary, 'deterministic', type);
+      assert.ok(!r.fallbacks.includes('deterministic'), type);
+      assert.ok(!r.fallbacks.includes('concept_card'), type);
+    });
   });
-  assert.strictEqual(out.ok, true);
-  assert.ok(out.content.startsWith('<svg'));
-  assert.ok(out.content.includes('</svg>'));
 });
 
-test('17. parser biểu thức AN TOÀN — không eval, không chạy được code chèn vào', () => {
-  assert.strictEqual(dr.evalExpression('2*x+1', 3), 7);
-  assert.strictEqual(dr.evalExpression(dr.normalizeImplicitMultiplication('x^2-2x-3'), 3), 0);
-  // Chuỗi độc hại chỉ ra NaN, KHÔNG BAO GIỜ được thực thi.
-  assert.ok(Number.isNaN(dr.evalExpression('process.exit(1)', 1)));
+test('17. 3D có schema interactive -> interactive_3d (Three.js), KHÔNG đổi thành ảnh', () => {
+  const r = router.chooseVisualRenderer(
+    { type: 'geometry_3d', data: { scene3d: { objects: [{ kind: 'sphere' }] } } },
+    { imageProviderAvailable: true }
+  );
+  assert.strictEqual(r.renderer, 'interactive_3d');
+  assert.strictEqual(r.primary, 'interactive_3d');
 });
 
-test('18. hình hình học: dựng được từ nhãn điểm', () => {
-  const out = dr.renderDeterministic({
-    type: 'geometry_diagram', title: 'ABC', labels: ['A', 'B', 'C'], objects: [],
-    relationships: ['perpendicular'], requiredEquations: [], data: {}
+test('18. 3D KHÔNG có schema interactive -> ảnh minh hoạ tĩnh bình thường', () => {
+  const r = router.chooseVisualRenderer({ type: 'geometry_3d', data: {} }, { imageProviderAvailable: true });
+  assert.strictEqual(r.renderer, 'generated_image');
+});
+
+test('19. no_visual -> no_visual', () => {
+  const r = router.chooseVisualRenderer({ type: 'no_visual' }, { imageProviderAvailable: true });
+  assert.strictEqual(r.renderer, 'no_visual');
+  assert.strictEqual(r.primary, 'no_visual');
+});
+
+// ================= QUALITY GATE: ảnh phải là ẢNH THẬT =================
+test('20. validator TỪ CHỐI chuỗi SVG giả dạng hình minh hoạ', () => {
+  const v = validator.validateVisual({
+    spec: { type: 'x', labels: ['A'], objects: [], requiredEquations: [], language: 'vi', data: {} },
+    output: { format: 'svg', content: '<svg><g></g></svg>', renderer: 'generated_image', origin: 'ai_generated' },
+    finalAnswer: 'Điểm A nằm trên đường thẳng.'
   });
-  assert.strictEqual(out.ok, true);
-  assert.ok(out.content.includes('polygon'));
+  assert.strictEqual(v.valid, false);
+  assert.ok(v.issues.includes('svg_format_rejected'));
 });
 
-test('19. flowchart từ các bước', () => {
-  const out = dr.renderDeterministic({
-    type: 'flowchart', title: 'Quy trình', labels: [], objects: [], relationships: [],
-    requiredEquations: [], data: { steps: ['Đun nóng hỗn hợp', 'Lọc kết tủa', 'Cô cạn dung dịch'] }
+test('21. validator TỪ CHỐI text/HTML gắn nhãn image/png (không có magic bytes)', () => {
+  const fakePng = 'data:image/png;base64,' + Buffer.from('<html>lỗi rồi</html>').toString('base64');
+  const v = validator.validateVisual({
+    spec: { type: 'x', labels: ['A'], objects: [], requiredEquations: [], language: 'vi', data: {} },
+    output: { format: 'data_url', url: fakePng, renderer: 'generated_image', origin: 'ai_generated', model: 'm' },
+    finalAnswer: 'Điểm A nằm trên đường thẳng.'
   });
-  assert.strictEqual(out.ok, true);
-  assert.ok(out.content.includes('Lọc kết tủa'));
+  assert.strictEqual(v.valid, false);
+  assert.ok(v.issues.some((i) => i.startsWith('invalid_image_binary')), JSON.stringify(v.issues));
 });
 
-test('20. thiếu dữ kiện -> fallback concept card, KHÔNG "vẽ đại"', () => {
-  const out = dr.renderDeterministic({
-    type: 'mathematical_plot', title: 'x', labels: [], objects: [{ symbol: 'a', value: 5, unit: '' }],
-    relationships: [], requiredEquations: [], data: {}
-  });
-  assert.strictEqual(out.renderer, 'concept_card', 'không đủ dữ kiện vẽ đồ thị -> trình bày có cấu trúc, không bịa hình');
-});
-
-test('21. SVG output không bao giờ chứa script/handler (ranh giới XSS)', () => {
-  const out = dr.renderDeterministic({
-    type: 'flowchart', title: '<script>alert(1)</script>', labels: [], objects: [], relationships: [],
-    requiredEquations: [], data: { steps: ['<img onerror=alert(1)>', 'ok'] }
-  });
-  assert.ok(!/<script|<img/.test(out.content), 'mọi ký tự < trong text phải được escape thành &lt;');
-  assert.ok(out.content.includes('&lt;script&gt;'));
-});
-
-// ================= PHẦN 26: quality gate =================
 test('22. validator BẮT số bịa (không có trong lời giải)', () => {
   const v = validator.validateVisual({
     spec: { type: 'x', labels: [], objects: [{ symbol: 'v', value: 999, unit: '' }], requiredEquations: [], language: 'vi', data: {} },
-    output: { format: 'svg', content: '<svg></svg>', renderer: 'x' },
+    output: validImageOutput(),
     finalAnswer: 'Vận tốc v = 20 m/s.'
   });
   assert.strictEqual(v.valid, false);
@@ -212,45 +224,49 @@ test('22. validator BẮT số bịa (không có trong lời giải)', () => {
 test('23. validator BẮT công thức không khớp lời giải', () => {
   const v = validator.validateVisual({
     spec: { type: 'x', labels: [], objects: [], requiredEquations: ['E = mc^3'], language: 'vi', data: {} },
-    output: { format: 'svg', content: '<svg></svg>', renderer: 'x' },
+    output: validImageOutput(),
     finalAnswer: 'Theo công thức E = mc^2 ta có...'
   });
   assert.strictEqual(v.valid, false);
   assert.ok(v.issues.includes('ungrounded_equations'));
 });
 
-test('24. validator BẮT SVG chứa script', () => {
+test('24. validator BẮT nhãn "ảnh AI" gắn sai (origin không phải ai_generated)', () => {
   const v = validator.validateVisual({
     spec: { type: 'x', labels: ['A'], objects: [], requiredEquations: [], language: 'vi', data: {} },
-    output: { format: 'svg', content: '<svg><script>alert(1)</script></svg>', renderer: 'x' },
+    output: { format: 'data_url', url: PNG_DATA_URL, renderer: 'generated_image', origin: 'somewhere_else', model: 'm' },
     finalAnswer: 'Điểm A nằm trên đường thẳng.'
   });
   assert.strictEqual(v.valid, false);
-  assert.ok(v.issues.includes('svg_unsafe_content'));
+  assert.ok(v.issues.includes('renderer_origin_mismatch'));
 });
 
-test('25. validator PASS khi mọi dữ kiện đều có trong lời giải', () => {
+test('25. validator PASS khi ảnh thật + mọi dữ kiện đều có trong lời giải', () => {
   const v = validator.validateVisual({
     spec: { type: 'x', labels: ['A'], objects: [{ symbol: 'v', value: 20, unit: 'm/s' }], requiredEquations: [], language: 'vi', data: {} },
-    output: { format: 'svg', content: '<svg><g></g></svg>', renderer: 'x' },
+    output: validImageOutput(),
     finalAnswer: 'Tại điểm A vận tốc v = 20 m/s.'
   });
   assert.strictEqual(v.valid, true, JSON.stringify(v.issues));
 });
 
-// ================= PHẦN 22: cache =================
+// ================= CACHE =================
 test('26. cache: KHÔNG ghi khi chưa validate hoặc answer chưa COMPLETED', () => {
   cache._resetForTest();
-  const parts = { promptVersion: 'v1', specFingerprint: 'abc', answerStructureHash: 'h', subject: 'math', language: 'vi', style: 's', renderer: 'r', model: 'm', userPreference: 'auto' };
-  assert.strictEqual(cache.set(parts, { content: '<svg/>' }, { validated: false, answerComplete: true }), false);
-  assert.strictEqual(cache.set(parts, { content: '<svg/>' }, { validated: true, answerComplete: false }), false);
+  const parts = { promptVersion: 'v1', specFingerprint: 'abc', answerStructureHash: 'h', subject: 'math', language: 'vi', style: 's', renderer: 'generated_image', model: 'm', userPreference: 'auto' };
+  const value = { url: PNG_DATA_URL, format: 'data_url', renderer: 'generated_image', origin: 'ai_generated' };
+  assert.strictEqual(cache.set(parts, value, { validated: false, answerComplete: true }), false);
+  assert.strictEqual(cache.set(parts, value, { validated: true, answerComplete: false }), false);
   assert.strictEqual(cache.get(parts), null, 'không được cache hình chưa validate / answer partial');
 });
 
-test('27. cache hit/miss + key phủ user preference (PHẦN 27)', () => {
+test('27. cache TỪ CHỐI payload SVG/deterministic, chỉ nhận ảnh AI thật', () => {
   cache._resetForTest();
-  const parts = { promptVersion: 'v1', specFingerprint: 'abc', answerStructureHash: 'h', subject: 'math', language: 'vi', style: 's', renderer: 'r', model: 'm', userPreference: 'auto' };
-  assert.strictEqual(cache.set(parts, { content: '<svg/>' }, { validated: true, answerComplete: true }), true);
+  const parts = { promptVersion: 'v1', specFingerprint: 'abc', answerStructureHash: 'h', subject: 'math', language: 'vi', style: 's', renderer: 'generated_image', model: 'm', userPreference: 'auto' };
+  const opts = { validated: true, answerComplete: true };
+  assert.strictEqual(cache.set(parts, { content: '<svg/>', format: 'svg', renderer: 'deterministic' }, opts), false);
+  assert.strictEqual(cache.set(parts, { url: PNG_DATA_URL, format: 'data_url', renderer: 'generated_image', origin: 'deterministic' }, opts), false);
+  assert.strictEqual(cache.set(parts, { url: PNG_DATA_URL, format: 'data_url', renderer: 'generated_image', origin: 'ai_generated' }, opts), true);
   assert.ok(cache.get(parts), 'phải hit');
   assert.strictEqual(cache.get({ ...parts, userPreference: 'always' }), null, 'setting khác -> key khác');
   assert.strictEqual(cache.get({ ...parts, specFingerprint: 'zzz' }), null, 'spec khác -> key khác');
@@ -282,31 +298,58 @@ test('29. PHẦN 24: candidate đồng thuận -> không có conflict', () => {
     assert.deepStrictEqual(r.visuals, []);
   });
 
-  await atest('31. pipeline: tạo được hình cho bài đồ thị + phát đủ sự kiện', async () => {
-    cache._resetForTest();
-    const events = [];
-    const r = await pipeline.runVisualPipeline({
-      question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3',
-      finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4), giao Ox tại x = -1 và x = 3.',
-      subject: 'math', answerComplete: true, onEvent: (e) => events.push(e.type)
-    });
-    assert.strictEqual(r.status, 'ready');
-    assert.strictEqual(r.visuals.length, 1);
-    assert.strictEqual(r.visuals[0].format, 'svg');
-    assert.deepStrictEqual(events, ['visual:pending', 'visual:ready'], 'PHẦN 21: sự kiện riêng, đúng thứ tự');
+  await atest('31. pipeline: tạo được ẢNH AI cho bài đồ thị + phát đủ sự kiện', async () => {
+    const { pipeline: pl, restore } = loadVisualModules({ GEMINI_IMAGE_API_KEY: 'k' });
+    try {
+      const events = [];
+      const r = await withFetch(async () => geminiImageResponse(), () => pl.runVisualPipeline({
+        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3',
+        finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4), giao Ox tại x = -1 và x = 3.',
+        subject: 'math', answerComplete: true, onEvent: (e) => events.push(e.type)
+      }));
+      assert.strictEqual(r.status, 'ready', JSON.stringify(r.telemetry));
+      assert.strictEqual(r.visuals.length, 1);
+      assert.strictEqual(r.visuals[0].renderer, 'generated_image');
+      assert.strictEqual(r.visuals[0].origin, 'ai_generated');
+      assert.strictEqual(r.visuals[0].format, 'data_url');
+      assert.notStrictEqual(r.visuals[0].format, 'svg');
+      assert.deepStrictEqual(events, ['visual:pending', 'visual:ready'], 'sự kiện riêng, đúng thứ tự');
+    } finally { restore(); }
   });
 
-  await atest('32. PHẦN 22: cache hit ở lần chạy thứ 2 (không sinh lại hình giống nhau)', async () => {
-    cache._resetForTest();
-    const args = {
-      question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3',
-      finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4), giao Ox tại x = -1 và x = 3.',
-      subject: 'math', answerComplete: true
-    };
-    const first = await pipeline.runVisualPipeline(args);
-    const second = await pipeline.runVisualPipeline(args);
-    assert.strictEqual(first.telemetry.visualCacheHit, false);
-    assert.strictEqual(second.telemetry.visualCacheHit, true, 'PHẦN 23.5: không regenerate ảnh giống hệt nhau');
+  await atest('31b. KHÔNG có provider ảnh -> failed + stub retry, TUYỆT ĐỐI không dựng SVG', async () => {
+    const { pipeline: pl, restore } = loadVisualModules({});
+    try {
+      let apiCalls = 0;
+      const r = await withFetch(async () => { apiCalls++; return geminiImageResponse(); }, () => pl.runVisualPipeline({
+        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3',
+        finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4).', subject: 'math', answerComplete: true
+      }));
+      assert.strictEqual(apiCalls, 0, 'không có khóa thì không gọi API');
+      assert.strictEqual(r.status, 'failed');
+      assert.strictEqual(r.visuals.length, 1, 'phải có stub để UI hiện nút Thử tạo lại');
+      assert.strictEqual(r.visuals[0].renderFailed, true);
+      assert.strictEqual(r.visuals[0].reason, 'no_image_provider');
+      assert.strictEqual(r.visuals[0].format, undefined, 'stub KHÔNG mang nội dung hình nào');
+    } finally { restore(); }
+  });
+
+  await atest('32. cache hit ở lần chạy thứ 2 (không sinh lại ảnh giống hệt nhau)', async () => {
+    const { pipeline: pl, restore } = loadVisualModules({ GEMINI_IMAGE_API_KEY: 'k' });
+    try {
+      const args = {
+        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3',
+        finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4), giao Ox tại x = -1 và x = 3.',
+        subject: 'math', answerComplete: true
+      };
+      let apiCalls = 0;
+      const stub = async () => { apiCalls++; return geminiImageResponse(); };
+      const first = await withFetch(stub, () => pl.runVisualPipeline(args));
+      const second = await withFetch(stub, () => pl.runVisualPipeline(args));
+      assert.strictEqual(first.telemetry.visualCacheHit, false);
+      assert.strictEqual(second.telemetry.visualCacheHit, true, 'không regenerate ảnh giống hệt nhau');
+      assert.strictEqual(apiCalls, 1, 'lần 2 KHÔNG được gọi lại image API');
+    } finally { restore(); }
   });
 
   await atest('33. PHẦN 30: deadline gần hết -> BỎ hình, KHÔNG làm hỏng request', async () => {
@@ -359,7 +402,8 @@ test('29. PHẦN 24: candidate đồng thuận -> không có conflict', () => {
       candidates: [{ label: 'A', text: 'v0 = 20 m/s' }, { label: 'B', text: 'v0 = 45 m/s' }]
     });
     if (r.status === 'ready') {
-      assert.ok(!/45/.test(r.visuals[0].content || ''), 'số của candidate bị bác bỏ KHÔNG được xuất hiện trong hình');
+      const overlayNumbers = JSON.stringify((r.visuals[0].overlay || {}).numbers || []);
+      assert.ok(!/45/.test(overlayNumbers), 'số của candidate bị bác bỏ KHÔNG được xuất hiện trong chú thích');
     }
     assert.ok(r.telemetry.visualConflicts.includes('v0'), 'phải ghi nhận mâu thuẫn đã phát hiện');
   });

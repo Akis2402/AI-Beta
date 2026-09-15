@@ -208,7 +208,7 @@ const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
     } finally { restore(); }
   });
 
-  await atest('11. Pipeline: ảnh LỖI -> tự động rơi về deterministic, text vẫn có hình hợp lệ', async () => {
+  await atest('11. Pipeline: ảnh LỖI -> status failed + stub retry, TUYỆT ĐỐI không fallback SVG', async () => {
     const { restore } = loadClient({ GEMINI_IMAGE_API_KEY: 'k' });
     const pipeline = require(PIPELINE_PATH);
     require(path.join(__dirname, '..', 'server', 'utils', 'visual', 'visualCache.js'))._resetForTest();
@@ -219,54 +219,49 @@ const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
           finalAnswer: 'Tế bào nhân thực gồm:\n- **Ti thể**: hô hấp tế bào\n- **Lục lạp**: quang hợp\n- **Nhân tế bào**: chứa ADN',
           subject: 'biology', answerComplete: true
         }));
-      // MỤC 2.7: LẼ RA được ảnh AI (provider có cấu hình) nhưng provider lỗi -> đây là một BẢN THAY
-      // THẾ, không phải 'ready' bình thường. Trạng thái riêng để UI gắn nhãn "sơ đồ thay thế"; điều
-      // quan trọng không đổi là NÓ VẪN CÓ HÌNH và tuyệt đối không phải 'failed'.
-      assert.strictEqual(r.status, 'fallback_schematic', 'ảnh lỗi KHÔNG được làm mất hình: phải fallback deterministic');
-      assert.notStrictEqual(r.status, 'failed');
-      assert.strictEqual(r.visuals[0].fallbackSchematic, true, 'phải gắn cờ để UI phân biệt với ảnh AI thật');
-      assert.notStrictEqual(r.visuals[0].renderer, 'generated_image');
-      assert.strictEqual(r.visuals[0].format, 'svg');
+      assert.strictEqual(r.status, 'failed', 'hết provider = không có hình, không có bản thay thế');
+      assert.strictEqual(r.visuals.length, 1);
+      assert.strictEqual(r.visuals[0].renderFailed, true, 'phải có stub để UI hiện nút Thử tạo lại');
+      assert.strictEqual(r.visuals[0].format, undefined);
+      assert.strictEqual(r.visuals[0].content, undefined, 'KHÔNG được kèm bất kỳ nội dung hình nào');
     } finally { restore(); }
   });
 
-  await atest('12. Pipeline: MỌI đường ảnh đều hỏng, câu hỏi khái niệm không dữ kiện -> vẫn ra thẻ khái niệm tối thiểu, KHÔNG failed', async () => {
-    // Sau khi sửa BUG 1 (visualValidator không còn chặn nhầm thẻ tối giản chỉ có purpose/title):
-    // đường deterministic là lưới an toàn CUỐI, luôn phải trả được hình kể cả khi không có dữ kiện
-    // cụ thể để trích. status:'failed' + visuals rỗng CHỈ được chấp nhận khi deterministic cũng
-    // thực sự không dựng nổi SVG hợp lệ (không phải case này).
+  await atest('12. Pipeline: provider chết hẳn (throw) -> failed, text answer vẫn nguyên vẹn', async () => {
     const { restore } = loadClient({ GEMINI_IMAGE_API_KEY: 'k' });
     const pipeline = require(PIPELINE_PATH);
     require(path.join(__dirname, '..', 'server', 'utils', 'visual', 'visualCache.js'))._resetForTest();
     try {
       const events = [];
       const r = await withFetch(async () => { throw new Error('down'); }, () => pipeline.runVisualPipeline({
-        // Lời giải không có thành phần/đại lượng nào -> deterministic rơi về renderConceptCard tối giản.
         question: 'Minh họa khái niệm sự sống',
         finalAnswer: 'Sự sống là một khái niệm rộng.',
         subject: 'biology', answerComplete: true, onEvent: (e) => events.push(e.type)
       }));
-      assert.notStrictEqual(r.status, 'failed', 'thẻ khái niệm tối thiểu phải được chấp nhận, không được rơi về failed');
-      assert.ok(r.visuals.length >= 1, 'phải có ít nhất 1 visual (thẻ khái niệm tối thiểu)');
-      assert.strictEqual(r.visuals[0].format, 'svg');
+      assert.strictEqual(r.status, 'failed');
+      assert.ok(events.includes('visual:error'), 'phải phát sự kiện lỗi để UI đổi trạng thái');
+      r.visuals.forEach((v) => assert.notStrictEqual(v.format, 'svg'));
     } finally { restore(); }
   });
 
-  await atest('13. PHẦN 18: loại accuracy-critical KHÔNG BAO GIỜ chạm image API dù có provider', async () => {
+  await atest('13. Đồ thị toán GIỜ đi ảnh AI (không còn deterministic), và không bao giờ trả SVG', async () => {
     const { restore } = loadClient({ GEMINI_IMAGE_API_KEY: 'k' });
     const pipeline = require(PIPELINE_PATH);
     require(path.join(__dirname, '..', 'server', 'utils', 'visual', 'visualCache.js'))._resetForTest();
     try {
       let apiCalls = 0;
-      const r = await withFetch(async () => { apiCalls++; return { ok: true, status: 200, json: async () => ({}) }; },
-        () => pipeline.runVisualPipeline({
-          question: 'Khảo sát và vẽ đồ thị hàm số y = x^2 - 2x - 3',
-          finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4).',
-          subject: 'math', answerComplete: true
-        }));
-      assert.strictEqual(r.status, 'ready');
-      assert.strictEqual(apiCalls, 0, 'đồ thị toán TUYỆT ĐỐI không được giao cho image generation');
-      assert.strictEqual(r.visuals[0].format, 'svg');
+      const r = await withFetch(async () => {
+        apiCalls++;
+        return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: PNG_B64 } }] } }] }) };
+      }, () => pipeline.runVisualPipeline({
+        question: 'Khảo sát và vẽ đồ thị hàm số y = x^2 - 2x - 3',
+        finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4).',
+        subject: 'math', answerComplete: true
+      }));
+      assert.strictEqual(r.status, 'ready', JSON.stringify(r.telemetry));
+      assert.strictEqual(apiCalls > 0, true, 'đồ thị toán nay PHẢI đi qua image generation');
+      assert.strictEqual(r.visuals[0].renderer, 'generated_image');
+      assert.notStrictEqual(r.visuals[0].format, 'svg');
     } finally { restore(); }
   });
 
@@ -284,8 +279,9 @@ const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
         finalAnswer: 'Tế bào nhân thực gồm:\n- **Ti thể**: hô hấp tế bào\n- **Lục lạp**: quang hợp',
         subject: 'biology', answerComplete: true
       }));
-      // data rỗng -> client coi là không có ảnh -> fallback deterministic (vẫn ready) hoặc failed.
-      if (r.status === 'ready') assert.notStrictEqual(r.visuals[0].renderer, 'generated_image');
+      // data rỗng -> client coi là không có ảnh -> KHÔNG có hình nào được hiển thị.
+      assert.strictEqual(r.status, 'failed');
+      r.visuals.forEach((v) => assert.strictEqual(v.renderFailed, true));
     } finally { restore(); }
   });
 

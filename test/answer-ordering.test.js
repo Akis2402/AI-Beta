@@ -413,9 +413,8 @@ console.log('\n== Failover qua N provider (case 18) ==');
 
   console.log('\n== Root cause B: spec thấy ngữ cảnh stage approach (case 17) ==');
 
-  await atest('17. Thực thể CHỈ có ở stage approach -> vẫn dựng được visual, KHÔNG "failed"', async () => {
+  await atest('17. Thực thể CHỈ có ở stage approach -> spec vẫn đủ dữ kiện cho prompt ảnh', async () => {
     const specBuilder = require('../server/utils/visual/visualSpecBuilder');
-    const det = require('../server/utils/visual/deterministicRenderer');
     const decision = {
       visualType: 'biology_diagram', visualPurpose: 'Minh hoạ các hệ cơ quan chính',
       shouldGenerateImage: true
@@ -438,19 +437,33 @@ console.log('\n== Failover qua N provider (case 18) ==');
       approachText: approach, subject: 'biology'
     });
     assert.ok((withApproach.data.parts || []).length >= 4, 'phải trích được thực thể từ Hướng giải');
-    const r = det.renderDeterministic(withApproach);
-    assert.strictEqual(r.ok, true, 'phải dựng được hình');
+    const prompt = specBuilder.buildImagePrompt(withApproach);
+    assert.ok(/Required objects:/.test(prompt) && /Hệ tuần hoàn/.test(prompt),
+      'thực thể từ Hướng giải phải đi vào prompt ảnh');
   });
 
-  await atest('17b. Spec RỖNG HOÀN TOÀN nhưng có purpose -> concept card tối thiểu, KHÔNG null', async () => {
-    const det = require('../server/utils/visual/deterministicRenderer');
-    const r = det.renderDeterministic({
+  await atest('17b. Spec RỖNG HOÀN TOÀN nhưng có purpose -> vẫn dựng được prompt ảnh hợp lệ', async () => {
+    const specBuilder = require('../server/utils/visual/visualSpecBuilder');
+    const validator = require('../server/utils/visual/visualValidator');
+    const spec = {
       type: 'biology_diagram', title: 'Cấu tạo cơ thể người',
-      purpose: 'Minh hoạ vị trí tương đối của các hệ cơ quan chính.', data: {}
+      purpose: 'Minh hoạ vị trí tương đối của các hệ cơ quan chính.',
+      labels: [], objects: [], relationships: [], requiredEquations: [], data: {},
+      language: 'vi', subject: 'biology', aspectRatio: '3:4'
+    };
+    const prompt = specBuilder.buildImagePrompt(spec);
+    assert.ok(/Minh hoạ vị trí tương đối/.test(prompt), 'chỉ dùng đúng purpose, không bịa thêm dữ kiện');
+    // Quality gate KHÔNG được đánh trượt case khái niệm chỉ có purpose/title.
+    const v = validator.validateVisual({
+      spec,
+      output: {
+        format: 'data_url',
+        url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        renderer: 'generated_image', origin: 'ai_generated', model: 'mock'
+      },
+      finalAnswer: 'Cơ thể người gồm nhiều hệ cơ quan.'
     });
-    assert.strictEqual(r.ok, true, 'fallback cuối cùng KHÔNG BAO GIỜ được trả null khi đã có purpose');
-    assert.ok(/Minh hoạ vị trí tương đối/.test(r.content.replace(/<[^>]+>/g, ' ')),
-      'chỉ hiện lại đúng purpose, không bịa thêm dữ kiện');
+    assert.strictEqual(v.valid, true, JSON.stringify(v.issues));
   });
 
   console.log('\n== Gate degrade theo necessity (case 19, mục 2.4a) ==');
@@ -459,7 +472,7 @@ console.log('\n== Failover qua N provider (case 18) ==');
     const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'utils', 'visual', 'visualPipeline.js'), 'utf8');
     assert.ok(/degrade === 'low' && !highNeed/.test(src),
       'gate low phải phân biệt theo necessity, không chặn cứng mọi mức');
-    assert.ok(/necessityNow === 'NECESSARY' \|\| necessityNow === 'USER_REQUESTED'/.test(src));
+    assert.ok(/necessity === 'NECESSARY' \|\| necessity === 'USER_REQUESTED'/.test(src));
     assert.ok(/sizeForRequest\(\{ aspectRatio: spec\.aspectRatio, quality: 'standard', degrade \}\)/.test(src),
       'mức low phải hạ kích thước (qua quality mode) thay vì bỏ hẳn ảnh');
     const imgClient = require('../server/utils/visual/imageGenerationClient');
@@ -469,16 +482,16 @@ console.log('\n== Failover qua N provider (case 18) ==');
     assert.ok(/degrade === 'emergency'/.test(src) && /deferred_deadline/.test(src));
   });
 
-  await atest('2.4: accuracy-critical LUÔN thắng "ưu tiên ảnh AI"', async () => {
+  await atest('2.4: loại đòi độ chính xác cao vẫn đi ảnh AI, chỉ khác cờ highPrecisionRequired', async () => {
     const router = require('../server/utils/visual/visualRendererRouter');
     ['mathematical_plot', 'geometry_diagram', 'circuit_diagram', 'chart', 'flowchart'].forEach((type) => {
       const r = router.chooseVisualRenderer({ type }, { imageProviderAvailable: true });
-      assert.strictEqual(r.accuracyCritical, true, `${type} phải là accuracy-critical`);
-      assert.notStrictEqual(r.primary, 'image_generation', `${type} KHÔNG BAO GIỜ được giao cho image model`);
-      assert.ok(!r.fallbacks.includes('image_generation'));
+      assert.strictEqual(r.highPrecisionRequired, true, `${type} phải được đánh cờ độ chính xác cao`);
+      assert.strictEqual(r.primary, 'image_generation', `${type} nay đi ảnh AI (không còn deterministic)`);
+      assert.deepStrictEqual(r.fallbacks, [], `${type}: không còn renderer thay thế`);
     });
     const bio = router.chooseVisualRenderer({ type: 'biology_diagram' }, { imageProviderAvailable: true });
-    assert.strictEqual(bio.primary, 'image_generation', 'nhóm minh hoạ: ảnh AI là lựa chọn ĐẦU TIÊN');
+    assert.strictEqual(bio.primary, 'image_generation', 'nhóm minh hoạ: ảnh AI là đường DUY NHẤT');
   });
 
   console.log('\n== Không lộ API key (mục 2.8) ==');

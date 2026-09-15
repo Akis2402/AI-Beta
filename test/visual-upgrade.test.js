@@ -3,8 +3,8 @@
 // ============================================================================================
 // TEST cho 5 lỗ hổng được vá ở đợt nâng cấp hệ thống hình minh hoạ (mục 1.1 -> 1.5)
 // ============================================================================================
-//   (a) router KHÔNG còn ép physics/optics về deterministic khi needsPreciseGeometry=false
-//   (b) buildImagePrompt() KHÔNG còn chứa số liệu/công thức (+ style theo môn + cắt theo hạn mức)
+//   (a) router: mọi hình 2D tĩnh -> generated_image; needsPreciseGeometry chỉ còn siết prompt
+//   (b) buildImagePrompt() theo cấu trúc 16 mục: CÓ dữ kiện chính xác + style theo môn + cắt hạn mức
 //   (c) overlay render đúng verifiedNumbers
 //   (d) nút tải tạo đúng blob + filename
 //   (e) lightbox mở/đóng (Esc, click nền, nút Đóng)
@@ -31,19 +31,20 @@ async function test(name, fn) {
 // (a) ROUTER — mục 1.1 (CASE 1 vs CASE 3 của PHẦN 24)
 // ============================================================================================
 async function routerTests() {
-  console.log('\n== (a) Router: quyết định theo needsPreciseGeometry, KHÔNG theo type ==');
+  console.log('\n== (a) Router: mọi hình 2D tĩnh đi ảnh AI, needsPreciseGeometry chỉ siết prompt ==');
 
-  await test('physics_diagram định tính + có provider ảnh -> image_generation (CASE 1)', () => {
+  await test('physics_diagram định tính + có provider ảnh -> generated_image', () => {
     const route = router.chooseVisualRenderer(
       { type: 'physics_diagram', needsPreciseGeometry: false },
       { imageProviderAvailable: true }
     );
+    assert.strictEqual(route.renderer, 'generated_image');
     assert.strictEqual(route.primary, 'image_generation');
-    assert.strictEqual(route.accuracyCritical, false);
-    assert.deepStrictEqual(route.fallbacks, ['deterministic', 'concept_card', 'no_visual']);
+    assert.strictEqual(route.highPrecisionRequired, false);
+    assert.deepStrictEqual(route.fallbacks, [], 'không còn renderer thay thế');
   });
 
-  await test('optics_diagram định tính + có provider ảnh -> image_generation', () => {
+  await test('optics_diagram định tính -> generated_image', () => {
     const route = router.chooseVisualRenderer(
       { type: 'optics_diagram', needsPreciseGeometry: false },
       { imageProviderAvailable: true }
@@ -51,36 +52,35 @@ async function routerTests() {
     assert.strictEqual(route.primary, 'image_generation');
   });
 
-  await test('physics_diagram CÓ số đo phải vẽ đúng -> giữ deterministic, KHÔNG giao cho ảnh (CASE 3)', () => {
+  await test('physics_diagram CÓ số đo -> vẫn ảnh AI nhưng highPrecisionRequired=true', () => {
     const route = router.chooseVisualRenderer(
       { type: 'physics_diagram', needsPreciseGeometry: true },
       { imageProviderAvailable: true }
     );
-    assert.strictEqual(route.primary, 'deterministic');
-    assert.strictEqual(route.accuracyCritical, true);
-    assert.ok(!route.fallbacks.includes('image_generation'), 'hình có số đo sai còn tệ hơn không hình');
+    assert.strictEqual(route.renderer, 'generated_image');
+    assert.strictEqual(route.highPrecisionRequired, true);
   });
 
-  await test('spec CŨ (không có cờ) -> mặc định an toàn như trước: deterministic', () => {
+  await test('spec CŨ (không có cờ) -> vẫn ảnh AI, không rơi về renderer nào khác', () => {
     const route = router.chooseVisualRenderer({ type: 'physics_diagram' }, { imageProviderAvailable: true });
-    assert.strictEqual(route.primary, 'deterministic');
-    assert.strictEqual(route.accuracyCritical, true);
+    assert.strictEqual(route.renderer, 'generated_image');
+    assert.strictEqual(route.primary, 'image_generation');
   });
 
-  await test('không có provider ảnh -> vẫn ra hình deterministic, không bỏ trắng', () => {
+  await test('không có provider ảnh -> blocked, KHÔNG có hình thay thế', () => {
     const route = router.chooseVisualRenderer(
       { type: 'physics_diagram', needsPreciseGeometry: false },
       { imageProviderAvailable: false }
     );
-    assert.strictEqual(route.primary, 'deterministic');
-    assert.strictEqual(route.accuracyCritical, false);
+    assert.strictEqual(route.blocked, 'no_image_provider');
+    assert.deepStrictEqual(route.fallbacks, []);
   });
 
-  await test('accuracy-critical KHÔNG bị cờ mới kéo sang image generation', () => {
+  await test('loại độ chính xác cao: renderer vẫn là ảnh AI, chỉ khác cờ', () => {
     ['mathematical_plot', 'geometry_diagram', 'circuit_diagram', 'chart'].forEach((type) => {
       const route = router.chooseVisualRenderer({ type, needsPreciseGeometry: false }, { imageProviderAvailable: true });
-      assert.strictEqual(route.primary, 'deterministic', type);
-      assert.ok(!route.fallbacks.includes('image_generation'), type);
+      assert.strictEqual(route.renderer, 'generated_image', type);
+      assert.strictEqual(route.highPrecisionRequired, true, type);
     });
   });
 
@@ -131,30 +131,68 @@ function physicsSpec() {
 }
 
 async function promptTests() {
-  console.log('\n== (b) buildImagePrompt: KHÔNG số liệu, KHÔNG công thức, style theo môn, cắt đúng hạn mức ==');
+  console.log('\n== (b) buildImagePrompt: cấu trúc 16 mục, CÓ dữ kiện chính xác, cắt đúng hạn mức ==');
 
-  await test('prompt KHÔNG chứa trị số của bất kỳ đại lượng nào', () => {
+  await test('prompt có đủ khung 16 mục (Purpose -> Do not replace or omit required labels)', () => {
+    const spec = physicsSpec();
+    const prompt = sb.buildImagePrompt(spec);
+    ['Purpose:', 'Subject:', 'Exact facts:', 'Style:', 'Aspect ratio:', 'Language:'].forEach((k) => {
+      assert.ok(prompt.includes(k), 'thiếu mục ' + k);
+    });
+    assert.ok(/No invented data/.test(prompt));
+    assert.ok(/Educational clarity/.test(prompt));
+    assert.ok(/High quality/.test(prompt));
+    assert.ok(/No watermark/.test(prompt));
+    assert.ok(/No UI screenshot/.test(prompt));
+    assert.ok(/Do not replace or omit required labels/.test(prompt));
+  });
+
+  await test('kiến trúc mới: dữ kiện CHÍNH XÁC PHẢI có trong prompt (không còn renderer nào lo số đo)', () => {
     const spec = physicsSpec();
     assert.ok(spec.objects.length > 0, 'spec phải trích được đại lượng (nếu không thì test vô nghĩa)');
     const prompt = sb.buildImagePrompt(spec);
     spec.objects.forEach((o) => {
-      assert.ok(!prompt.includes(`${o.symbol}=${o.value}`), `prompt còn nhét số: ${o.symbol}=${o.value}`);
-      assert.ok(!prompt.includes(String(o.value)), `prompt còn chứa trị số ${o.value}`);
+      assert.ok(prompt.includes(`${o.symbol} = ${o.value}`), `prompt phải mang dữ kiện ${o.symbol}`);
     });
-    assert.ok(!/Đại lượng:/.test(prompt), 'không còn dòng "Đại lượng:"');
   });
 
-  await test('prompt KHÔNG chứa công thức đã verify', () => {
-    const spec = physicsSpec();
-    spec.requiredEquations = ['F = ma', 'v = v0 + at'];
+  await test('hình học/sơ đồ khoa học kèm chỉ thị siết topology/measurement', () => {
+    const geo = sb.buildVisualSpec({
+      decision: { visualType: 'geometry_diagram', visualPurpose: 'tam giác' },
+      question: 'Cho tam giác ABC vuông tại A, AB = 3 cm',
+      finalAnswer: 'Tam giác ABC vuông tại A, AB = 3 cm, AC = 4 cm.', subject: 'math'
+    });
+    const prompt = sb.buildImagePrompt(geo);
+    assert.ok(prompt.includes(sb.GEOMETRY_STRICT_DIRECTIVES));
+    assert.ok(/Required labels:/.test(prompt), 'hình học phải liệt kê nhãn bắt buộc');
+  });
+
+  await test('đồ thị hàm số: biểu thức đi vào Math/measurement constraints, không tự bịa', () => {
+    const plot = sb.buildVisualSpec({
+      decision: { visualType: 'mathematical_plot', visualPurpose: 'đồ thị' },
+      question: 'Vẽ đồ thị hàm số y = x^2-2x-3',
+      finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4).', subject: 'math'
+    });
+    const prompt = sb.buildImagePrompt(plot);
+    assert.ok(/Math\/measurement constraints:/.test(prompt));
+    assert.ok(prompt.includes('x^2-2x-3'), 'phải mô tả đúng biểu thức');
+    assert.ok(/hệ trục Oxy/.test(prompt));
+  });
+
+  await test('prompt KHÔNG chứa chain-of-thought / cả lời giải', () => {
+    const spec = sb.buildVisualSpec({
+      decision: { visualType: 'physics_diagram', visualPurpose: 'lực' },
+      question: 'Vật trượt',
+      finalAnswer: 'Bước 1: phân tích lực. '.repeat(200), subject: 'physics'
+    });
     const prompt = sb.buildImagePrompt(spec);
-    assert.ok(!/Công thức phải hiển thị đúng/.test(prompt));
-    spec.requiredEquations.forEach((e) => assert.ok(!prompt.includes(e), 'prompt còn công thức: ' + e));
+    assert.ok(!/Bước 1: phân tích lực. Bước 1/.test(prompt));
+    assert.ok(prompt.length <= sb.DEFAULT_PROMPT_CHAR_LIMIT);
   });
 
-  await test('prompt luôn giữ câu ràng buộc an toàn (cấm vẽ số/chữ/watermark)', () => {
+  await test('prompt luôn giữ khối ràng buộc cuối (không bị cắt)', () => {
     const prompt = sb.buildImagePrompt(physicsSpec());
-    assert.ok(prompt.endsWith(sb.IMAGE_SAFETY_CONSTRAINT), 'ràng buộc an toàn phải nằm cuối, không bị cắt');
+    assert.ok(prompt.endsWith(sb.IMAGE_SAFETY_CONSTRAINT), 'ràng buộc phải nằm cuối, không bị cắt');
   });
 
   await test('style khác nhau theo môn (PHẦN 6), không còn 1 chuỗi dùng chung', () => {
@@ -181,8 +219,8 @@ async function promptTests() {
     assert.ok(gemini.endsWith(sb.IMAGE_SAFETY_CONSTRAINT), 'cắt phần mô tả cảnh, KHÔNG cắt ràng buộc an toàn');
   });
 
-  await test('VISUAL_PROMPT_VERSION đã bump (cache ảnh cũ có số sai không được trả lại)', () => {
-    assert.ok(/^visual-prompt-v[2-9]/.test(sb.VISUAL_PROMPT_VERSION), sb.VISUAL_PROMPT_VERSION);
+  await test('VISUAL_PROMPT_VERSION đã bump lên v4 (cache ảnh của prompt cũ không được trả lại)', () => {
+    assert.ok(/^visual-prompt-v[4-9]/.test(sb.VISUAL_PROMPT_VERSION), sb.VISUAL_PROMPT_VERSION);
   });
 
   await test('spec vẫn giữ verifiedNumbers/Equations cho overlay (mục 1.3)', () => {
@@ -425,16 +463,14 @@ async function downloadTests() {
     assert.strictEqual(dl.textContent, 'chat.visualDownloadFailed');
   });
 
-  await test('SVG deterministic: chỉ có nút tải PNG, KHÔNG có nút mở lightbox', () => {
-    const { api, doc } = loadVisualModule(async () => ({ ok: true, blob: async () => ({}) }));
+  await test('payload SVG kiểu cũ: KHÔNG dựng card, KHÔNG có nút nào (SVG đã bị loại bỏ)', () => {
+    const { api } = loadVisualModule(async () => ({ ok: true, blob: async () => ({}) }));
     const svgVisual = { visualId: 'v1', format: 'svg', content: '<svg><rect/></svg>', title: 'Đồ thị' };
     assert.strictEqual(api.isGeneratedImageVisual(svgVisual), false);
-    assert.strictEqual(api.renderVisualActions(svgVisual, null), null, 'không có thân hình -> không có nút');
-    const bar = api.renderVisualActions(svgVisual, doc.createElement('div'));
-    assert.ok(bar, 'SVG phải có nút tải PNG');
-    assert.strictEqual(bar.children.length, 1);
-    assert.strictEqual(bar.children[0].textContent, 'chat.visualDownload');
+    assert.strictEqual(api.renderVisualActions(svgVisual), null, 'SVG không còn được cấp nút nào');
+    assert.strictEqual(api.renderVisualCard(svgVisual), null, 'SVG không bao giờ được dựng thành card');
   });
+
 }
 
 // ============================================================================================
@@ -488,7 +524,7 @@ async function lightboxTests() {
     assert.strictEqual(doc.querySelectorAll('.visual-lightbox').length, 1);
   });
 
-  await test('SVG deterministic không mở được lightbox (không phải ảnh thật)', () => {
+  await test('payload SVG không mở được lightbox (không phải ảnh thật)', () => {
     const { api } = loadVisualModule(async () => ({ ok: true, blob: async () => ({}) }));
     assert.strictEqual(api.openVisualLightbox({ format: 'svg', content: '<svg/>' }), null);
   });
