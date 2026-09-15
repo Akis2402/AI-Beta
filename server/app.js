@@ -13,6 +13,7 @@ const generateRoutes = require('./routes/generate');
 const recommendRoutes = require('./routes/recommend');
 const studyRoutes = require('./routes/study');
 const visualRoutes = require('./routes/visual');
+const sourceVisionRoutes = require('./routes/sourceVision');
 
 const app = express();
 
@@ -53,6 +54,11 @@ app.use('/api/study', generateLimiter, studyRoutes);
 // domain CỨNG trong routes/visual.js — dùng generateLimiter vì đây là tác vụ nhẹ, không phải
 // pipeline giải bài.
 app.use('/api/visual', generateLimiter, visualRoutes);
+// PHẦN A6/A11: batch vision-extraction cho PDF scan (đọc trang 1 lần, cache evidence text ở client
+// để KHÔNG phải gửi lại ảnh base64 mỗi lượt hỏi) — dùng chatLimiter (không phải generateLimiter) vì
+// đây là lệnh gọi AI thật (vision), cùng nhóm chi phí với pipeline giải bài chính, không phải tác
+// vụ nhẹ.
+app.use('/api/source', chatLimiter, sourceVisionRoutes);
 
 // ---------- Frontend tĩnh ----------
 // Lưu ý: khi deploy trên Vercel, thư mục public/ được Vercel phục vụ trực tiếp

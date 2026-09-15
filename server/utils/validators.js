@@ -284,6 +284,19 @@ function validateSimilarBody(body) {
   return { problem, solutionMetadata, language: lang, difficulty };
 }
 
+/**
+ * PHẦN A6/A11: batch xử lý ảnh trang PDF-chỉ-ảnh — validate riêng cho /api/source/vision-extract
+ * (khác /api/chat: ở đây KHÔNG cần query/contexts, chỉ cần đúng 1 batch ảnh trang, tối đa 8 trang/
+ * request — khớp PDF_RASTER_BATCH_SIZE ở client — để 1 request vision không phình quá lớn/lâu).
+ */
+const MAX_VISION_BATCH_PAGES = 8;
+function validateSourceVisionBody(body) {
+  if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
+  const pages = parseSourceImages({ sourceImages: body.pages }).slice(0, MAX_VISION_BATCH_PAGES);
+  if (!pages.length) throw new ValidationError('Không có trang ảnh hợp lệ nào để xử lý.');
+  return { pages };
+}
+
 module.exports = {
   ValidationError,
   validateChatBody,
@@ -291,6 +304,7 @@ module.exports = {
   validateOutlineBody,
   validateSelfCheckBody,
   validateSimilarBody,
+  validateSourceVisionBody,
   normalizeRules,
   normalizeDetail,
   SCHOOL_GRADES,
