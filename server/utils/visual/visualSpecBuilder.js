@@ -8,7 +8,7 @@
 //   { type, purpose, title, labels[], objects[], relationships[], requiredEquations[],
 //     visualConstraints[], style, language }
 //
-// Lợi ích (đúng PHẦN 16): deterministic hơn, dễ cache (hash spec), dễ test, dễ sửa, token thấp hơn
+// Lợi ích: ổn định hơn, dễ cache (hash spec), dễ test, dễ sửa, token thấp hơn
 // (PHẦN 17: image prompt = DELTA MINIMUM SUFFICIENT CONTEXT — chỉ spec, KHÔNG gửi cả hội thoại,
 // KHÔNG gửi reasoning, KHÔNG gửi cả lời giải).
 //
@@ -25,14 +25,15 @@ const MAX_EQUATIONS = 4;
 // Bump MỖI KHI buildImagePrompt()/STYLE_PROFILES đổi nội dung. visualPipeline nhét giá trị này vào
 // cache key, nên bản ảnh sinh bởi prompt cũ (vd bản còn nhét số liệu vào prompt — lỗi mục 1.2)
 // KHÔNG BAO GIỜ được trả lại sau khi prompt đã sửa.
-//   v1: prompt gốc (có nhét số liệu + công thức — SAI).
-//   v2: bỏ hẳn số liệu/công thức khỏi prompt ảnh, thêm style theo môn, cắt theo hạn mức provider.
-// Bump v2 -> v3: sửa ROOT CAUSE ở imageGenerationClient.callGeminiImage() (request nay yêu cầu
-// generationConfig.responseModalities tường minh + parser xác thực magic bytes thay vì tin mù mờ
-// vào field mimeType). Cache cũ (nếu có) hoàn toàn có thể chứa kết quả từ contract SAI trước đó
-// (model trả text bị hiểu nhầm/không có ảnh) nên phải invalidate, không được để cache che mất hình
-// đúng mà pipeline giờ đã có khả năng tạo ra.
-const VISUAL_PROMPT_VERSION = 'visual-prompt-v3';
+//   v1: prompt gốc (có nhét số liệu + công thức — SAI với contract cũ).
+//   v2: bỏ số liệu/công thức khỏi prompt ảnh, thêm style theo môn, cắt theo hạn mức provider.
+//   v3: sửa contract callGeminiImage() (responseModalities + xác thực magic bytes).
+//   v4: KIẾN TRÚC AI IMAGE-FIRST — ảnh AI là đường DUY NHẤT cho hình 2D tĩnh (không còn
+//       deterministic/SVG để lùi về). Prompt nay PHẢI mang dữ kiện chính xác (Exact facts,
+//       Required labels, Math/measurement constraints) theo cấu trúc 16 mục, vì không còn
+//       renderer nào khác chịu trách nhiệm vẽ đúng số đo. Cache cũ sinh bởi prompt v3 (cố tình
+//       không có số/nhãn) KHÔNG được dùng lại.
+const VISUAL_PROMPT_VERSION = 'visual-prompt-v4';
 
 // ============================================================================================
 // PHẦN 6 — STYLE THEO MÔN (không còn 1 chuỗi 'educational_scientific' dùng chung cho mọi môn)
@@ -85,8 +86,7 @@ const ASPECT_RATIO_BY_TYPE = {
   network_diagram: '16:9',
   map_diagram: '4:3',
   chart: '4:3',
-  concept_illustration: '1:1',
-  __concept_card__: '1:1'
+  concept_illustration: '1:1'
 };
 const VALID_ASPECT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'];
 
@@ -163,8 +163,8 @@ function extractEquations(text) {
 }
 
 /**
- * Trích hàm số f(x) để vẽ đồ thị deterministic. Chỉ chấp nhận biểu thức ĐƠN GIẢN, an toàn —
- * KHÔNG eval chuỗi tuỳ ý (xem deterministicRenderer.evalPolynomial).
+ * Trích hàm số f(x) của đồ thị. Chỉ chấp nhận biểu thức ĐƠN GIẢN, an toàn (không eval chuỗi tuỳ
+ * ý): giá trị này đi THẲNG vào mục "Math/measurement constraints" của prompt ảnh.
  */
 function extractPlottableFunction(text) {
   const m = text.match(/y\s*=\s*([-+0-9x^*/.\s()]{3,60})(?:[\s,;.]|$)/i)
@@ -221,8 +221,8 @@ function extractNamedParts(text, limit = 8) {
 }
 
 /**
- * extractMolecularFormula() — trích công thức phân tử (C4H10, H2SO4, NaCl...) để dựng mô hình liên
- * kết deterministic. Chỉ nhận công thức CÓ TRONG lời giải.
+ * extractMolecularFormula() — trích công thức phân tử (C4H10, H2SO4, NaCl...) để prompt ảnh mô tả
+ * đúng mô hình liên kết. Chỉ nhận công thức CÓ TRONG lời giải.
  * @returns {{formula:string, atoms:Array<{symbol:string,count:number}>}|null}
  */
 function extractMolecularFormula(text) {
@@ -276,36 +276,28 @@ function extractRegions(text, limit = 6) {
  *   style:string, language:string, data:object}}
  */
 // ============================================================================================
-// RỦI RO #3 — RENDERER SINH HỌC/ĐỊA LÝ CHỈ Ở MỨC SƠ ĐỒ
+// REALISM REQUIRED — ĐỀ CẦN HÌNH THẬT, KHÔNG PHẢI SƠ ĐỒ KHÁI NIỆM
 // ============================================================================================
-// deterministicRenderer dựng sơ đồ khối có nhãn — đủ cho "kể tên các bào quan", KHÔNG đủ cho "nhận
-// dạng cấu trúc lá cắt ngang" hay "đọc lát cắt địa hình thật". Hướng xử lý ĐÚNG là thừa nhận giới
-// hạn và định tuyến, KHÔNG phải làm renderer đoán hình giải phẫu (hình sai còn tệ hơn không hình —
-// PHẦN 26).
-//
-// `realismRequired` là tín hiệu đó: đề cần hình THẬT, không phải sơ đồ khái niệm.
-//   - Có image provider  -> ưu tiên image generation (router).
-//   - Không có           -> vẫn dựng sơ đồ, nhưng caption nói THẲNG đây là sơ đồ khái niệm, và
-//                           telemetry ghi `visualFidelity='schematic'` để người vận hành thấy nhu
-//                           cầu cấu hình image provider thay vì tưởng hệ thống đang chạy tốt.
+// "Nhận dạng lát cắt ngang của lá", "đọc lát cắt địa hình", "quan sát tiêu bản" cần một hình
+// THỰC TẾ. Cờ này đi thẳng vào prompt ảnh (mục Style/Purpose) để image model dựng hình ở mức
+// tả thực thay vì sơ đồ khối. Không có image provider = KHÔNG có hình (router trả
+// blocked='no_image_provider') — hệ thống KHÔNG dựng sơ đồ SVG thay thế nữa.
 const REALISM_REQUIRED_RE = /(cắt ngang|lát cắt|giải phẫu|tiêu bản|vi thể|kính hiển vi|hình thái|nhận dạng|quan sát thực tế|ảnh chụp|ảnh vệ tinh|bản đồ (địa hình|tự nhiên|hành chính)|micrograph|cross[- ]section|anatomy|histolog)/i;
 
 /** @returns {boolean} đề đòi hình THẬT chứ không phải sơ đồ khái niệm. */
 function needsRealism(text, subject) {
   if (!REALISM_REQUIRED_RE.test(String(text || ''))) return false;
-  // Chỉ có nghĩa với các môn mà renderer deterministic vốn chỉ đạt mức sơ đồ.
+  // Chỉ có nghĩa với các môn mà hình tả thực khác hẳn sơ đồ khối.
   return ['biology', 'geography', 'chemistry', 'general'].includes(subject);
 }
 
 // ============================================================================================
-// MỤC 1.1 — needsPreciseGeometry: HÌNH NÀY CÓ PHẢI VẼ ĐÚNG SỐ ĐO KHÔNG?
+// needsPreciseGeometry: HÌNH NÀY CÓ PHẢI VẼ ĐÚNG SỐ ĐO KHÔNG?
 // ============================================================================================
-// Trước đây router suy ra từ `type`: mọi physics_diagram/optics_diagram đều bị ép về deterministic
-// SVG, kể cả đề chỉ cần "một vật nằm trên mặt phẳng nghiêng" — hình minh hoạ trực quan tốt hơn hẳn
-// ở những ca đó. Cờ này tính TỪ SPEC (dữ kiện thật), không phải từ loại hình:
-//   true  -> có toạ độ / góc cụ thể / biểu thức đồ thị / quan hệ hình học phải vẽ đúng.
-//   false -> chỉ mô tả tình huống định tính.
-// Sai số của image model chỉ nguy hiểm ở nhánh true; nhánh false thì không có gì để vẽ sai.
+// Cờ này KHÔNG còn dùng để chọn renderer (renderer luôn là ảnh AI). Nó quyết định ĐỘ SIẾT của
+// prompt ảnh và độ soi của validator:
+//   true  -> prompt bắt buộc kèm Exact facts + Math/measurement constraints; validator soi số/nhãn.
+//   false -> chỉ mô tả tình huống định tính, prompt gọn hơn.
 const PRECISE_RELATIONSHIPS = ['perpendicular', 'parallel', 'tangent', 'midpoint', 'series', 'parallel_circuit'];
 const PRECISE_TEXT_RE = /(toạ độ|tọa độ|đúng tỉ lệ|đúng tỷ lệ|theo tỉ lệ|theo tỷ lệ|vẽ đúng|đồ thị|trục [Oo]xy|hệ trục|vector\s*[A-Za-z→]|thang đo)/i;
 const ANGLE_RE = /(góc|angle|θ|α|β|γ|φ)\s*[A-Za-z0-9]{0,4}\s*(=|bằng|là)?\s*\d+(?:[.,]\d+)?\s*°?/i;
@@ -476,64 +468,136 @@ function buildTitle({ type, question, language }) {
   return map[type] || (vi ? 'Hình minh hoạ' : 'Illustration');
 }
 
-/**
- * PHẦN 17 — IMAGE PROMPT = DELTA MINIMUM SUFFICIENT CONTEXT.
- * Chỉ serialize những gì hình cần. KHÔNG kèm hội thoại, KHÔNG kèm reasoning, KHÔNG kèm cả lời giải.
- * @returns {string} prompt ngắn (thường < 180 token) cho image model.
- */
-// Câu ràng buộc an toàn — NGẮN và QUAN TRỌNG, không bao giờ bị cắt khi rút gọn prompt (mục 2.1).
-// PHẦN 13: image model không đảm bảo vẽ đúng chữ số/ký tự, nên cấm nó vẽ số và công thức; số liệu
-// đã verify được overlay phía client (mục 1.3).
-const IMAGE_SAFETY_CONSTRAINT = 'Không vẽ chữ số, không viết công thức, không nhãn văn bản dài, '
-  + 'không watermark. Nền trắng, nét sạch.';
-// MỤC (đợt audit 4) — "cải tiến mạnh chất lượng ảnh": cụm chỉ dẫn CHẤT LƯỢNG THUẦN TRỰC QUAN, KHÔNG
-// đụng tới quy tắc "không số liệu/không công thức" ở trên (2 cụm tách biệt, cụm này CHỈ nói về độ nét/
-// bố cục/ánh sáng — không thể vô tình làm model vẽ số/chữ trở lại). Ngắn có chủ ý: prompt ảnh vẫn bị
-// giới hạn ký tự cứng theo provider (activePromptCharLimit), thêm cụm dài sẽ lấn chỗ phần mô tả cảnh.
-const IMAGE_QUALITY_BOOST = 'Chất lượng cao, độ chi tiết rõ, bố cục cân đối, ánh sáng đều dịu, '
+// ============================================================================================
+// IMAGE PROMPT — CẤU TRÚC 16 MỤC, DELTA MINIMUM SUFFICIENT CONTEXT
+// ============================================================================================
+// Ảnh AI nay là ĐƯỜNG DUY NHẤT cho hình 2D tĩnh, nên prompt PHẢI mang đủ dữ kiện để hình đúng:
+// tên điểm, cạnh, góc, độ dài, quan hệ vuông góc/song song, biểu thức đồ thị, nhãn bắt buộc.
+// Nhưng vẫn là DELTA: chỉ serialize SPEC — KHÔNG kèm hội thoại, KHÔNG kèm reasoning, KHÔNG kèm
+// cả lời giải, KHÔNG BAO GIỜ kèm chain-of-thought.
+//
+// Thứ tự 16 mục (cố định, để model đọc ổn định và để test kiểm chứng được):
+//   1 Purpose · 2 Subject · 3 Exact facts · 4 Required objects · 5 Required labels ·
+//   6 Spatial relationships · 7 Math/measurement constraints · 8 Style · 9 Aspect ratio ·
+//   10 Language · 11 No invented data · 12 Educational clarity · 13 High quality ·
+//   14 No watermark · 15 No UI screenshot · 16 Do not replace or omit required labels.
+
+// Khối RÀNG BUỘC CỐ ĐỊNH (mục 11-16) — NGẮN và QUAN TRỌNG, không bao giờ bị cắt khi rút gọn prompt.
+const IMAGE_SAFETY_CONSTRAINT = 'No invented data: chỉ vẽ đúng dữ kiện đã liệt kê, không thêm đối '
+  + 'tượng/số đo/nhãn nào khác. Educational clarity: bố cục sách giáo khoa, nhãn đọc được, không '
+  + 'chồng chữ. No watermark, no signature. No UI screenshot, không khung cửa sổ/con trỏ. '
+  + 'Do not replace or omit required labels.';
+// Cụm chỉ dẫn CHẤT LƯỢNG THUẦN TRỰC QUAN (mục 13) — tách hẳn khỏi ràng buộc dữ kiện ở trên.
+const IMAGE_QUALITY_BOOST = 'High quality: độ chi tiết rõ, bố cục cân đối, ánh sáng đều dịu, '
   + 'không nhiễu hạt, không méo hình, đường nét sắc nét như minh hoạ sách giáo khoa cao cấp.';
+// Chỉ thị THÊM cho hình học/sơ đồ khoa học — nơi sai một quan hệ là sai cả bài.
+const GEOMETRY_STRICT_DIRECTIVES = 'Exact topology, exact point relationships, exact number of '
+  + 'entities, preserve orientation, preserve measurements, preserve symbols, no decorative '
+  + 'objects that alter meaning.';
+// Các loại hình áp dụng chỉ thị siết trên.
+const STRICT_TYPES = new Set([
+  'geometry_diagram', 'geometry_3d', 'mathematical_plot', 'circuit_diagram', 'optics_diagram',
+  'physics_diagram', 'chart', 'flowchart', 'architecture_diagram', 'data_structure_diagram',
+  'network_diagram', 'chemistry_structure', 'apparatus_diagram'
+]);
 // Ngưỡng mặc định khi không biết provider nào đang chạy — lấy mức CHẶT nhất (Gemini 2000).
 const DEFAULT_PROMPT_CHAR_LIMIT = 2000;
 
+/** Dữ kiện số đã trích từ lời giải -> "v0 = 20 m/s; α = 30°" */
+function factsLine(spec) {
+  return (spec.objects || [])
+    .map((o) => `${o.symbol} = ${o.value}${o.unit ? ' ' + o.unit : ''}`)
+    .join('; ');
+}
+
+/** Quan hệ hình học + toạ độ điểm thật -> mô tả không mơ hồ cho image model. */
+function relationshipsLine(spec) {
+  const parts = [];
+  const rel = spec.relationships || [];
+  const viRel = {
+    perpendicular: 'có cặp đoạn vuông góc (ký hiệu góc vuông)',
+    parallel: 'có cặp đoạn song song (ký hiệu mũi tên song song)',
+    tangent: 'có đường tiếp tuyến chạm đúng 1 điểm với đường tròn',
+    midpoint: 'có trung điểm/trung tuyến được đánh dấu bằng 2 vạch bằng nhau',
+    series: 'các phần tử mắc NỐI TIẾP trên cùng một nhánh',
+    parallel_circuit: 'các phần tử mắc SONG SONG giữa hai nút'
+  };
+  rel.forEach((r) => parts.push(viRel[r] || r));
+  const pts = (spec.data && spec.data.points) || [];
+  if (pts.length) parts.push('toạ độ điểm: ' + pts.map((p) => `${p.label}(${p.x}; ${p.y})`).join(', '));
+  return parts.join('; ');
+}
+
+/** Ràng buộc toán/số đo: biểu thức đồ thị, phương trình, bước, phân tử, vùng. */
+function mathConstraintsLine(spec) {
+  const d = spec.data || {};
+  const parts = [];
+  if (d.plotExpr) {
+    parts.push(`vẽ đúng đồ thị y = ${d.plotExpr} trên hệ trục Oxy có chia vạch, gốc O rõ ràng, `
+      + 'trục x nằm ngang và trục y thẳng đứng, đánh dấu giao điểm với hai trục');
+  }
+  if ((spec.requiredEquations || []).length) parts.push('công thức phải hiện đúng: ' + spec.requiredEquations.join(' | '));
+  if (d.molecule) parts.push(`công thức phân tử: ${d.molecule.formula} (đúng số nguyên tử mỗi loại)`);
+  if ((d.steps || []).length) parts.push('các bước theo đúng thứ tự: ' + d.steps.join(' -> '));
+  if ((d.regions || []).length) parts.push('các vùng phải có: ' + d.regions.join(', '));
+  return parts.join('; ');
+}
+
+/** Đối tượng bắt buộc xuất hiện (thành phần có tên, không phải nhãn điểm). */
+function requiredObjectsLine(spec) {
+  const parts = (spec.data && spec.data.parts) || [];
+  return parts.map((p) => p.name).join(', ');
+}
+
 /**
- * PHẦN 17 — IMAGE PROMPT = DELTA MINIMUM SUFFICIENT CONTEXT.
- * Chỉ serialize những gì hình cần. KHÔNG kèm hội thoại, KHÔNG kèm reasoning, KHÔNG kèm cả lời giải.
+ * buildImagePrompt() — prompt ảnh theo cấu trúc 16 mục.
  *
- * MỤC 1.2: KHÔNG nhét số liệu (`Đại lượng: v0=20m/s`) và KHÔNG nhét công thức vào prompt nữa —
- * đó là đường sinh ra hình có số SAI LỆCH với lời giải đã verify. Prompt chỉ mô tả CẢNH VẬT LÝ
- * THUẦN TRỰC QUAN.
- * MỤC 2.1: cắt cứng theo hạn mức ký tự của provider đang dùng; cắt phần mô tả cảnh trước, giữ
- * nguyên câu ràng buộc an toàn.
+ * Cắt cứng theo hạn mức ký tự của provider đang dùng: cắt phần MÔ TẢ (mục 1-10) trước, KHÔNG bao
+ * giờ cắt khối ràng buộc cuối (mục 11-16).
  *
  * @param {object} spec
- * @param {{maxChars?:number}} [opts]
- * @returns {string} prompt ngắn cho image model.
+ * @param {{maxChars?:number, degrade?:string, repairNote?:string}} [opts]
+ * @returns {string}
  */
 function buildImagePrompt(spec, opts = {}) {
   const maxChars = Number(opts.maxChars) > 0 ? Number(opts.maxChars) : DEFAULT_PROMPT_CHAR_LIMIT;
   const stylePrompt = spec.stylePrompt || styleProfileFor(spec.subject).prompt;
-  const scene = [
-    `${spec.title} — ${spec.purpose}`,
-    `Kiểu hình: ${spec.type}. Phong cách: ${stylePrompt}`
-  ];
-  // Nhãn điểm (A, B, O...) là KÝ TỰ ĐƠN, không phải số liệu — vẫn có ích để hình đặt đúng vị trí
-  // tương đối, nhưng chỉ ở dạng gợi ý bố cục, không bắt model viết chữ.
-  if (spec.labels && spec.labels.length) {
-    scene.push(`Bố cục có các vị trí được quy chiếu: ${spec.labels.slice(0, 6).join(', ')} (không cần viết chữ lên hình).`);
-  }
-  if (spec.relationships && spec.relationships.length) scene.push(`Quan hệ hình học: ${spec.relationships.join(', ')}.`);
-  // Chỉ giữ các ràng buộc KHÔNG dính số liệu (ràng buộc về đơn vị/số đã vô nghĩa khi prompt không
-  // còn số nào).
-  const visualOnlyConstraints = (spec.visualConstraints || [])
-    .filter((c) => !/số liệu|đơn vị/i.test(c));
-  if (visualOnlyConstraints.length) scene.push(visualOnlyConstraints.join(' '));
+  const vi = spec.language !== 'en';
+  const lines = [];
 
-  // Ghép 2 cụm ràng buộc CỐ ĐỊNH (chất lượng + an toàn) làm 1 khối "tail" không bao giờ bị cắt — chỉ
-  // phần mô tả cảnh (`body`) bị cắt khi vượt hạn mức ký tự của provider. An toàn đặt SAU CÙNG (giữ
-  // đúng bất biến cũ `prompt.endsWith(IMAGE_SAFETY_CONSTRAINT)` mà test đã kiểm chứng — ràng buộc an
-  // toàn là ràng buộc QUAN TRỌNG NHẤT, phải luôn là câu cuối, không phụ thuộc cụm nào thêm vào sau nó).
-  const tail = `${IMAGE_QUALITY_BOOST} ${IMAGE_SAFETY_CONSTRAINT}`;
-  let body = scene.join('\n');
+  lines.push(`Purpose: ${spec.title}${spec.purpose ? ' — ' + spec.purpose : ''}`);
+  lines.push(`Subject: ${spec.subject || 'general'} (kiểu hình: ${spec.type})`);
+
+  const facts = factsLine(spec);
+  if (facts) lines.push(`Exact facts: ${facts}`);
+
+  const objects = requiredObjectsLine(spec);
+  if (objects) lines.push(`Required objects: ${objects}`);
+
+  if ((spec.labels || []).length) {
+    lines.push(`Required labels: ${spec.labels.join(', ')} — ghi đúng các nhãn này lên hình, `
+      + 'đúng chính tả, không đổi tên, không thêm nhãn khác.');
+  }
+
+  const rels = relationshipsLine(spec);
+  if (rels) lines.push(`Spatial relationships: ${rels}`);
+
+  const maths = mathConstraintsLine(spec);
+  if (maths) lines.push(`Math/measurement constraints: ${maths}`);
+
+  lines.push(`Style: ${stylePrompt}${spec.realismRequired ? ' Hình tả thực đúng cấu trúc thật, không phải sơ đồ khối.' : ''}`);
+  lines.push(`Aspect ratio: ${spec.aspectRatio || '1:1'}`);
+  lines.push(`Language: ${vi ? 'tiếng Việt' : 'English'} — mọi nhãn văn bản trên hình dùng đúng ngôn ngữ này.`);
+
+  // Mức MEDIUM: cắt bớt phần mô tả phụ (giữ nguyên dữ kiện + nhãn — đó là thứ validator soi).
+  let body = lines.join('\n');
+  const strict = STRICT_TYPES.has(spec.type) || !!spec.needsPreciseGeometry;
+  const tailParts = [];
+  if (strict) tailParts.push(GEOMETRY_STRICT_DIRECTIVES);
+  if (opts.degrade !== 'low') tailParts.push(IMAGE_QUALITY_BOOST);
+  tailParts.push(IMAGE_SAFETY_CONSTRAINT);
+  const tail = tailParts.join(' ');
+
   const budgetForBody = maxChars - tail.length - 1;
   if (budgetForBody > 0 && body.length > budgetForBody) body = body.slice(0, budgetForBody).trimEnd();
   return `${body}\n${tail}`;
@@ -558,7 +622,8 @@ module.exports = {
   VISUAL_PROMPT_VERSION, STYLE_PROFILES, styleProfileFor,
   ASPECT_RATIO_BY_TYPE, VALID_ASPECT_RATIOS, aspectRatioFor,
   computeNeedsPreciseGeometry, buildVisualOverlay,
-  IMAGE_SAFETY_CONSTRAINT, IMAGE_QUALITY_BOOST, DEFAULT_PROMPT_CHAR_LIMIT,
+  IMAGE_SAFETY_CONSTRAINT, IMAGE_QUALITY_BOOST, GEOMETRY_STRICT_DIRECTIVES, STRICT_TYPES,
+  DEFAULT_PROMPT_CHAR_LIMIT,
   buildVisualSpec, buildImagePrompt, specFingerprint,
   extractPointLabels, extractQuantities, extractEquations, extractSteps, extractPlottableFunction,
   extractNamedParts, extractMolecularFormula, extractRegions,

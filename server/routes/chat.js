@@ -498,6 +498,10 @@ router.post('/', async (req, res, next) => {
     });
     input.subjectId = subjectResolved.subjectId;
     input.secondarySubjectId = subjectResolved.secondarySubjectId;
+    // Mục 1 (HARD LOCK): gắn subjectSource vào input để buildSubjectDirective (qua spread `input`
+    // ở buildChatSystemPrompt/buildChatSystemPromptParts) biết đây là manual hay auto — mọi stage
+    // (approach/detail/reconcile/continuation/retry) dùng lại đúng field này, không detect lại.
+    input.subjectSource = subjectResolved.subjectSource;
     reqLogger.log({
       stage: 'subject_detect', subjectId: subjectResolved.subjectId,
       confidence: subjectResolved.subjectConfidence, source: subjectResolved.subjectSource,
@@ -507,6 +511,7 @@ router.post('/', async (req, res, next) => {
     // metadata tin nhắn (lọc lịch sử theo môn) và hiển thị badge — xem các payload bên dưới.
     const subjectPayload = {
       subjectId: subjectResolved.subjectId, subjectConfidence: subjectResolved.subjectConfidence,
+      subjectSource: subjectResolved.subjectSource,
       secondarySubjectId: subjectResolved.secondarySubjectId,
       secondarySubjectConfidence: subjectResolved.secondarySubjectConfidence
     };
@@ -735,6 +740,10 @@ router.post('/', async (req, res, next) => {
         grade: input.settings.grade,
         subjectId: input.subjectId,
         secondarySubjectId: input.secondarySubjectId,
+        // Mục 1 (HARD LOCK): subjectSource PHẢI nằm trong cache key — nếu không, 1 request manual
+        // (vd Toán) có cùng subjectId với 1 request auto detect ra đúng 'math' có thể vô tình dùng
+        // chung cache dù prompt thực tế khác nhau (manual có thêm khối RÀNG BUỘC MÔN HỌC hard lock).
+        subjectSource: input.subjectSource,
         // PHẦN 27: setting hình minh hoạ PHẢI nằm trong cache key — nếu không, người chọn "Never"
         // sẽ nhận lại response đã cache kèm hình của người chọn "Auto".
         visualMode: input.settings.visual,
@@ -973,6 +982,8 @@ router.post('/', async (req, res, next) => {
             deepThinking: input.deepThinking,
             agreement,
             subjectId: input.subjectId,
+            secondarySubjectId: input.secondarySubjectId,
+            subjectSource: input.subjectSource,
             sourceManifest: input.sourceManifest
           });
 
@@ -1281,6 +1292,8 @@ router.post('/', async (req, res, next) => {
         deepThinking: input.deepThinking,
         agreement,
         subjectId: input.subjectId,
+        secondarySubjectId: input.secondarySubjectId,
+        subjectSource: input.subjectSource,
         sourceManifest: input.sourceManifest
       });
 

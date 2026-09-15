@@ -397,8 +397,8 @@ function buildChatSystemPrompt(input) {
   return buildChatSystemPromptParts(input).text;
 }
 
-function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, sourceManifest = '' }) {
-  const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId);
+function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '' }) {
+  const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId, subjectSource);
   const drawingNeeded = needsDrawingInstructions({ problemText, approachText, hasImage: !!image });
   let contextBlock = '';
   if (contexts.length) {
@@ -525,8 +525,12 @@ function buildReconcileSystemPrompt(input) {
   return buildReconcileSystemPromptParts(input).text;
 }
 
-function buildReconcileDynamicPart({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null, sourceManifest = '' }) {
-  const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId);
+function buildReconcileDynamicPart({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '' }) {
+  // Manual hard lock (mục 1): reconcile TUYỆT ĐỐI không được để candidate/secondarySubjectId kéo
+  // môn khác vào bước tổng hợp — ép secondarySubjectId về null bất kể caller truyền gì vào khi
+  // subjectSource === 'manual', rồi mới build directive (buildSubjectDirective tự chọn nhánh lock).
+  const effectiveSecondary = subjectSource === 'manual' ? null : secondarySubjectId;
+  const subjectBlock = buildSubjectDirective(subjectId, effectiveSecondary, subjectSource);
   // Dữ liệu thô của các đoạn trích (nếu có) — tách riêng khỏi phần CHỈ THỊ ưu tiên nguồn (đã gộp
   // chung 1 chỗ ở buildSourcePolicyBlock, dùng đồng nhất với cả 2 giai đoạn approach/detail, để sửa
   // 1 nơi áp dụng cho mọi model/mọi giai đoạn).
@@ -660,7 +664,11 @@ QUY TẮC BẮT BUỘC:
 // v6: siết lại chỉ thị "## Hướng giải" (stage=approach) — tối đa 5 gạch đầu dòng, mỗi gạch 1 câu
 // ngắn, không câu phụ — để hướng giải GỌN hơn nhưng vẫn giữ đủ ý khoa học (công thức/bước/điều
 // kiện). Thay đổi output rõ rệt so với v5 => bump để không trả nhầm hướng giải dài kiểu cũ từ cache.
-const PROMPT_VERSION = 'chat-prompt-v8'; // v8 (B12): bump sau A1/A2/A3 — bố cục system prompt đổi (khối tĩnh dồn lên đầu để cache), trần
+const PROMPT_VERSION = 'chat-prompt-v9'; // v9 (mục 1 audit HARD SUBJECT LOCK): manual subject giờ chèn
+// khối RÀNG BUỘC MÔN HỌC (buildManualLockDirective trong subjects.js) khác hẳn nội dung mềm cũ —
+// output cho request manual subject đổi rõ rệt so với v8 => bump để cache L1/manual cũ (nếu có) không
+// bị trả nhầm câu trả lời chưa áp dụng hard lock.
+// v8 (B12): bump sau A1/A2/A3 — bố cục system prompt đổi (khối tĩnh dồn lên đầu để cache), trần
 // reasoning theo model, và explicit request override được setting 'never'. Cache cũ tạo TRƯỚC các
 // fix này KHÔNG được tái sử dụng (khác chính sách reasoning/visual => khác kết quả).
 

@@ -10,7 +10,7 @@
 //   - lỗi của image API KHÔNG BAO GIỜ được phép làm hỏng text API (mọi lỗi ở đây đều trả về
 //     {ok:false}, không throw ra ngoài pipeline chính — xem visualPipeline.js)
 //
-// Nếu không cấu hình provider ảnh nào -> isConfigured()=false -> router tự chọn deterministic
+// Nếu không cấu hình provider ảnh nào -> isConfigured()=false -> router trả blocked='no_image_provider'
 // renderer (PHẦN 19) hoặc bỏ hình. KHÔNG có provider ảnh KHÔNG PHẢI là lỗi.
 
 const { createLinkedAbort, makeCancelledError } = require('../abortLink');
@@ -213,7 +213,7 @@ const IMAGE_COST = { LOW: 'IMAGE_COST_LOW', MEDIUM: 'IMAGE_COST_MEDIUM', HIGH: '
  * @returns {'IMAGE_COST_LOW'|'IMAGE_COST_MEDIUM'|'IMAGE_COST_HIGH'}
  */
 function classifyImageCost({ provider, size = '1024x1024', renderer } = {}) {
-  if (renderer && renderer !== 'image_generation') return IMAGE_COST.LOW; // deterministic = 0 cost API
+  if (renderer && renderer !== 'image_generation') return IMAGE_COST.LOW; // không gọi API ảnh = 0 chi phí
   const pixels = (() => {
     const m = /^(\d+)x(\d+)$/.exec(String(size || ''));
     return m ? Number(m[1]) * Number(m[2]) : 1024 * 1024;
@@ -430,7 +430,7 @@ async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, siz
 // Chưa có khóa ảnh thật để chạy end-to-end, nên điều DUY NHẤT kiểm soát được là: parser không được
 // GIÒN. Mọi biến thể shape đã tài liệu hoá (và các biến thể đặt tên thường gặp giữa các version
 // v1beta/v1, camelCase/snake_case) đều được chấp nhận; mọi shape LẠ đều rơi êm về
-// 'no_image_in_response' (RETRYABLE -> thử provider còn lại -> cuối cùng là deterministic renderer),
+// 'no_image_in_response' (RETRYABLE -> thử provider còn lại -> hết provider là trạng thái failed),
 // KHÔNG BAO GIỜ throw, không bao giờ coi "có response" là thành công (B9.8).
 //
 // Khi có khóa thật, chạy `npm run live-image-check` để đối chiếu shape thực tế với parser này.

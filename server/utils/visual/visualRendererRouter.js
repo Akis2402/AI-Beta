@@ -1,24 +1,30 @@
 'use strict';
 
 // ============================================================================================
-// PHẦN 19 — VISUAL TYPE ROUTING: chooseVisualRenderer(spec)
+// VISUAL TYPE ROUTING — AI IMAGE FIRST (kiến trúc sau đợt dọn dẹp deterministic/SVG)
 // ============================================================================================
-// Quy tắc duy nhất:
+// Kiến trúc CUỐI CÙNG chỉ còn ĐÚNG 3 renderer:
 //
-//   ACCURACY-CRITICAL   -> deterministic renderer (SVG dựng từ spec)
-//   STRUCTURED DATA     -> chart/table
-//   CONCEPTUAL          -> image generation CÓ THỂ phù hợp
+//   generated_image  — MỌI hình minh hoạ 2D TĨNH (hình học, đồ thị, mạch điện, flowchart, chart,
+//                      sơ đồ sinh/hoá/địa, concept illustration...). Nguồn duy nhất: AI image
+//                      provider (PNG/JPEG/WebP thật, đã validate magic bytes).
+//   interactive_3d   — scene 3D TƯƠNG TÁC (Three.js: solid3d.js / scene3d.js). Ảnh AI không thay
+//                      thế được xoay/zoom/pan nên KHÔNG bao giờ đổi 3D interactive thành ảnh.
+//   no_visual        — không cần hình.
 //
-// KHÔNG ép mọi thứ qua image generation. Đồ thị toán, mạch điện, biểu đồ số liệu, hình hình học,
-// vector, flowchart, sơ đồ kỹ thuật — image model không đảm bảo được số/công thức/hướng nên bắt
-// buộc đi đường deterministic; nếu deterministic không đủ dữ kiện thì THÀ KHÔNG CÓ HÌNH còn hơn có
-// hình sai (PHẦN 18/26).
+// KHÔNG CÒN: 'svg_diagram', 'mathematical_plot' (với tư cách renderer), 'deterministic',
+// 'concept_card'. Không còn bất kỳ đường nào sinh <svg> cho nội dung câu trả lời, và không còn
+// fallback im lặng từ ảnh AI về SVG: ảnh hỏng -> failover provider -> trạng thái lỗi + retry.
+//
+// LƯU Ý: 'mathematical_plot' vẫn tồn tại với tư cách spec.type (loại hình), chỉ không còn là
+// renderer. Các loại đòi độ chính xác cao vẫn được ĐÁNH DẤU `highPrecisionRequired` để
+// visualSpecBuilder siết prompt và visualValidator soi kỹ dữ kiện — nhưng renderer vẫn là ảnh AI.
 
-// Những loại KHÔNG BAO GIỜ được giao cho image generation.
-const ACCURACY_CRITICAL = new Set([
+// Các loại cần độ chính xác cao: prompt phải kèm dữ kiện chính xác, validator soi kỹ, cho phép
+// tối đa 1 lần repair. KHÔNG còn bị ép sang deterministic SVG.
+const HIGH_PRECISION = new Set([
   'mathematical_plot',
   'geometry_diagram',
-  'geometry_3d',
   'circuit_diagram',
   'chart',
   'flowchart',
@@ -27,7 +33,10 @@ const ACCURACY_CRITICAL = new Set([
   'network_diagram'
 ]);
 
-// Những loại mà hình minh hoạ trực quan/3D/thực tế thực sự có giá trị hơn SVG sơ đồ.
+// Các loại có thể là scene 3D tương tác — CHỈ khi spec mang schema interactive thật sự.
+const INTERACTIVE_3D_TYPES = new Set(['geometry_3d', 'solid3d', 'scene3d']);
+
+// Giữ tên cũ để các module/telemetry ngoài không gãy khi đọc danh mục loại hình.
 const CONCEPTUAL = new Set([
   'concept_illustration',
   'biology_diagram',
@@ -36,91 +45,79 @@ const CONCEPTUAL = new Set([
   'map_diagram'
 ]);
 
-// physics_diagram/optics_diagram nằm giữa: có thể vẽ chính xác bằng SVG khi spec đủ dữ kiện
-// (lực/góc/quỹ đạo), nhưng minh hoạ trực quan cũng hữu ích. Ưu tiên deterministic trước.
+/**
+ * isInteractive3dSpec() — spec có phải scene 3D TƯƠNG TÁC (Three.js) không?
+ * Chỉ true khi có schema interactive thật (scene3d/solid3d/objects 3D), không suy từ mỗi `type`:
+ * một câu hỏi hình không gian vẫn có thể chỉ cần MỘT ảnh minh hoạ tĩnh.
+ * @param {object} spec
+ * @returns {boolean}
+ */
+function isInteractive3dSpec(spec) {
+  if (!spec) return false;
+  if (spec.interactive3d === true) return true;
+  const d = spec.data || {};
+  return !!(d.scene3d || d.solid3d || (Array.isArray(d.solids) && d.solids.length));
+}
 
 /**
  * chooseVisualRenderer() — quyết định đường render, KHÔNG render.
  *
  * @param {object} spec Kết quả visualSpecBuilder.buildVisualSpec().
  * @param {{imageProviderAvailable?:boolean}} [env]
- * @returns {{renderer:'svg_diagram'|'mathematical_plot'|'generated_image'|'table'|'no_visual',
- *   primary:string, fallbacks:string[], accuracyCritical:boolean, reason:string}}
+ * @returns {{renderer:'generated_image'|'interactive_3d'|'no_visual', primary:string,
+ *   fallbacks:string[], highPrecisionRequired:boolean, imageProviderAvailable:boolean,
+ *   blocked:string|null, fidelity:string, realismRequired:boolean, upgradeHint:string|null,
+ *   reason:string}}
  */
 function chooseVisualRenderer(spec, env = {}) {
   const type = (spec && spec.type) || 'no_visual';
   const imageAvailable = !!env.imageProviderAvailable;
 
   if (type === 'no_visual') {
-    return { renderer: 'no_visual', primary: 'no_visual', fallbacks: [], accuracyCritical: false, reason: 'decision_said_no' };
-  }
-
-  if (ACCURACY_CRITICAL.has(type)) {
     return {
-      renderer: type === 'mathematical_plot' ? 'mathematical_plot' : 'svg_diagram',
-      primary: 'deterministic',
-      // KHÔNG có 'generated_image' trong fallback: hình sai còn tệ hơn không có hình (PHẦN 26).
-      fallbacks: ['concept_card', 'no_visual'],
-      accuracyCritical: true,
-      reason: 'accuracy_critical_type'
+      renderer: 'no_visual', primary: 'no_visual', fallbacks: [],
+      highPrecisionRequired: false, imageProviderAvailable: imageAvailable, blocked: null,
+      fidelity: 'none', realismRequired: false, upgradeHint: null, reason: 'decision_said_no'
     };
   }
 
-  if (CONCEPTUAL.has(type)) {
-    // Rủi ro #3: đề đòi hình THẬT (lát cắt, giải phẫu, tiêu bản, bản đồ địa hình) mà không có image
-    // provider -> sơ đồ SVG vẫn được dựng nhưng phải được đánh dấu là SƠ ĐỒ, không giả vờ là hình
-    // thật. `fidelity` đi thẳng vào caption + telemetry.
-    const realism = !!(spec && spec.realismRequired);
+  // ---------- 3D TƯƠNG TÁC: Three.js, không đụng tới ----------
+  if (INTERACTIVE_3D_TYPES.has(type) && isInteractive3dSpec(spec)) {
     return {
-      renderer: imageAvailable ? 'generated_image' : 'svg_diagram',
-      primary: imageAvailable ? 'image_generation' : 'deterministic',
-      fallbacks: imageAvailable ? ['deterministic', 'concept_card', 'no_visual'] : ['concept_card', 'no_visual'],
-      accuracyCritical: false,
-      realismRequired: realism,
-      fidelity: imageAvailable ? 'illustrative' : (realism ? 'schematic_only' : 'schematic'),
-      upgradeHint: realism && !imageAvailable
-        ? 'Đề này cần hình thực tế (lát cắt/giải phẫu/bản đồ thật). Renderer deterministic chỉ dựng '
-          + 'được sơ đồ khái niệm — cấu hình GEMINI_IMAGE_API_KEY hoặc OPENAI_IMAGE_API_KEY để có hình '
-          + 'minh hoạ đúng mức. KHÔNG khắc phục bằng cách để renderer tự đoán hình.'
-        : null,
-      reason: imageAvailable ? 'conceptual_with_image_provider'
-        : (realism ? 'conceptual_realism_needed_no_provider' : 'conceptual_no_image_provider')
+      renderer: 'interactive_3d', primary: 'interactive_3d', fallbacks: [],
+      highPrecisionRequired: false, imageProviderAvailable: imageAvailable, blocked: null,
+      fidelity: 'interactive', realismRequired: false, upgradeHint: null,
+      reason: 'interactive_3d_schema'
     };
   }
 
-  // ==========================================================================================
-  // MỤC 1.1 — physics/optics và các loại "ở giữa": QUYẾT ĐỊNH THEO DỮ KIỆN, KHÔNG THEO TYPE
-  // ==========================================================================================
-  // BUG cũ: nhánh này gán CỨNG accuracyCritical=true + primary='deterministic' cho MỌI type không
-  // nằm trong 2 tập trên, nên "một vật trượt trên mặt phẳng nghiêng" (định tính, không đòi số đo)
-  // vẫn bị đẩy về SVG thô. Nay dùng cờ `spec.needsPreciseGeometry` do visualSpecBuilder tính từ
-  // dữ kiện thật (toạ độ/góc cụ thể/plotExpr/quan hệ hình học).
-  //
-  // Mặc định KHI THIẾU CỜ (spec cũ, caller ngoài pipeline) = true -> giữ nguyên hành vi an toàn cũ.
-  const needsPrecise = (spec && spec.needsPreciseGeometry === false) ? false : true;
-
-  if (!needsPrecise && imageAvailable) {
-    return {
-      renderer: 'generated_image',
-      primary: 'image_generation',
-      fallbacks: ['deterministic', 'concept_card', 'no_visual'],
-      accuracyCritical: false,
-      needsPreciseGeometry: false,
-      fidelity: 'illustrative',
-      reason: 'qualitative_scene_image_preferred'
-    };
-  }
+  // ---------- Mọi hình 2D TĨNH còn lại: CHỈ ảnh AI ----------
+  const highPrecision = HIGH_PRECISION.has(type) || !!(spec && spec.needsPreciseGeometry);
+  const realism = !!(spec && spec.realismRequired);
 
   return {
-    renderer: 'svg_diagram',
-    primary: 'deterministic',
-    // Không có số đo phải vẽ đúng thì hình minh hoạ vẫn là fallback hợp lệ; còn khi CÓ số đo
-    // (needsPrecise=true) thì image model không được đụng vào (hình sai tệ hơn không hình).
-    fallbacks: (imageAvailable && !needsPrecise) ? ['image_generation', 'concept_card', 'no_visual'] : ['concept_card', 'no_visual'],
-    accuracyCritical: needsPrecise,
-    needsPreciseGeometry: needsPrecise,
-    reason: needsPrecise ? 'semi_accuracy_critical' : 'qualitative_no_image_provider'
+    renderer: 'generated_image',
+    primary: 'image_generation',
+    // Failover nằm TRONG imageGenerationClient (provider A -> B -> C). Ở tầng router không còn
+    // renderer thay thế nào: hết provider là hết, KHÔNG quay về SVG.
+    fallbacks: [],
+    highPrecisionRequired: highPrecision,
+    imageProviderAvailable: imageAvailable,
+    // Không có provider ảnh = KHÔNG có hình. Nói thẳng ra ở đây để pipeline phát trạng thái lỗi
+    // rõ ràng + nút thử lại, thay vì lặng lẽ dựng một sơ đồ SVG thay thế.
+    blocked: imageAvailable ? null : 'no_image_provider',
+    fidelity: 'ai_generated',
+    realismRequired: realism,
+    upgradeHint: imageAvailable ? null
+      : 'Chưa cấu hình nhà cung cấp ảnh AI (GEMINI_IMAGE_API_KEY / OPENAI_IMAGE_API_KEY). '
+        + 'Hệ thống KHÔNG dựng hình thay thế bằng SVG — hãy cấu hình khoá ảnh rồi bấm "Thử tạo lại".',
+    reason: imageAvailable
+      ? (highPrecision ? 'static_visual_image_high_precision' : 'static_visual_image')
+      : 'no_image_provider'
   };
 }
 
-module.exports = { chooseVisualRenderer, ACCURACY_CRITICAL, CONCEPTUAL };
+module.exports = {
+  chooseVisualRenderer, isInteractive3dSpec,
+  HIGH_PRECISION, INTERACTIVE_3D_TYPES, CONCEPTUAL
+};

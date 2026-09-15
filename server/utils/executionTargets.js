@@ -157,14 +157,18 @@ function buildTargetsForDef({ baseKey, baseLabel, apiKeyEnv, modelEnv, fastModel
           ...stripInternalFields(args),
           apiKeyOverride,
           modelOverride: modelName,
-          fastModelOverride: pickRandomOrUndefined(fastModels),
+          // Không khai model fast riêng -> DÙNG CHÍNH model đã discovery, không để undefined (client
+          // sẽ rơi vào assertModel(null) và ném lỗi "không xác định được model" dù target hoàn toàn hợp lệ).
+          fastModelOverride: pickRandomOrUndefined(fastModels) || modelName,
           capabilities: mergedCapabilities
         }),
         callStream: (args) => callStream({
           ...stripInternalFields(args),
           apiKeyOverride,
           modelOverride: modelName,
-          fastModelOverride: pickRandomOrUndefined(fastModels),
+          // Không khai model fast riêng -> DÙNG CHÍNH model đã discovery, không để undefined (client
+          // sẽ rơi vào assertModel(null) và ném lỗi "không xác định được model" dù target hoàn toàn hợp lệ).
+          fastModelOverride: pickRandomOrUndefined(fastModels) || modelName,
           capabilities: mergedCapabilities
         })
       });
