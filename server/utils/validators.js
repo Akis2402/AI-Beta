@@ -1,5 +1,9 @@
 'use strict';
 
+// PHẦN A/G: mọi ngưỡng kích thước & chính sách MIME ảnh đến từ MỘT nguồn duy nhất dùng chung với
+// client (public/js/payloadBudget.js) — không còn con số hard-code rải rác ở đây.
+const budget = require('./payloadBudget');
+
 class ValidationError extends Error {
   constructor(message) {
     super(message);
@@ -29,7 +33,7 @@ const MAX_DOC_NAME = 120;
 const MAX_HISTORY = 20;
 const MAX_HISTORY_ITEM = 4000;
 const MAX_GENERATE_CONTENT = 6000;
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB sau khi giải mã base64
+const MAX_IMAGE_BYTES = budget.MAX_DIRECT_IMAGE_BYTES; // PHẦN A: 5MB cũ chắc chắn 413 trên Vercel
 const MAX_SOURCE_MANIFEST_LEN = 4000; // mục A3: manifest chỉ là vài dòng thống kê nhẹ, không phải nội dung
 // PDF chỉ chứa ảnh scan (không trích được text): client rasterize từng trang thành ảnh và gửi kèm
 // làm "nguồn" cho model đọc trực tiếp bằng vision, thay vì trích dẫn theo đoạn text như PDF thường.
@@ -37,14 +41,14 @@ const MAX_SOURCE_MANIFEST_LEN = 4000; // mục A3: manifest chỉ là vài dòng
 // scan bị cụt". Nay client tự chọn trang liên quan nhất cho 1 lượt hỏi (xem collectSourceImages() ở
 // app.js) trong trần này — nâng trần lên đủ rộng để 1 câu hỏi có thể kéo nhiều trang khi cần (vd hỏi
 // "trang 12 đến 20") mà vẫn chặn được 1 request cố tình nhồi hàng trăm ảnh.
-const MAX_SOURCE_IMAGES = 24;
-const MAX_SOURCE_IMAGE_BYTES = 2 * 1024 * 1024; // 2MB/trang sau khi giải mã base64 (đã downscale ở client)
+const MAX_SOURCE_IMAGES = budget.MAX_SOURCE_IMAGES;
+const MAX_SOURCE_IMAGE_BYTES = budget.MAX_SOURCE_IMAGE_BYTES; // trần/trang, dùng chung với client
 const MAX_APPROACH_LEN = 3000;
 const ALLOWED_STAGES = ['approach', 'detail'];
 // PHẦN 27: chế độ hình minh hoạ do người dùng chọn (đi vào cache key — xem routes/chat.js).
 const ALLOWED_VISUAL_MODES = ['auto', 'always', 'never'];
 
-const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+const ALLOWED_IMAGE_TYPES = budget.ALLOWED_IMAGE_TYPES; // PHẦN G: 1 danh sách duy nhất client/server
 const ALLOWED_LANGS = ['Tiếng Việt', 'English', 'tự động theo câu hỏi'];
 // VẤN ĐỀ 1 (mục 1): trước đây có 3 mức ('ngắn gọn'/'tiêu chuẩn'/'rất chi tiết'). Mức "rất chi tiết"
 // không tạo giá trị tương xứng: dễ lặp nội dung giữa Hướng giải/Lời giải, tăng output token, tăng
@@ -113,23 +117,78 @@ function clip(str, max) {
  * ảnh cũng cần đọc được khi soạn đề cương/mindmap, không chỉ lúc giải bài) — tách thành hàm dùng
  * chung để các nơi validate luôn NHẤT QUÁN 1 bộ giới hạn, không lệch nhau nếu sau này chỉnh ngưỡng.
  */
+function classifySourceImage(img, index) {
+  const mediaType = String((img && img.mediaType) || '');
+  const base64 = img && img.base64;
+  const page = Number.isFinite(Number(img && img.page)) ? Number(img.page) : null;
+  const doc = clip(String((img && img.doc) || ''), MAX_DOC_NAME);
+  const reject = (reason) => ({ ok: false, index, page, doc, reason });
+
+  if (budget.REJECTED_IMAGE_TYPES.includes(mediaType)) return reject('image_type_rejected');
+  if (budget.TRANSCODE_REQUIRED_IMAGE_TYPES.includes(mediaType)) return reject('image_type_needs_transcode');
+  if (!ALLOWED_IMAGE_TYPES.includes(mediaType)) return reject('image_type_unsupported');
+  if (typeof base64 !== 'string' || base64.length === 0) return reject('image_empty');
+  if (!BASE64_RE.test(base64)) return reject('image_base64_malformed');
+
+  const decodedBytes = budget.base64Bytes(base64);
+  if (decodedBytes > MAX_SOURCE_IMAGE_BYTES) return reject('image_too_large');
+  // PHẦN G: KHÔNG tin nhãn mediaType do client khai — đọc magic bytes thật. Nhãn sai = từ chối RÕ
+  // RÀNG, không bao giờ đẩy một binary lạ vào pipeline vision.
+  const head = Buffer.from(base64.slice(0, 64), 'base64');
+  const sniffed = sniffImageMime(head);
+  if (!sniffed) return reject('image_bytes_not_an_image');
+  if (sniffed !== mediaType) return reject('image_mime_mismatch');
+
+  return { ok: true, index, page, doc, bytes: decodedBytes, image: { mediaType, base64, doc, page } };
+}
+
+/** Magic bytes -> MIME thật. Không có thư viện ảnh nào trong dependencies, đây là kiểm tra chữ ký
+ * cơ bản dùng chung với server/utils/visual/imageBinaryValidator.js (cùng bảng chữ ký). */
+function sniffImageMime(buf) {
+  if (!buf || buf.length < 4) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'image/gif';
+  if (buf.length >= 12 && buf.slice(0, 4).toString('latin1') === 'RIFF' && buf.slice(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+  return null;
+}
+
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * PHẦN E — KHÔNG ÂM THẦM BỎ TRANG NGUỒN.
+ * Bản cũ dùng `.map(...).filter(Boolean)`: trang sai MIME / base64 hỏng / quá nặng biến mất KHÔNG
+ * DẤU VẾT, người dùng vẫn tin "AI đã đọc toàn bộ PDF". NAY trả về CẢ HAI danh sách; mọi route gọi
+ * hàm này PHẢI chuyển `rejected` xuống client (xem routes/chat.js, routes/sourceVision.js).
+ * @returns {{accepted:Array, rejected:Array<{index:number,page:number|null,doc:string,reason:string}>, bytes:number}}
+ */
+function parseSourceImagesDetailed(body) {
+  const raw = Array.isArray(body && body.sourceImages) ? body.sourceImages : [];
+  const accepted = [];
+  const rejected = [];
+  let bytes = 0;
+  raw.forEach((img, i) => {
+    if (accepted.length >= MAX_SOURCE_IMAGES) {
+      rejected.push({ index: i, page: Number.isFinite(Number(img && img.page)) ? Number(img.page) : null, doc: '', reason: 'too_many_images' });
+      return;
+    }
+    const verdict = classifySourceImage(img, i);
+    if (!verdict.ok) { rejected.push({ index: verdict.index, page: verdict.page, doc: verdict.doc, reason: verdict.reason }); return; }
+    const wire = budget.base64WireBytes(verdict.image.base64);
+    if (bytes + wire > budget.MAX_SOURCE_IMAGES_TOTAL_BYTES) {
+      rejected.push({ index: verdict.index, page: verdict.page, doc: verdict.doc, reason: 'total_budget_exceeded' });
+      return;
+    }
+    accepted.push(verdict.image);
+    bytes += wire;
+  });
+  return { accepted, rejected, bytes };
+}
+
+/** Tương thích ngược cho call-site chỉ cần danh sách hợp lệ (KHÔNG dùng ở route mới — route phải
+ * báo `rejected` cho client). */
 function parseSourceImages(body) {
-  return Array.isArray(body && body.sourceImages)
-    ? body.sourceImages.slice(0, MAX_SOURCE_IMAGES).map((img) => {
-        const mediaType = img && img.mediaType;
-        const base64 = img && img.base64;
-        if (!ALLOWED_IMAGE_TYPES.includes(mediaType)) return null;
-        if (typeof base64 !== 'string' || base64.length === 0) return null;
-        const approxBytes = Math.floor(base64.length * 0.75);
-        if (approxBytes > MAX_SOURCE_IMAGE_BYTES) return null; // âm thầm bỏ qua trang lỗi/quá nặng, không chặn cả yêu cầu
-        return {
-          mediaType,
-          base64,
-          doc: clip(String((img && img.doc) || ''), MAX_DOC_NAME),
-          page: Number.isFinite(Number(img && img.page)) ? Number(img.page) : null
-        };
-      }).filter(Boolean)
-    : [];
+  return parseSourceImagesDetailed(body).accepted;
 }
 
 /**
@@ -150,6 +209,22 @@ function nonNegInt(v) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+/**
+ * PHẦN A7/A8 — cùng một chính sách với client, lỗi CÓ CẤU TRÚC khi vượt.
+ * Đo trên chính object đã sanitize (thứ server sẽ thật sự xử lý), không đo trên body thô: nếu
+ * request thô lớn hơn mà phần hợp lệ đã nằm trong ngân sách thì không có lý do gì để từ chối.
+ */
+function assertWithinRequestBudget(sanitized) {
+  const check = budget.checkRequestBudget(sanitized);
+  if (check.ok) return;
+  throw budget.payloadTooLargeError({
+    actualSize: check.bytes,
+    safeLimit: check.limit,
+    suggestedAction: 'reduce_source_images_or_contexts',
+    scope: 'request'
+  });
+}
+
 function validateChatBody(body) {
   if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
 
@@ -167,20 +242,26 @@ function validateChatBody(body) {
 
   let image = null;
   if (body.image) {
-    const mediaType = body.image.mediaType;
-    const base64 = body.image.base64;
-    if (!ALLOWED_IMAGE_TYPES.includes(mediaType)) {
-      throw new ValidationError('Định dạng ảnh không được hỗ trợ (chỉ nhận PNG/JPEG/WEBP/GIF).');
+    // PHẦN A/G: cùng một bộ luật với ảnh trang nguồn — MIME allow-list, base64 đúng bảng chữ cái,
+    // magic bytes khớp nhãn, dung lượng tính THẬT (không phải `length * 0.75`).
+    const verdict = classifySourceImage({ ...body.image, page: null, doc: '' }, -1);
+    if (!verdict.ok) {
+      const messages = {
+        image_type_rejected: 'Ảnh SVG không được chấp nhận. Hãy chuyển sang PNG/JPEG trước khi gửi.',
+        image_type_needs_transcode: 'Định dạng ảnh này (HEIC/HEIF/BMP/TIFF/AVIF) cần được chuyển sang PNG/JPEG trước khi gửi.',
+        image_type_unsupported: 'Định dạng ảnh không được hỗ trợ (chỉ nhận PNG/JPEG/WEBP/GIF).',
+        image_empty: 'Dữ liệu ảnh không hợp lệ.',
+        image_base64_malformed: 'Dữ liệu ảnh không hợp lệ (base64 hỏng).',
+        image_bytes_not_an_image: 'Tệp gửi lên không phải ảnh thật.',
+        image_mime_mismatch: 'Định dạng ảnh khai báo không khớp với nội dung tệp.',
+        image_too_large: `Ảnh vượt quá dung lượng cho phép (tối đa ${Math.round(MAX_IMAGE_BYTES / (1024 * 1024) * 10) / 10}MB).`
+      };
+      throw new ValidationError(messages[verdict.reason] || 'Dữ liệu ảnh không hợp lệ.');
     }
-    if (typeof base64 !== 'string' || base64.length === 0) {
-      throw new ValidationError('Dữ liệu ảnh không hợp lệ.');
+    if (verdict.bytes > MAX_IMAGE_BYTES) {
+      throw new ValidationError(`Ảnh vượt quá dung lượng cho phép (tối đa ${Math.round(MAX_IMAGE_BYTES / (1024 * 1024) * 10) / 10}MB).`);
     }
-    // ước lượng dung lượng gốc từ độ dài chuỗi base64
-    const approxBytes = Math.floor(base64.length * 0.75);
-    if (approxBytes > MAX_IMAGE_BYTES) {
-      throw new ValidationError('Ảnh vượt quá dung lượng cho phép (tối đa 5MB).');
-    }
-    image = { mediaType, base64 };
+    image = { mediaType: verdict.image.mediaType, base64: verdict.image.base64 };
   }
 
   if (!query && !image) {
@@ -189,7 +270,11 @@ function validateChatBody(body) {
 
   // sourceImages: ảnh các trang PDF-chỉ-ảnh (scan), KHÁC với `image` (ảnh đề bài người dùng chụp/dán
   // trực tiếp) — validate qua parseSourceImages() dùng chung với /api/generate/*.
-  const sourceImages = parseSourceImages(body);
+  const sourceImagesResult = parseSourceImagesDetailed(body);
+  const sourceImages = sourceImagesResult.accepted;
+  // PHẦN E: trang bị loại PHẢI đi ngược về client (route gắn vào response/SSE) — không bao giờ để
+  // người dùng tin rằng AI đã đọc những trang thực tế đã bị bỏ.
+  const sourceImagesRejected = sourceImagesResult.rejected;
 
   const rules = normalizeRules(body.rules);
 
@@ -298,26 +383,35 @@ function validateChatBody(body) {
       })).filter((h) => h.content)
     : [];
 
-  return { query, deepThinking, crossCheck, image, sourceImages, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText };
+  const result = { query, deepThinking, crossCheck, image, sourceImages, sourceImagesRejected, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText };
+  // PHẦN A7: server dùng ĐÚNG chính sách mà client đã dùng để tự kiểm trước khi gửi. Nếu tới đây vẫn
+  // vượt ngân sách (client cũ chưa cập nhật, hoặc gọi API trực tiếp) -> lỗi CÓ CẤU TRÚC, KHÔNG âm
+  // thầm cắt bớt dữ liệu rồi trả lời như thể đã đọc đủ.
+  assertWithinRequestBudget(result);
+  return result;
 }
 
 /** Validate body của các endpoint /api/generate/* (flashcards + mindmap dùng chung) */
 function validateGenerateBody(body) {
   if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
   const content = clip(String(body.content || '').trim(), MAX_GENERATE_CONTENT);
-  const sourceImages = parseSourceImages(body);
+  const { accepted: sourceImages, rejected: sourceImagesRejected } = parseSourceImagesDetailed(body);
   if (!content && !sourceImages.length) throw new ValidationError('Thiếu nội dung để tạo slide/flashcard/mindmap.');
-  return { content, sourceImages };
+  const out = { content, sourceImages, sourceImagesRejected };
+  assertWithinRequestBudget(out);
+  return out;
 }
 
 /** Validate body của POST /api/generate/outline (đề cương .docx) */
 function validateOutlineBody(body) {
   if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
   const content = clip(String(body.content || '').trim(), MAX_GENERATE_CONTENT);
-  const sourceImages = parseSourceImages(body);
+  const { accepted: sourceImages, rejected: sourceImagesRejected } = parseSourceImagesDetailed(body);
   if (!content && !sourceImages.length) throw new ValidationError('Thiếu nội dung để tạo đề cương.');
   const includeExercises = body.includeExercises === true;
-  return { content, sourceImages, includeExercises };
+  const out = { content, sourceImages, sourceImagesRejected, includeExercises };
+  assertWithinRequestBudget(out);
+  return out;
 }
 
 // ---------- Mục 3A/3C: payload TỐI THIỂU cho self-check / similar ----------
@@ -353,12 +447,26 @@ function validateSimilarBody(body) {
  * (khác /api/chat: ở đây KHÔNG cần query/contexts, chỉ cần đúng 1 batch ảnh trang, tối đa 8 trang/
  * request — khớp PDF_RASTER_BATCH_SIZE ở client — để 1 request vision không phình quá lớn/lâu).
  */
-const MAX_VISION_BATCH_PAGES = 8;
+// PHẦN D — KHÔNG còn hằng số "8 trang/lần". 8 trang ảnh scan chữ dày đặc vẫn có thể vượt trần
+// payload; 8 trang ảnh nhẹ lại lãng phí lượt gọi. Ràng buộc THẬT là BYTE: batch được chấp nhận khi
+// tổng serialized nằm dưới ngân sách an toàn. MAX_VISION_BATCH_PAGES chỉ còn là trần chống DoS.
+const MAX_VISION_BATCH_PAGES = budget.MAX_SOURCE_IMAGES;
 function validateSourceVisionBody(body) {
   if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
-  const pages = parseSourceImages({ sourceImages: body.pages }).slice(0, MAX_VISION_BATCH_PAGES);
-  if (!pages.length) throw new ValidationError('Không có trang ảnh hợp lệ nào để xử lý.');
-  return { pages };
+  const { accepted, rejected } = parseSourceImagesDetailed({ sourceImages: body.pages });
+  const pages = accepted.slice(0, MAX_VISION_BATCH_PAGES);
+  accepted.slice(MAX_VISION_BATCH_PAGES).forEach((img, i) => {
+    rejected.push({ index: MAX_VISION_BATCH_PAGES + i, page: img.page, doc: img.doc, reason: 'too_many_images' });
+  });
+  // PHẦN E: batch KHÔNG còn "im lặng bỏ trang" — chỉ lỗi khi KHÔNG CÒN trang nào dùng được, và khi
+  // đó nói rõ từng trang hỏng vì lý do gì (client đánh dấu đúng trang đó là failed, không retry mù).
+  if (!pages.length) {
+    const err = new ValidationError('Không có trang ảnh hợp lệ nào để xử lý.');
+    err.rejected = rejected;
+    throw err;
+  }
+  assertWithinRequestBudget({ pages });
+  return { pages, rejected };
 }
 
 module.exports = {
@@ -369,6 +477,8 @@ module.exports = {
   validateSelfCheckBody,
   validateSimilarBody,
   validateSourceVisionBody,
+  parseSourceImagesDetailed,
+  assertWithinRequestBudget,
   normalizeRules,
   normalizeDetail,
   SCHOOL_GRADES,
@@ -376,6 +486,9 @@ module.exports = {
   LIMITS: {
     MAX_QUERY, MAX_RULE_LEN, MAX_RULES, MAX_CONTEXTS, MAX_CONTEXT_LEN,
     SECURITY_MAX_CONTEXTS, SECURITY_MAX_CONTEXT_LEN, MAX_SOURCE_IMAGES,
-    MAX_HISTORY, MAX_IMAGE_BYTES, MAX_GENERATE_CONTENT
+    MAX_HISTORY, MAX_IMAGE_BYTES, MAX_GENERATE_CONTENT,
+    MAX_SOURCE_IMAGE_BYTES, MAX_VISION_BATCH_PAGES,
+    SAFE_REQUEST_BYTES: budget.SAFE_REQUEST_BYTES,
+    SAFE_RESPONSE_BYTES: budget.SAFE_RESPONSE_BYTES
   }
 };

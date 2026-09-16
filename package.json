@@ -5,7 +5,8 @@
   "description": "Trợ Giải — AI học tập (full-stack): frontend tĩnh + backend Node/Express proxy bảo mật cho Anthropic API",
   "main": "server/index.js",
   "engines": {
-    "node": ">=18"
+    "node": ">=22.11.0 <25",
+    "npm": ">=10"
   },
   "scripts": {
     "start": "node server/index.js",
@@ -18,7 +19,9 @@
     "measure-tokens": "node scripts/measure-tokens.js",
     "live-image-check": "node scripts/live-image-check.js",
     "visual-corpus-report": "node scripts/visual-corpus-report.js",
-    "live-source-check": "node scripts/live-source-check.js"
+    "live-source-check": "node scripts/live-source-check.js",
+    "test:ci": "npm run build && node scripts/check-static-assets.js && node test/run-all.js --ci",
+    "token-benchmark": "node scripts/token-benchmark.js"
   },
   "dependencies": {
     "compression": "^1.7.4",

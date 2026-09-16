@@ -49,6 +49,11 @@ const { compactCandidatesForReconcile } = require('../utils/verificationPacket')
 const { validateApproachCompactness, buildApproachRepairPrompt, extractApproachSection } = require('../utils/approachValidator');
 const { normalizeError } = require('../utils/errorNormalize');
 const { compressHistoryForBudget } = require('../utils/semanticCompression');
+// PROMPT V5 — định tuyến bằng luật + ngân sách lệnh gọi AI + chú thích deterministic.
+const { routeIntent } = require('../utils/intentRouter');
+const aiBudget = require('../utils/aiCallBudget');
+const deterministicCaption = require('../utils/visual/deterministicCaption');
+const workingSetLib = require('../utils/source/sourceWorkingSet');
 const { validateSolutionCompleteness, extractCoverageList } = require('../utils/completenessCheck');
 const { computeRecoveryBudget, appendContinuationTurn } = require('../utils/continuation');
 // PHẦN B/L: vòng RESUME/CONTINUATION dùng chung (checkpoint + resumable failover A->B->C->D).
@@ -443,7 +448,14 @@ router.post('/', async (req, res, next) => {
   // dừng SỚM — không tiếp tục continuation/retry/reconcile, không ghi cache, không gửi "done".
   const abortController = new AbortController();
   let disconnected = false;
-  req.on('close', () => {
+  // ROOT CAUSE (bug "CANCELLED ngay sau status GENERATING"): `req.on('close')` KHÔNG có nghĩa là
+  // "client ngắt kết nối". Trên Node hiện đại, IncomingMessage phát 'close' NGAY SAU KHI thân request
+  // được đọc xong — tức là với mọi request POST bình thường. Trước đây lỗi này bị che đi hoàn toàn
+  // bởi thứ tự middleware (body-parser toàn cục đọc hết thân request TRƯỚC khi route kịp gắn
+  // listener, nên listener không bao giờ nhận được sự kiện đã phát); chỉ cần chèn thêm một middleware
+  // bất đồng bộ phía trước là pipeline tự huỷ mọi request. Tín hiệu ĐÚNG cho "client đóng kết nối"
+  // là 'close' của RESPONSE khi response chưa kết thúc.
+  res.on('close', () => {
     if (res.writableEnded) return; // response đã kết thúc bình thường — không phải disconnect thật
     disconnected = true;
     abortController.abort();
@@ -460,6 +472,48 @@ router.post('/', async (req, res, next) => {
     // generation -> validation -> continuation -> finalization.
     const globalDeadline = createRequestDeadline(GLOBAL_REQUEST_DEADLINE_MS);
     const input = validateChatBody(req.body);
+
+    // ============================================================================================
+    // PROMPT V5 — PHẦN E/F: ĐỊNH TUYẾN BẰNG LUẬT + EARLY EXIT, TRƯỚC MỌI CHUẨN BỊ TỐN KÉM
+    // ============================================================================================
+    // Trước đây nhánh "chỉ lấy hình" nằm SAU nén history, nén context, retrieval và token-economy
+    // pipeline — nghĩa là một câu "Tạo cho tôi hình ảnh cấu tạo tế bào" vẫn kéo theo toàn bộ công
+    // việc chuẩn bị nguồn của một bài giải, rồi mới rẽ sang tạo ảnh và vứt hết phần vừa chuẩn bị.
+    // Với 1 PDF 134 trang đang mở, đó là hàng chục nghìn token context bị dựng ra để không dùng.
+    // Nay ý định được xác định NGAY sau validate (0 token, 0 I/O) và các đầu vào không liên quan
+    // được cắt tại gốc — mọi tầng phía sau tự nhiên có chi phí bằng 0 thay vì phải nhớ tự tắt.
+    const intentPlan = routeIntent({
+      query: input.query,
+      images: input.sourceImages,
+      activeSources: (input.sourceStatus || []).map((s0) => ({ id: s0.sourceId, forced: false }))
+    });
+    const aiCallBudget = aiBudget.createCallBudget({ intent: intentPlan.intent });
+    let earlyExitTelemetry = null;
+    if (intentPlan.imageOnly && !intentPlan.usesSource) {
+      earlyExitTelemetry = {
+        droppedContexts: input.contexts.length,
+        droppedSourceImages: input.sourceImages.length,
+        droppedHistoryTurns: input.history.length
+      };
+      // PHẦN CX: cắt có KHAI BÁO — telemetry ghi rõ đã bỏ bao nhiêu và vì lý do gì, không im lặng.
+      input.contexts = [];
+      input.sourceImages = [];
+      input.history = [];
+      input.sourceManifest = '';
+      input.requirementLabels = [];
+      input.unmatchedRequirementLabels = [];
+    }
+    reqLogger.log({
+      stage: 'intent_route',
+      intent: intentPlan.intent,
+      imageOnly: intentPlan.imageOnly,
+      usesSource: intentPlan.usesSource,
+      usesWeb: intentPlan.usesWeb,
+      usesYoutube: intentPlan.usesYoutube,
+      aiCallBaseline: aiCallBudget.baseline,
+      ...(earlyExitTelemetry ? { earlyExit: 'image_only', ...earlyExitTelemetry } : {})
+    });
+
     await ensureProvidersReady();
     const activeProviders = getActiveProviders();
     if (!activeProviders.length) {
@@ -515,7 +569,12 @@ router.post('/', async (req, res, next) => {
       subjectId: subjectResolved.subjectId, subjectConfidence: subjectResolved.subjectConfidence,
       subjectSource: subjectResolved.subjectSource,
       secondarySubjectId: subjectResolved.secondarySubjectId,
-      secondarySubjectConfidence: subjectResolved.secondarySubjectConfidence
+      secondarySubjectConfidence: subjectResolved.secondarySubjectConfidence,
+      // PHẦN E: trang nguồn bị TỪ CHỐI ở validate luôn đi cùng MỌI payload (SSE lẫn JSON) — người
+      // dùng phải biết AI đã KHÔNG đọc trang nào, thay vì tin là đã đọc hết.
+      ...(input.sourceImagesRejected && input.sourceImagesRejected.length
+        ? { rejectedSourcePages: input.sourceImagesRejected }
+        : {})
     };
 
     // ---------- Semantic compression (mục IV/mục 8) trước khi ghép messages ----------
@@ -554,6 +613,41 @@ router.post('/', async (req, res, next) => {
     const excerptPack = contextCompressor.compressSourceExcerpts(citationIndex.effectiveContexts);
     const effectiveContexts = excerptPack.contexts;
     input.contexts = effectiveContexts;
+
+    // ============================================================================================
+    // PROMPT V5 — PHẦN M/DV/FC-5: SOURCE WORKING SET ĐƯỢC ĐÔNG CỨNG ĐÚNG MỘT LẦN
+    // ============================================================================================
+    // Từ điểm này trở đi, "câu hỏi này cần đúng những bằng chứng nào" đã được chốt. Mọi giai đoạn
+    // sau (continuation, reconcile, cross-check, failover sang provider khác) dùng lại CHÍNH tập
+    // này — không giai đoạn nào được phép đi hỏi nguồn lần nữa. Working set là object đã Object.freeze
+    // nên ràng buộc đó được ngôn ngữ bảo đảm, không phụ thuộc vào việc người sửa code sau này có nhớ hay không.
+    const sourceWorkingSet = effectiveContexts.length
+      ? workingSetLib.createWorkingSet({
+        requestId: reqLogger.requestId,
+        query: input.query,
+        subject: subjectResolved.subjectId,
+        language: input.settings.lang,
+        evidence: effectiveContexts,
+        requirementLabels: input.requirementLabels,
+        citationMap: citationIndex.citationMap,
+        sourceVersion: String((input.sourceStatus || []).map((s0) => `${s0.sourceId}:${s0.extractionVersion}`).sort().join('|'))
+      })
+      : null;
+    const workingSetTracker = workingSetLib.createReuseTracker(sourceWorkingSet);
+    if (sourceWorkingSet) {
+      workingSetTracker.use('answer');
+      const coverage = workingSetLib.coverageMatrix(sourceWorkingSet.selectedEvidence, sourceWorkingSet.requirementLabels);
+      reqLogger.log({
+        stage: 'source_working_set',
+        workingSetId: sourceWorkingSet.workingSetId,
+        evidenceCount: sourceWorkingSet.selectedEvidence.length,
+        pages: sourceWorkingSet.selectedPages.length,
+        requirementsCovered: coverage.covered,
+        requirementsTotal: coverage.total,
+        completeForQuery: sourceWorkingSet.completeForQuery,
+        workingSetTokenEstimate: sourceWorkingSet.tokenEstimate
+      });
+    }
     if (citationIndex.duplicatesMerged) {
       reqLogger.log({
         stage: 'context_dedupe',
@@ -876,22 +970,34 @@ router.post('/', async (req, res, next) => {
     // ============================================================================================
     // Đặt TRƯỚC mọi nhánh giải bài (kể cả cross-check) và SAU cache-hit, nên nó không đụng gì tới
     // các đường hiện có: câu hỏi không phải dạng "tạo cho tôi hình ảnh X" sẽ không bao giờ vào đây.
-    const imageOnly = visualSystem.decisionEngine.detectImageOnlyRequest(problemText);
+    // Ý định đã được quyết ở đầu request (routeIntent) — nhánh dưới chỉ THỰC THI, không phân loại lại.
+    const imageOnly = { imageOnly: intentPlan.imageOnly, topic: intentPlan.topic, reason: intentPlan.reason };
     if (imageOnly.imageOnly) {
       reqLogger.log({ stage: 'image_only_request', topic: imageOnly.topic.length, reason: imageOnly.reason });
       const imageVisualBase = { ...visualBase, userPreference: 'always', question: imageOnly.topic || problemText };
 
       if (wantsStream) {
         sseHeaders(res);
-        req.on('close', () => { try { res.end(); } catch (e) { /* đã đóng — bỏ qua */ } });
+        res.on('close', () => { try { res.end(); } catch (e) { /* đã đóng — bỏ qua */ } });
       }
       try {
         if (wantsStream) sseWrite(res, 'status', { state: STATES.GENERATING, message: 'Đang chuẩn bị hình minh hoạ…' });
-        const caption = await generateImageCaption({
-          topic: imageOnly.topic || problemText,
-          language: input.settings.lang,
-          activeProviders, deadline: globalDeadline, requestId: reqLogger.requestId, signal
-        });
+        // PHẦN AE: chú thích mặc định là DETERMINISTIC — image-only = ĐÚNG 1 lệnh gọi AI (sinh ảnh).
+        // Lệnh gọi model cho caption chỉ tồn tại khi bật tường minh IMAGE_CAPTION_MODEL=1.
+        const caption = deterministicCaption.captionModelEnabled()
+          ? await (async () => {
+            aiCallBudget.record(aiBudget.PURPOSE.CAPTION, { reason: 'IMAGE_CAPTION_MODEL=1 (bật tường minh)' });
+            return generateImageCaption({
+              topic: imageOnly.topic || problemText,
+              language: input.settings.lang,
+              activeProviders, deadline: globalDeadline, requestId: reqLogger.requestId, signal
+            });
+          })()
+          : deterministicCaption.buildDeterministicCaption({
+            topic: imageOnly.topic || problemText,
+            language: input.settings.lang,
+            subjectId: subjectResolved.subjectId
+          });
         if (disconnected) return;
         const captionText = caption.text || '';
         if (wantsStream && captionText) sseWrite(res, 'delta', { text: captionText });
@@ -924,7 +1030,7 @@ router.post('/', async (req, res, next) => {
               message: 'Chưa tạo được hình cho yêu cầu này. Máy chủ có thể chưa cấu hình nhà cung cấp ảnh.'
             });
           }
-          reqLogger.log({ stage: 'image_only_done', ...attemptTelemetry.snapshot(), ...run.telemetry });
+          reqLogger.log({ stage: 'image_only_done', ...attemptTelemetry.snapshot(), ...run.telemetry, ...aiCallBudget.snapshot() });
           return res.end();
         }
 
@@ -944,7 +1050,7 @@ router.post('/', async (req, res, next) => {
 
     if (wantsStream) {
       sseHeaders(res);
-      req.on('close', () => { try { res.end(); } catch (e) { /* đã đóng — bỏ qua */ } });
+      res.on('close', () => { try { res.end(); } catch (e) { /* đã đóng — bỏ qua */ } });
 
       try {
         if (input.crossCheck && input.stage === 'detail') {
@@ -1137,12 +1243,13 @@ router.post('/', async (req, res, next) => {
 
           // PHẦN P: KHÔNG BAO GIỜ cache response PARTIAL/interrupted/chưa validate — chỉ cache khi
           // thực sự COMPLETED (partial=false), nếu không lần sau sẽ trả lại đúng câu trả lời bị cắt.
+          if (reconcileRun.resumes || continuations) workingSetTracker.use('continuation'); // KHÔNG retrieval lại
           if (!tePlan.cacheBypassed && !outcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, donePayload);
           if (!outcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, full.length / 3.2);
           teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
           teTelemetry.record('outputTokens', full.length / 3.2);
           teTelemetry.record('continuationTokens', reconcileRun.session.continuationTokens);
-          reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot(), ...compressionTelemetry, ...visualRun.telemetry });
+          reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot(), ...compressionTelemetry, ...visualRun.telemetry, ...workingSetTracker.snapshot(), ...aiCallBudget.snapshot() });
           return res.end();
         }
 

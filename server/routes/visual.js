@@ -23,6 +23,7 @@ const express = require('express');
 // content-type bị cấu hình nhầm) mà KHÔNG hề đọc byte thật. Nay bắt buộc đi qua đúng 1 hàm dùng
 // chung với imageGenerationClient.js/live-image-check.js.
 const { validateImageBuffer } = require('../utils/visual/imageBinaryValidator');
+const safeHttp = require('../utils/safeHttp');
 
 const router = express.Router();
 
@@ -94,61 +95,53 @@ router.get('/download', async (req, res) => {
   const target = parseAllowedUrl(req.query.url);
   if (!target) return res.status(400).json({ error: 'url_not_allowed' });
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-  try {
-    let current = target;
-    let upstream = null;
-    for (let hop = 0; hop < 3; hop++) {
-      upstream = await fetch(current.toString(), { redirect: 'manual', signal: controller.signal });
-      if (upstream.status >= 300 && upstream.status < 400 && upstream.headers.get('location')) {
-        const next = parseAllowedUrl(new URL(upstream.headers.get('location'), current).toString());
-        if (!next) return res.status(400).json({ error: 'redirect_not_allowed' });
-        current = next;
-        continue;
-      }
-      break;
+  // PHẦN L: mỗi chặng redirect PHẢI đi lại đủ 3 lớp — whitelist hostname, DNS ra địa chỉ PUBLIC,
+  // và kết nối tới ĐÚNG địa chỉ đã kiểm (ghim IP, chống DNS rebinding). Trần byte áp trên luồng.
+  let current = target;
+  let result = null;
+  for (let hop = 0; hop < 3; hop++) {
+    result = await safeHttp.fetchPinned(current, { maxBytes: MAX_BYTES, timeoutMs: FETCH_TIMEOUT_MS });
+    if (!result.ok) {
+      if (result.reason === 'too_large') return res.status(413).json({ error: 'too_large' });
+      if (result.reason === 'blocked_ip') return res.status(400).json({ error: 'url_not_allowed' });
+      if (result.reason === 'dns_failed' || result.reason === 'dns_empty') return res.status(502).json({ error: 'upstream_unreachable' });
+      return res.status(502).json({ error: 'upstream_error' });
     }
-    if (!upstream || !upstream.ok) return res.status(502).json({ error: 'upstream_failed' });
-
-    // Header content-type CHỈ dùng để loại nhanh trường hợp rõ ràng không phải ảnh (vd text/html của
-    // trang lỗi) — KHÔNG bao giờ dùng làm bằng chứng cuối cùng để quyết định trả file cho client.
-    const ctypeHeader = String(upstream.headers.get('content-type') || '');
-    if (ctypeHeader && !/^image\//i.test(ctypeHeader)) {
-      return res.status(415).json({ error: 'not_an_image', detail: 'content-type header: ' + ctypeHeader });
+    if (result.location) {
+      let nextUrl;
+      try { nextUrl = new URL(result.location, current); } catch (e) { return res.status(400).json({ error: 'redirect_not_allowed' }); }
+      const next = parseAllowedUrl(nextUrl.toString());
+      if (!next) return res.status(400).json({ error: 'redirect_not_allowed' });
+      current = next;
+      continue;
     }
-    const len = Number(upstream.headers.get('content-length') || 0);
-    if (len && len > MAX_BYTES) return res.status(413).json({ error: 'too_large' });
-
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    if (buf.length > MAX_BYTES) return res.status(413).json({ error: 'too_large' });
-
-    // ============================================================================================
-    // MỤC 5 (đợt audit 2) — ROOT CAUSE: route cũ dừng lại ở `content-type startsWith 'image/'`.
-    // Header content-type đến từ CHÍNH upstream (provider/CDN) — nếu upstream trả trang lỗi/hết hạn
-    // URL với header bị cấu hình sai (hoặc cố tình sai), client vẫn nhận "thành công" và tải về một
-    // file .png rác. NAY: đọc byte thật bằng validator dùng chung — HTTP 200 + có content-type ảnh
-    // KHÔNG BAO GIỜ được coi là đủ; chỉ khi magic bytes khớp mới trả file cho client.
-    const validated = validateImageBuffer(buf, ctypeHeader);
-    if (!validated.valid) {
-      return res.status(502).json({ error: 'invalid_image_body', reason: validated.reason });
-    }
-
-    const filename = safeFilename(req.query.subject, req.query.visualId, validated.detectedMime);
-    res.setHeader('Content-Type', validated.detectedMime); // MIME THẬT (chữ ký byte), không phải header upstream tự khai.
-    res.setHeader('Content-Length', String(buf.length));
-    // `inline=1`: dùng cho thẻ <img> (CSP img-src chỉ cho 'self'), không phải tải về.
-    const inline = String(req.query.inline || '') === '1';
-    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${filename}"`);
-    res.setHeader('Cache-Control', 'private, max-age=300');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    return res.end(buf);
-  } catch (e) {
-    return res.status(502).json({ error: 'upstream_error' });
-  } finally {
-    clearTimeout(timer);
+    break;
   }
+  if (!result || !result.ok || result.location) return res.status(502).json({ error: 'too_many_redirects' });
+  if (!result.body || result.status < 200 || result.status >= 300) return res.status(502).json({ error: 'upstream_failed' });
+
+  // Header content-type CHỈ dùng để loại nhanh trường hợp rõ ràng không phải ảnh — KHÔNG bao giờ là
+  // bằng chứng cuối cùng (xem validateImageBuffer bên dưới: chữ ký byte thật mới quyết định).
+  const ctypeHeader = String(result.headers['content-type'] || '');
+  if (ctypeHeader && !/^image\//i.test(ctypeHeader)) {
+    return res.status(415).json({ error: 'not_an_image' });
+  }
+  const buf = result.body;
+  if (buf.length > MAX_BYTES) return res.status(413).json({ error: 'too_large' });
+
+  const validated = validateImageBuffer(buf, ctypeHeader);
+  if (!validated.valid) {
+    return res.status(502).json({ error: 'invalid_image_body', reason: validated.reason });
+  }
+
+  const filename = safeFilename(req.query.subject, req.query.visualId, validated.detectedMime);
+  res.setHeader('Content-Type', validated.detectedMime); // MIME THẬT (chữ ký byte), không phải header upstream tự khai.
+  res.setHeader('Content-Length', String(buf.length));
+  const inline = String(req.query.inline || '') === '1';
+  res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${filename}"`);
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  return res.end(buf);
 });
 
 // ============================================================================================
@@ -159,12 +152,35 @@ router.get('/download', async (req, res) => {
 // (OPTIONAL/NONE) không được phép đốt một lượt gọi ảnh giá cao.
 const hqStore = require('../utils/visual/visualHqStore');
 const imageClient = require('../utils/visual/imageGenerationClient');
+const assetStore = require('../utils/visual/visualAssetStore');
+const responseGuard = require('../utils/visual/visualResponseGuard');
+
+// ============================================================================================
+// PHẦN B — GET /api/visual/asset/:id : TRẢ BYTE ẢNH RA NGOÀI RESPONSE JSON
+// ============================================================================================
+// Ảnh đi bằng request riêng nên KHÔNG bao giờ cộng vào trần 4.5MB của /api/chat. ID do server sinh
+// ngẫu nhiên 128 bit, TTL ngắn, không mang thông tin nào về câu hỏi/lời giải.
+router.get('/asset/:id', async (req, res) => {
+  const found = await assetStore.get(req.params.id);
+  if (!found) return res.status(404).json({ error: 'asset_expired' });
+  // Byte trong store ĐÃ được validateImageBuffer() ở imageGenerationClient trước khi tới đây; kiểm
+  // lại chữ ký một lần nữa vì đây là nơi byte rời khỏi server tới trình duyệt.
+  const validated = validateImageBuffer(found.buffer, found.mime);
+  if (!validated.valid) return res.status(502).json({ error: 'invalid_image_body', reason: validated.reason });
+  res.setHeader('Content-Type', validated.detectedMime);
+  res.setHeader('Content-Length', String(found.buffer.length));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  const inline = String(req.query.inline || '') === '1';
+  res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${safeFilename(req.query.subject, req.params.id, validated.detectedMime)}"`);
+  return res.end(found.buffer);
+});
 
 const HQ_SIZE = '2048x2048';
 
 router.post('/hq', express.json({ limit: '4kb' }), async (req, res) => {
   const visualId = req.body && req.body.visualId;
-  const ctx = hqStore.get(visualId);
+  const ctx = await hqStore.get(visualId);
   // Không còn ngữ cảnh (hết TTL, hoặc instance serverless khác) -> nói thẳng, KHÔNG đoán prompt.
   if (!ctx) return res.status(404).json({ error: 'visual_context_expired' });
   if (!imageClient.isConfigured()) return res.status(503).json({ error: 'no_image_provider' });
@@ -184,11 +200,16 @@ router.post('/hq', express.json({ limit: '4kb' }), async (req, res) => {
   // imageGenerationClient.js — cả nhánh base64 lẫn image_url đều tự validate trước khi trả ok:true).
   // Route này KHÔNG cần validate lại — chỉ cần không bao giờ trả ok:true khi img.ok=false.
   if (!img.ok) return res.status(502).json({ ok: false, error: img.reason || 'image_failed' });
-  return res.json({
-    ok: true, format: img.format, url: img.url, size: HQ_SIZE,
-    renderer: 'generated_image', origin: 'ai_generated', model: img.model,
-    filename: safeFilename(ctx.subject, visualId, mimeOfImgResult(img))
+  // PHẦN B5: ảnh 2048x2048 base64 gần như chắc chắn vượt trần response nếu nhúng thẳng vào JSON.
+  const prepared = await responseGuard.prepareResponsePayload({
+    ok: true, size: HQ_SIZE, renderer: 'generated_image', origin: 'ai_generated', model: img.model,
+    filename: safeFilename(ctx.subject, visualId, mimeOfImgResult(img)),
+    visuals: [{ visualId, format: img.format, url: img.url }]
   });
+  const out = prepared.payload;
+  const first = (out.visuals || [])[0] || {};
+  if (!first.url) return res.status(503).json({ ok: false, error: first.error || 'image_too_large_for_response' });
+  return res.json({ ...out, visuals: undefined, format: first.format, url: first.url, assetId: first.assetId });
 });
 
 // ============================================================================================
@@ -217,6 +238,11 @@ router.get('/status', (req, res) => {
   res.json({
     imageGenerationEnabled: imageClient.isConfigured(),
     activeProvider: imageClient.activeProviderName(),
+    // PHẦN H/B: nói THẬT về khả năng sống qua nhiều instance. `false` nghĩa là retry/HQ/asset chỉ
+    // hoạt động chắc chắn khi chạy 1 tiến trình (local/VPS) — không được tuyên bố ngược lại.
+    contextStoreDurable: hqStore.isDurable(),
+    assetStoreDurable: assetStore.isDurable(),
+    multiInstanceRuntime: responseGuard.isMultiInstanceRuntime(),
     providers
   });
 });
@@ -230,7 +256,7 @@ router.get('/status', (req, res) => {
 // Failover giữa các provider ảnh đã có sẵn trong imageClient.generateImage() — không cần lặp ở đây.
 router.post('/retry', express.json({ limit: '4kb' }), async (req, res) => {
   const visualId = req.body && req.body.visualId;
-  const ctx = hqStore.get(visualId);
+  const ctx = await hqStore.get(visualId);
   if (!ctx) return res.status(404).json({ error: 'visual_context_expired' });
   if (!imageClient.isConfigured()) return res.status(503).json({ error: 'no_image_provider' });
 
@@ -240,13 +266,17 @@ router.post('/retry', express.json({ limit: '4kb' }), async (req, res) => {
   }
   // Ghi lại ngữ cảnh dưới CHÍNH visualId cũ: nếu client bấm "Thử tạo lại" hoặc "Tải chất lượng cao"
   // lần nữa sau khi đã thành công, ngữ cảnh vẫn còn (TTL được làm mới).
-  hqStore.remember(visualId, ctx);
-  return res.json({
-    ok: true, visualId,
-    format: img.format, url: img.url, model: img.model,
+  await hqStore.remember(visualId, ctx);
+  const preparedRetry = await responseGuard.prepareResponsePayload({
+    ok: true, visualId, model: img.model,
     renderer: 'generated_image', origin: 'ai_generated', fidelity: 'illustrative',
-    necessity: ctx.necessity, subject: ctx.subject, title: ctx.title
+    necessity: ctx.necessity, subject: ctx.subject, title: ctx.title,
+    visuals: [{ visualId, format: img.format, url: img.url }]
   });
+  const retryOut = preparedRetry.payload;
+  const retryFirst = (retryOut.visuals || [])[0] || {};
+  if (!retryFirst.url) return res.status(503).json({ ok: false, error: retryFirst.error || 'image_too_large_for_response' });
+  return res.json({ ...retryOut, visuals: undefined, format: retryFirst.format, url: retryFirst.url, assetId: retryFirst.assetId });
 });
 
 module.exports = router;
@@ -254,3 +284,4 @@ module.exports.isAllowedHost = isAllowedHost;
 module.exports.parseAllowedUrl = parseAllowedUrl;
 module.exports.safeFilename = safeFilename;
 module.exports.ALLOWED_HOSTS = ALLOWED_HOSTS;
+module.exports.isBlockedAddress = safeHttp.isBlockedAddress;

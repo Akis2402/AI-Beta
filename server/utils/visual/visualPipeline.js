@@ -27,6 +27,7 @@ const validator = require('./visualValidator');
 const cache = require('./visualCache');
 const imageClient = require('./imageGenerationClient');
 const hqStore = require('./visualHqStore');
+const responseGuard = require('./visualResponseGuard');
 
 // Ngân sách thời gian RIÊNG cho toàn bộ hệ thống hình. Text answer luôn ưu tiên.
 const VISUAL_DEADLINE_MS = Number(process.env.VISUAL_DEADLINE_MS) || 12000;
@@ -213,7 +214,11 @@ async function runVisualPipeline(args) {
       telemetry.visualCacheHit = true;
       telemetry.visualGenerated = true;
       telemetry.visualGenerationLatency = Date.now() - t0;
-      const visual = { ...cached, visualId: nextVisualId(), fromCache: true };
+      const cachedVisual = { ...cached, visualId: nextVisualId(), fromCache: true };
+      // PHẦN B: cache lưu ảnh ở dạng GỐC (data URL). Mỗi lần phát ra response mới lại externalize
+      // với TTL mới — nếu cache cũ giữ sẵn link asset thì link đó đã hết hạn từ lâu và client nhận
+      // 404 dù cache "hit".
+      const visual = (await responseGuard.externalizeVisuals([cachedVisual])).visuals[0];
       onEvent({ ...visual, type: 'visual:ready' });
       return { status: 'ready', decision, visuals: [visual], telemetry };
     }
@@ -230,11 +235,13 @@ async function runVisualPipeline(args) {
     telemetry.visualPromptTokens = Math.ceil(basePrompt.length / 3.2);
 
     /** Thất bại toàn tập -> stub {renderFailed:true} + giữ text. KHÔNG có hình thay thế. */
-    const failWith = (reason) => {
+    const failWith = async (reason) => {
       telemetry.visualError = reason;
       telemetry.visualGenerationLatency = Date.now() - t0;
       const visualId = nextVisualId();
-      hqStore.remember(visualId, promptCtx);
+      // remember() là I/O (KV) — await để chắc chắn ngữ cảnh tồn tại TRƯỚC KHI client thấy nút
+      // "Thử tạo lại"; nếu không, bấm ngay lập tức sẽ nhận 404 do ghi chưa kịp xong.
+      await hqStore.remember(visualId, promptCtx);
       const failedVisual = {
         visualId, renderFailed: true, necessity,
         title: spec.title, subject, type: spec.type,
@@ -246,11 +253,11 @@ async function runVisualPipeline(args) {
     };
 
     // ---------- Không có provider ảnh = KHÔNG có hình (không dựng SVG thay thế) ----------
-    if (route.blocked === 'no_image_provider') return failWith('no_image_provider');
-    if (signal && signal.aborted) return failWith('aborted');
-    if (degrade === 'low' && !highNeed) return failWith('degraded_no_image_gen');
+    if (route.blocked === 'no_image_provider') return await failWith('no_image_provider');
+    if (signal && signal.aborted) return await failWith('aborted');
+    if (degrade === 'low' && !highNeed) return await failWith('degraded_no_image_gen');
     if (degrade === 'low' && (visualDeadlineAt - Date.now()) < MIN_IMAGE_CALL_MS) {
-      return failWith('degraded_no_time_for_image');
+      return await failWith('degraded_no_time_for_image');
     }
 
     // ---------- Sinh ảnh: provider failover (trong imageClient) + tối đa 1 lần repair ----------
@@ -258,7 +265,7 @@ async function runVisualPipeline(args) {
     const costClass = imageClient.classifyImageCost({ provider: imageClient.activeProviderName(), size: sizing.size });
     telemetry.visualCostClass = costClass;
     if (costClass === 'IMAGE_COST_HIGH' && (necessity === 'OPTIONAL' || necessity === 'NONE')) {
-      return failWith('cost_gate_low_benefit');
+      return await failWith('cost_gate_low_benefit');
     }
 
     let produced = null;
@@ -296,7 +303,7 @@ async function runVisualPipeline(args) {
     telemetry.visualValidation = lastValidation ? { valid: lastValidation.valid, issues: lastValidation.issues } : null;
     telemetry.visualGenerationLatency = Date.now() - t0;
 
-    if (!produced) return failWith(telemetry.visualError || 'image_generation_failed');
+    if (!produced) return await failWith(telemetry.visualError || 'image_generation_failed');
 
     const visual = {
       visualId: nextVisualId(),
@@ -318,7 +325,7 @@ async function runVisualPipeline(args) {
       overlay: specBuilder.buildVisualOverlay(spec),
       fromCache: false
     };
-    hqStore.remember(visual.visualId, promptCtx);
+    await hqStore.remember(visual.visualId, promptCtx);
 
     // Chỉ cache khi VALIDATED + COMPLETED, và payload phải là ảnh AI thật.
     await cache.setAsync(keyParts, {
@@ -331,8 +338,12 @@ async function runVisualPipeline(args) {
     }, { validated: true, answerComplete });
 
     telemetry.visualGenerated = true;
-    onEvent({ ...visual, type: 'visual:ready' });
-    return { status: 'ready', decision, visuals: [visual], telemetry };
+    // PHẦN B (P0): ảnh data-URL lớn KHÔNG được đi thẳng vào event SSE/JSON — đẩy sang asset store,
+    // response chỉ mang tham chiếu. Đây là điểm DUY NHẤT hình rời khỏi pipeline nên chặn ở đây là đủ
+    // cho cả /api/chat (JSON), SSE 'visual:ready' và 'done'.
+    const emitted = (await responseGuard.externalizeVisuals([visual])).visuals[0];
+    onEvent({ ...emitted, type: 'visual:ready' });
+    return { status: 'ready', decision, visuals: [emitted], telemetry };
   } catch (e) {
     // Bất biến #1: KHÔNG BAO GIỜ throw ra ngoài.
     telemetry.visualError = 'pipeline_exception:' + (e && e.message);

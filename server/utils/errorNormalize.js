@@ -11,7 +11,7 @@ const HTTP_STATUS_CODE_MAP = {
   404: 'MODEL_NOT_FOUND',
   408: 'TIMEOUT',
   // FIX ROOT CAUSE (lỗi "Đã có lỗi xảy ra. Vui lòng thử lại." khi hỏi trích nguồn từ PDF scan dài
-  // còn dở vision-extraction): express.json({limit:'8mb'}) ở server/app.js trả lỗi 413 khi ảnh
+  // còn dở vision-extraction): body-parser trả lỗi 413 khi ảnh
   // gửi kèm (collectSourceImages() phía client) + contexts vượt trần — lỗi này xảy ra Ở TẦNG
   // BODY-PARSER, TRƯỚC KHI vào tới route /api/chat, nên KHÔNG map status này trước đây khiến nó
   // rơi vào nhánh mặc định 'UNKNOWN_ERROR' -> 'error.generic' ("Đã có lỗi xảy ra. Vui lòng thử

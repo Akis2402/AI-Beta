@@ -128,13 +128,15 @@ router.post('/', async (req, res, next) => {
     const topic = query.length > 90 ? query.slice(0, 90) + '…' : query;
 
     // PHẦN 17 FIX: CACHE BEFORE CALL — cache hit trả thẳng, KHÔNG gọi AI, KHÔNG cả ensureProvidersReady().
-    const cached = recommendCache.get(query);
-    if (cached) return res.json({ ...cached, fromCache: true });
+    // PHẦN I: đọc L1 trước, rồi L2 (KV) nếu có — cache hit ở BẤT KỲ tầng nào cũng trả thẳng, KHÔNG
+    // gọi AI. Không có L2 -> hành vi y hệt trước (best-effort, process-local).
+    const cached = await recommendCache.getAsync(query);
+    if (cached) return res.json({ ...cached, fromCache: true, cacheTier: recommendCache.tiers() });
 
     const aiLinks = await fetchAiLinks(query);
     const links = aiLinks || buildSuggestedLinks(query);
     const payload = { topic, links, source: aiLinks ? 'ai' : 'fallback' };
-    recommendCache.set(query, payload);
+    await recommendCache.setAsync(query, payload); // ghi cả L1 và L2 (nếu có); L2 lỗi không chặn response
     res.json(payload);
   } catch (err) { next(err); }
 });

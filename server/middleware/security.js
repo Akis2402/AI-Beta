@@ -102,31 +102,32 @@ function permissionsPolicyHeader(req, res, next) {
   next();
 }
 
-// ---------- Rate limit: chống spam & giới hạn chi phí gọi Anthropic API ----------
-const chatLimiter = rateLimit({
+// ---------- Rate limit: chống spam & giới hạn chi phí gọi AI (PHẦN J) ----------
+// Định nghĩa giới hạn giữ nguyên con số cũ; điều THAY ĐỔI là ngữ nghĩa: khi KV được cấu hình, con số
+// này là giới hạn TOÀN CỤC thật (đếm nguyên tử ở KV), không còn là "mỗi instance một bản sao".
+// Xem server/middleware/rateLimit.js.
+const { createLimiter } = require('./rateLimit');
+
+const chatLimiter = createLimiter({
+  name: 'chat',
   windowMs: 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_CHAT || 40),
-  standardHeaders: true,
-  legacyHeaders: false,
   message: { error: 'Bạn đã gửi quá nhiều câu hỏi. Vui lòng thử lại sau ít phút.' }
 });
 
-const generateLimiter = rateLimit({
+const generateLimiter = createLimiter({
+  name: 'generate',
   windowMs: 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_GENERATE || 15),
-  standardHeaders: true,
-  legacyHeaders: false,
   message: { error: 'Bạn đã tạo quá nhiều slide/flashcard. Vui lòng thử lại sau ít phút.' }
 });
 
 // Giới hạn RIÊNG cho "Đề xuất ôn tập" (tách khỏi chatLimiter) — request này chạy NGẦM song song mỗi
-// khi người dùng gửi câu hỏi (xem public/js/app.js scheduleRecommend()), nên cần hạn mức RỘNG hơn
-// (gần bằng chatLimiter) để không bị chặn giữa chừng trong một phiên hỏi nhiều câu bình thường.
-const recommendLimiter = rateLimit({
+// khi người dùng gửi câu hỏi (xem public/js/app.js scheduleRecommend()), nên cần hạn mức RỘNG hơn.
+const recommendLimiter = createLimiter({
+  name: 'recommend',
   windowMs: 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_RECOMMEND || 40),
-  standardHeaders: true,
-  legacyHeaders: false,
   message: { error: 'Bạn đã tìm quá nhiều lượt đề xuất tài liệu. Vui lòng thử lại sau ít phút.' }
 });
 

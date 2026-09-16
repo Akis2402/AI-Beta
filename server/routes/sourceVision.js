@@ -76,7 +76,9 @@ router.post('/vision-extract', async (req, res, next) => {
       }
     });
 
-    res.json({ results });
+    // PHẦN E: trang bị loại ở tầng validate (MIME sai, base64 hỏng, quá nặng) đi kèm response —
+    // client đánh dấu ĐÚNG trang đó là failed thay vì tưởng đã đọc xong.
+    res.json({ results, rejected: input.rejected || [] });
   } catch (err) {
     next(err);
   }
