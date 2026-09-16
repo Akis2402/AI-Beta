@@ -56,9 +56,49 @@ const HARD_REASONS = new Set([
   'invalid_citation',
   'invalid_drawing_json',
   'drawing_canonical_mismatch',
-  'finish_reason_length'
+  'finish_reason_length',
+  'fabricated_exercise_under_unmatched_label'
 ]);
 const SOFT_REASONS = new Set(['missing_coverage', 'missing_conclusion', 'source_absence_claim_while_incomplete', 'requirement_without_evidence']);
+
+// PHẦN F BỔ SUNG — LỖI THẬT ĐÃ XẢY RA: model được hỏi "giải bài 1.9 đến 1.11", retrieval không có
+// evidence đúng nhãn "1.9", model tự bịa 1 đề khác rồi trình bày dưới đúng cái tên "Bài 1.9" như
+// thể đó là nguyên văn sách. Đây là lỗi SỰ THẬT (gắn nhãn thật lên nội dung sai), không phải lỗi
+// hình thức — coi là HARD, bắt continuation sửa lại thành lời thừa nhận trung thực.
+// Nhận diện: nhãn nằm trong unmatchedRequirementLabels NHƯNG response vẫn có 1 khối nội dung dài
+// (lời giải đầy đủ) đi ngay sau chính nhãn đó, và KHÔNG có cụm từ thừa nhận "chưa tìm thấy" gần đó.
+const ADMITS_NOT_FOUND_RE = /(chưa tìm thấy|không tìm thấy|chưa có (đúng )?nội dung|không có (đúng )?nội dung|chưa được đọc|nguồn liên quan gần nhất|nội dung liên quan gần nhất)/i;
+
+/**
+ * @param {string} text Lời giải đã sinh.
+ * @param {string[]} unmatchedRequirementLabels Nhãn KHÔNG có evidence thật (từ retrieval phía client).
+ * @returns {string[]} Danh sách nhãn mà response có dấu hiệu ĐÃ BỊA nội dung thay thế.
+ */
+function detectFabricatedRequirementLabels(text, unmatchedRequirementLabels) {
+  const labels = Array.isArray(unmatchedRequirementLabels) ? unmatchedRequirementLabels.filter(Boolean) : [];
+  if (!labels.length) return [];
+  const clean = String(text || '');
+  const violations = [];
+  labels.forEach((label) => {
+    const esc = String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Tìm vị trí nhãn xuất hiện dưới dạng tiêu đề/mở đầu 1 mục lời giải (vd "Bài 1.9", "## Giải bài
+    // 1.9", "1.9.") — không khớp nhãn xuất hiện giữa câu văn thường (tránh false-positive).
+    const headingRe = new RegExp(`(bài|câu|giải)\\s*${esc}\\b|^\\s*${esc}\\s*[).]`, 'im');
+    const m = clean.match(headingRe);
+    if (!m || m.index == null) return;
+    // Lấy 500 ký tự SAU vị trí nhãn để xem có "lời giải thật" (dài, có nội dung) hay chỉ có câu
+    // thừa nhận không tìm thấy.
+    const after = clean.slice(m.index, m.index + 600);
+    // Câu thừa nhận thường đứng TRƯỚC nhãn ("Mình chưa tìm thấy đúng nội dung bài 1.9…") nên phải
+    // xét cả 1 đoạn TRƯỚC vị trí khớp, không chỉ sau — soi 1 phía sẽ bỏ lọt đúng cách viết tự nhiên
+    // nhất của câu thừa nhận trung thực.
+    const before = clean.slice(Math.max(0, m.index - 250), m.index);
+    const hasSubstantialContent = after.replace(/\s+/g, ' ').trim().length > 120;
+    const admitsNotFound = ADMITS_NOT_FOUND_RE.test(after) || ADMITS_NOT_FOUND_RE.test(before);
+    if (hasSubstantialContent && !admitsNotFound) violations.push(label);
+  });
+  return violations;
+}
 
 // PHẦN N — SOURCE-AWARE COMPLETENESS.
 // "Đủ chữ" không phải là đủ. Hai lỗi dưới đây là lỗi VỀ SỰ THẬT chứ không phải về hình thức:
@@ -297,6 +337,10 @@ function validateSolutionCompleteness(text, opts = {}) {
   if (claimsSourceAbsenceWhileIncomplete(clean, opts.sourceReadiness)) {
     reasons.push('source_absence_claim_while_incomplete');
   }
+  // PHẦN F BỔ SUNG — lỗi thật đã xảy ra: nhãn KHÔNG có evidence nhưng model vẫn trình bày lời giải
+  // đầy đủ dưới đúng tên nhãn đó, không thừa nhận chưa tìm thấy => bịa đúng nghĩa đen, HARD.
+  const fabricatedLabels = detectFabricatedRequirementLabels(clean, opts.unmatchedRequirementLabels);
+  if (fabricatedLabels.length) reasons.push('fabricated_exercise_under_unmatched_label');
   // PHẦN N/F: mỗi yêu cầu của đề nên có ít nhất 1 evidence tương ứng khi nguồn CÓ dữ liệu.
   if (Array.isArray(contexts) && contexts.length && list.length > 1) {
     const covered = new Set();
@@ -348,13 +392,15 @@ function validateSolutionCompleteness(text, opts = {}) {
   const severity = hard.length > 0 ? 'HARD' : 'SOFT';
   return {
     status: 'INCOMPLETE', severity, reasons: [...hard, ...soft], hardReasons: hard, softReasons: soft,
-    missingCoverage: missing, citationValidation, finishReason
+    missingCoverage: missing, citationValidation, finishReason,
+    fabricatedRequirementLabels: fabricatedLabels
   };
 }
 
 module.exports = {
   extractCoverageList,
   claimsSourceAbsenceWhileIncomplete,
+  detectFabricatedRequirementLabels,
   checkCoverage,
   validateSolutionCompleteness,
   hasUnclosedCodeFence,

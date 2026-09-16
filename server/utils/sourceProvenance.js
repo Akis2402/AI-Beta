@@ -49,6 +49,16 @@ function indexSourceStatus(sourceStatus) {
   return map;
 }
 
+/** Nguồn có usable evidence để dùng NGAY hay không — PHẦN VII/VIII (progressive ingestion): khác
+ * hẳn "đã READY" (100% verified). Ưu tiên field mới `usableNow` do client gửi (PHẦN N); client cũ
+ * (trước bản nâng cấp) không có field này -> fallback về status === 'READY' để KHÔNG đột ngột đổi
+ * hành vi cho client chưa nâng cấp (không có cách nào khác để biết nguồn có evidence hay chưa). */
+function isSourceUsableFromStatus(st) {
+  if (!st) return true; // không có thông tin trạng thái -> giữ hành vi cũ, không loại oan
+  if (typeof st.usableNow === 'boolean') return st.usableNow;
+  return st.status === 'READY';
+}
+
 /**
  * Lọc contexts trước khi chúng chạm tới citation index/prompt.
  * @returns {{usable:Array, dropped:Array<{reason:string, doc:string, id:*}>}}
@@ -63,10 +73,13 @@ function filterUsableContexts(contexts, sourceStatus) {
       return;
     }
     const st = statusMap.get(String(c.sourceId)) || statusMap.get(`name:${c.doc}`);
-    // Không có thông tin trạng thái (client cũ chưa gửi sourceStatus) -> KHÔNG loại: giữ hành vi
-    // tương thích ngược, chỉ những nguồn ĐƯỢC KHAI BÁO là chưa xong mới bị loại.
-    if (st && st.status !== 'READY') {
-      dropped.push({ reason: `source_not_ready:${st.status}`, doc: (c && c.doc) || '', id: c && c.id });
+    // PHẦN VIII (ROOT CAUSE — audit mục II.C song sinh phía server): TRƯỚC ĐÂY yêu cầu status ===
+    // 'READY' để giữ context, nghĩa là evidence THẬT của 1 nguồn đang xử lý nền (vd 72/134 trang đã
+    // đọc) bị vứt bỏ TOÀN BỘ ở đây dù client đã gửi lên đúng đắn — hai tầng gating (client cũ +
+    // server cũ) cộng lại khiến "instant availability" ở client vô nghĩa vì server luôn lọc sạch.
+    // NAY: chỉ loại khi nguồn THỰC SỰ không có evidence nào usable (isSourceUsableFromStatus false).
+    if (!isSourceUsableFromStatus(st)) {
+      dropped.push({ reason: `source_not_usable:${st.status}`, doc: (c && c.doc) || '', id: c && c.id });
       return;
     }
     usable.push(c);
@@ -120,6 +133,7 @@ function sourceVersionSignature(sourceStatus) {
 
 module.exports = {
   isPlaceholderContext,
+  isSourceUsableFromStatus,
   filterUsableContexts,
   summarizeSourceReadiness,
   countRetrievedPages,

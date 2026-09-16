@@ -64,7 +64,7 @@ function computeRecoveryBudget({ remainingMs = Infinity, reserveRemaining = Infi
  * @param {{priorText:string, reasons:string[], missingCoverage:string[]}} args
  * @returns {string} Nội dung message user bổ sung, nối tiếp vào cuối mảng `messages` gửi cho provider.
  */
-function buildContinuationPrompt({ priorText, reasons = [], missingCoverage = [], drawingCanonicalErrors = [], citationValidation = null }) {
+function buildContinuationPrompt({ priorText, reasons = [], missingCoverage = [], drawingCanonicalErrors = [], citationValidation = null, fabricatedRequirementLabels = [] }) {
   const missingPart = missingCoverage.length
     ? `Các ý CHƯA được trả lời trong đề bài: ${missingCoverage.join(', ')}.`
     : '';
@@ -92,14 +92,23 @@ function buildContinuationPrompt({ priorText, reasons = [], missingCoverage = []
       '\nHãy in lại NGUYÊN VĂN khối vẽ, khôi phục đúng mọi điểm/phần tử đã có ở Hướng giải (giữ nguyên id/toạ độ/op), chỉ được bổ sung thêm phần tử MỚI nếu thực sự cần — KHÔNG được tự nghĩ ra toạ độ khác.'
     : '';
 
+  // PHẦN F BỔ SUNG — lỗi thật: model đã BỊA nội dung dưới đúng tên 1 bài không có evidence. Đây
+  // KHÔNG phải lỗi hình thức để "viết tiếp" — phần đã viết SAI VỀ SỰ THẬT, phải được THU HỒI công
+  // khai, không được lờ đi rồi viết tiếp như không có chuyện gì. Ghi đè hẳn hướng dẫn "viết tiếp"
+  // mặc định cho đúng những nhãn này.
+  const fabricationPart = fabricatedRequirementLabels.length
+    ? `CẢNH BÁO NGHIÊM TRỌNG: phần bạn vừa viết cho ${fabricatedRequirementLabels.map((l) => `"${l}"`).join(', ')} KHÔNG dựa trên bằng chứng thật từ tài liệu đã tải lên — hệ thống retrieval không tìm thấy đúng nội dung các mục này. Bạn phải viết THÊM ngay bây giờ 1 đoạn CẢI CHÍNH công khai, đặt ngay sau phần vừa rồi, với nguyên văn tinh thần: "Lưu ý: phần lời giải cho ${fabricatedRequirementLabels.join(', ')} ở trên KHÔNG dựa trên đúng đề bài trong tài liệu bạn đã tải lên (hệ thống chưa tìm thấy đúng nội dung các bài này) — vui lòng bỏ qua và cho mình biết chính xác đề bài, hoặc kiểm tra lại nguồn đã tải lên." KHÔNG được viết tiếp lời giải theo hướng cũ, KHÔNG được biện minh nội dung cũ là đúng.`
+    : '';
+
   return [
     'Câu trả lời phía trên của bạn CHƯA HOÀN CHỈNH' + (structuralHint.length ? ` (${structuralHint.join('; ')})` : '') + '.',
     'Phần bạn đã viết được giữ nguyên, KHÔNG được lặp lại nội dung đã hoàn thành, KHÔNG được viết lại từ đầu.',
     missingPart,
     citationPart,
     canonicalPart,
-    'Hãy viết TIẾP NGAY từ chỗ bị dừng (tiếp tục đúng câu/ý đang dở, hoặc bắt đầu ý còn thiếu tiếp theo), giữ nguyên cách đặt tên điểm/ẩn số/ký hiệu và các kết quả trung gian đã có ở phần trên, không tạo ra lời giải mâu thuẫn với phần đã viết. Nếu có khối hình vẽ (shape/solid3d/plot) đang dở, hãy đóng lại đúng cú pháp JSON đã dùng, KHÔNG đổi tên điểm/toạ độ đã có.',
-    'Nếu phần trước đã đủ nội dung và chỉ thiếu kết luận/đáp số, chỉ cần viết thêm phần kết luận/đáp số, không viết lại lời giải.'
+    fabricationPart,
+    fabricationPart ? '' : 'Hãy viết TIẾP NGAY từ chỗ bị dừng (tiếp tục đúng câu/ý đang dở, hoặc bắt đầu ý còn thiếu tiếp theo), giữ nguyên cách đặt tên điểm/ẩn số/ký hiệu và các kết quả trung gian đã có ở phần trên, không tạo ra lời giải mâu thuẫn với phần đã viết. Nếu có khối hình vẽ (shape/solid3d/plot) đang dở, hãy đóng lại đúng cú pháp JSON đã dùng, KHÔNG đổi tên điểm/toạ độ đã có.',
+    fabricationPart ? '' : 'Nếu phần trước đã đủ nội dung và chỉ thiếu kết luận/đáp số, chỉ cần viết thêm phần kết luận/đáp số, không viết lại lời giải.'
   ].filter(Boolean).join('\n');
 }
 
@@ -271,8 +280,23 @@ function buildResumePrompt({
   citationValidation = null, drawingCanonicalErrors = [],
   // MỤC 3.3: phần trả lời đã có ĐÃ chứa section kết luận hay chưa. Khi CÓ, lượt viết tiếp phải biết
   // rằng kết luận đó chỉ là TẠM THỜI — nếu không, model sẽ viết Bước còn thiếu rồi kết luận LẦN HAI.
-  hasConclusion = false
+  hasConclusion = false,
+  // PHẦN F BỔ SUNG: nhãn model đã BỊA nội dung dưới tên bài không có evidence thật.
+  fabricatedRequirementLabels = []
 } = {}) {
+  // Lỗi bịa nội dung KHÔNG phải lỗi "viết chưa xong" — phần đã viết SAI VỀ SỰ THẬT, "viết tiếp" chỉ
+  // khiến model tiếp tục củng cố nội dung sai đó. Nhánh này THAY HẲN toàn bộ hướng dẫn "resume" mặc
+  // định bằng yêu cầu THU HỒI công khai.
+  if (fabricatedRequirementLabels.length) {
+    const labelsStr = fabricatedRequirementLabels.join(', ');
+    return [
+      `CẢNH BÁO NGHIÊM TRỌNG: nội dung bạn vừa viết cho ${labelsStr} KHÔNG dựa trên bằng chứng thật từ tài liệu đã tải lên — hệ thống retrieval không tìm thấy đúng nội dung các mục này trong nguồn.`,
+      'KHÔNG được viết tiếp theo hướng cũ. KHÔNG được biện minh nội dung cũ là đúng.',
+      `Viết THÊM ngay bây giờ 1 đoạn CẢI CHÍNH công khai, đặt ngay sau phần vừa rồi, với tinh thần: "Lưu ý: phần lời giải cho ${labelsStr} ở trên KHÔNG dựa trên đúng đề bài trong tài liệu bạn đã tải lên (hệ thống chưa tìm thấy đúng nội dung các bài này) — vui lòng bỏ qua và cho mình biết chính xác đề bài, hoặc kiểm tra lại nguồn đã tải lên."`,
+      'Chỉ viết đúng đoạn cải chính này, không viết lại lời giải, không thêm nội dung nào khác.'
+    ].join('\n');
+  }
+
   const lastChars = String(priorTail).slice(-160).replace(/\s+/g, ' ').trim();
 
   // ĐO THẬT rồi mới chốt độ dài (scripts/measure-tokens.js): bản nháp đầu tiên của prompt này dài
@@ -344,6 +368,7 @@ function buildMinimalContinuationContext({
     interrupted,
     citationValidation: completeness.citationValidation || null,
     drawingCanonicalErrors: completeness.drawingCanonicalErrors || [],
+    fabricatedRequirementLabels: completeness.fabricatedRequirementLabels || [],
     // Đọc TRỰC TIẾP từ nội dung đã có thay vì tin vào cờ của caller — chỉ có một nguồn sự thật.
     hasConclusion: hasConclusionSection(raw)
   });

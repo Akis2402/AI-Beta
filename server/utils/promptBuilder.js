@@ -251,6 +251,20 @@ function buildSourceReadinessBlock(readiness) {
 BẮT BUỘC: TUYỆT ĐỐI KHÔNG được viết "tài liệu không có thông tin này"/"nguồn không đề cập"/"không tìm thấy trong tài liệu" — hệ thống MỚI ĐỌC ĐƯỢC MỘT PHẦN nguồn, nên không có căn cứ để khẳng định điều đó. Nếu phần bạn cần không nằm trong các đoạn trích hiện có, hãy nói đúng trạng thái: "nguồn chưa được đọc hoàn tất, phần này chưa nằm trong dữ liệu đã trích xuất" rồi giải bằng kiến thức chuẩn và ghi rõ đó là kiến thức chuẩn, không phải trích từ tài liệu.`;
 }
 
+/* ---------- PHẦN F BỔ SUNG: CHỐNG BỊA BÀI TẬP CÓ SỐ THỨ TỰ CỤ THỂ ----------
+ * Lỗi thật đã xảy ra: model được hỏi "giải bài 1.9 đến 1.11", không có evidence đúng nhãn "1.9",
+ * rồi lấy nhầm nội dung của MỘT MỤC KHÁC trong cùng tài liệu (ngẫu nhiên khớp từ khoá) và trình bày
+ * như thể đó là bài 1.9 thật — bịa đúng nghĩa đen: gắn số thật lên nội dung sai. Khối này chặn CỨNG
+ * hành vi đó bằng cách nói thẳng: những nhãn nào không có bằng chứng, thì KHÔNG được đưa ra lời giải
+ * đầy đủ dưới đúng cái tên đó — phải nói rõ ràng là chưa tìm thấy.
+ */
+function buildRequirementIntegrityBlock(unmatchedRequirementLabels) {
+  const labels = Array.isArray(unmatchedRequirementLabels) ? unmatchedRequirementLabels.filter(Boolean) : [];
+  if (!labels.length) return '';
+  const listStr = labels.map((l) => `"${l}"`).join(', ');
+  return `\n\nCẢNH BÁO TOÀN VẸN ĐỀ BÀI: người dùng hỏi đích danh các mục ${listStr}, nhưng hệ thống retrieval KHÔNG tìm thấy đoạn trích nào trong tài liệu đã tải lên chứa ĐÚNG nhãn số đó. BẮT BUỘC: với TỪNG mục trong danh sách trên, TUYỆT ĐỐI KHÔNG được tự bịa ra một đề bài khác (dù trông "hợp lý" hay "kiến thức chuẩn tương ứng") rồi trình bày lời giải đầy đủ như thể đó CHÍNH LÀ nội dung của mục đó — đây là hành vi GẮN SỐ THẬT LÊN NỘI DUNG BỊA, tuyệt đối cấm. Thay vào đó, với mỗi mục không tìm thấy: nói rõ ràng "chưa tìm thấy đúng nội dung mục [X] trong phần đã trích xuất của tài liệu" và dừng ở đó cho mục này — không tự thay thế bằng một đề bài tương tự tự nghĩ ra. Nếu các đoạn trích bên dưới có nội dung LIÊN QUAN (cùng chủ đề) nhưng KHÔNG PHẢI đúng mục được hỏi, được phép trích dẫn [n] và nói rõ đây là NỘI DUNG LIÊN QUAN GẦN NHẤT tìm thấy, KHÔNG PHẢI nguyên văn mục đã hỏi — không được im lặng đánh tráo.`;
+}
+
 function buildSourcePolicyBlock({ hasContexts, hasWebSearch, hasSourceNoContext = false }) {
   // MỤC (đợt audit 4, nâng cấp cơ chế trích nguồn) — ROOT CAUSE của "trích nguồn web nhưng không
   // nói rõ nguồn nào": bản CŨ chỉ yêu cầu 1 câu MẪU CỐ ĐỊNH duy nhất ("🌐 Đã tra cứu thêm trên web để
@@ -410,7 +424,7 @@ function buildChatSystemPrompt(input) {
   return buildChatSystemPromptParts(input).text;
 }
 
-function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '', sourceReadiness = null }) {
+function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '', sourceReadiness = null, unmatchedRequirementLabels = [] }) {
   const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId, subjectSource);
   const drawingNeeded = needsDrawingInstructions({ problemText, approachText, hasImage: !!image });
   let contextBlock = '';
@@ -425,6 +439,8 @@ function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, 
     // chèn để model biết nguồn THẬT SỰ tồn tại và đã xử lý — không được coi như "chưa tải tài liệu".
     contextBlock = buildSourceManifestBlock(sourceManifest, sourceReadiness);
   }
+
+  const requirementIntegrityBlock = buildRequirementIntegrityBlock(unmatchedRequirementLabels);
 
   const rulesBlock = rules.length
     ? '\n\nCác quy tắc riêng người dùng đã đặt, LUÔN tuân theo:\n' + rules.map((r) => '- ' + r).join('\n')
@@ -449,7 +465,7 @@ ${h.summary}
 Diễn đạt lại ngắn gọn đề bài và dữ kiện đã cho (2-4 câu). Nếu đề chưa rõ, nêu giả định hợp lý.
 ${h.approach}
 Nếu đề là bài hình học, chèn hình minh họa NGAY ĐẦU mục này (xem quy tắc bắt buộc bên dưới) trước khi liệt kê gạch đầu dòng. Sau đó liệt kê TỐI ĐA 5 gạch đầu dòng, MỖI gạch đầu dòng CHỈ 1 CÂU NGẮN, KHÔNG câu phụ/diễn giải thêm: công thức/định lý/phương pháp sẽ dùng, thứ tự các bước chính, và điều kiện/lưu ý quan trọng không được bỏ sót (đơn vị, điều kiện xác định, trường hợp đặc biệt...). Ưu tiên GỌN — cắt hết từ thừa, không lặp ý, không giải thích lý do hiển nhiên — nhưng TUYỆT ĐỐI KHÔNG được lược bỏ một bước/điều kiện quan trọng nào chỉ để cho ngắn: gọn về CÂU CHỮ, không gọn về NỘI DUNG khoa học. TUYỆT ĐỐI KHÔNG thực hiện phép tính chi tiết, KHÔNG đưa ra đáp số cuối cùng — chỉ định hướng cách làm để người học có thể tự thử trước.
-${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false, hasSourceNoContext: !contexts.length && !!sourceManifest })}${drawingNeeded ? buildDrawInstructions({ stageLabel: 'hướng giải' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${contextBlock}`;
+${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false, hasSourceNoContext: !contexts.length && !!sourceManifest })}${drawingNeeded ? buildDrawInstructions({ stageLabel: 'hướng giải' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${requirementIntegrityBlock}${contextBlock}`;
   }
 
   // ---------- Giai đoạn "detail" (mặc định): lời giải đầy đủ ----------
@@ -497,7 +513,7 @@ Liệt kê 2-4 gạch đầu dòng NGẮN GỌN về những lỗi HỌC SINH th
 Quy tắc khác:
 1. Không bỏ bước lập luận quan trọng, dựa trên kiến thức chuẩn hoặc dữ liệu cung cấp.
 2. Nếu đề chưa rõ, nêu giả định hợp lý trong "Tóm tắt đề bài" rồi vẫn giải.
-${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false, hasSourceNoContext: !contexts.length && !!sourceManifest })}${drawingNeeded ? '\n' + buildDrawInstructions({ stageLabel: 'lời giải chi tiết' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${approachBlock}${contextBlock}`;
+${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false, hasSourceNoContext: !contexts.length && !!sourceManifest })}${drawingNeeded ? '\n' + buildDrawInstructions({ stageLabel: 'lời giải chi tiết' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${requirementIntegrityBlock}${approachBlock}${contextBlock}`;
 }
 
 // ---------- Đối chiếu đa hướng (dùng khi bật "Suy nghĩ sâu" ở giai đoạn giải chi tiết) ----------
@@ -688,6 +704,7 @@ const PROMPT_VERSION = 'chat-prompt-v9'; // v9 (mục 1 audit HARD SUBJECT LOCK)
 module.exports = {
   citeNoRangeLabel,
   buildSourceReadinessBlock,
+  buildRequirementIntegrityBlock,
   PROMPT_VERSION,
   buildChatSystemPrompt,
   buildChatSystemPromptParts,

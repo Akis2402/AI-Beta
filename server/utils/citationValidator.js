@@ -10,6 +10,7 @@
 // tiên kiến trúc deterministic của yêu cầu gốc.
 
 const CITATION_RE = /\[(\d{1,3})\]/g;
+const { isSourceUsableFromStatus } = require('./sourceProvenance');
 
 /**
  * @param {string} text Response text (đã strip <thinking>).
@@ -101,7 +102,10 @@ function validateCitationProvenance(text, opts = {}) {
     if (!c) { unresolved.push(n); return; }
     if (c.extractionStatus && c.extractionStatus !== 'ok') { placeholderCitations.push(n); return; }
     const st = statusByKey.get(String(c.sourceId)) || statusByKey.get(`name:${c.doc}`);
-    if (st && st.status !== 'READY') { notReadySources.push(n); return; }
+    // PHẦN VII/VIII (đồng bộ với sourceProvenance.filterUsableContexts): citation trỏ tới evidence
+    // của nguồn ĐANG xử lý nền vẫn HỢP LỆ miễn evidence đó thật (usableNow) — không còn đòi status
+    // === 'READY' tuyệt đối, đó chính là bug cùng bản chất với mục II.C ở phía client.
+    if (!isSourceUsableFromStatus(st)) { notReadySources.push(n); return; }
     // Trang phải là số dương và (khi biết tổng số trang) không vượt quá số trang thật của nguồn.
     if (c.page != null) {
       const page = Number(c.page);

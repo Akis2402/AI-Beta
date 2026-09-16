@@ -141,6 +141,9 @@ function parseSourceImages(body) {
 const ALLOWED_EXTRACTION_METHODS = ['text', 'vision', 'none', 'unknown'];
 const ALLOWED_EXTRACTION_STATUSES = ['ok', 'failed', 'pending', 'placeholder'];
 const ALLOWED_SOURCE_STATUSES = ['UPLOADING', 'PARSING', 'RASTERIZING', 'EXTRACTING', 'VERIFYING', 'READY', 'INCOMPLETE', 'ERROR'];
+const ALLOWED_AVAILABILITY_STATUSES = ['UNAVAILABLE', 'PARTIAL', 'AVAILABLE'];
+const ALLOWED_PROCESSING_STATUS_AXIS = ['IDLE', 'PROCESSING', 'DONE', 'ERROR'];
+const ALLOWED_VERIFICATION_STATUSES = ['UNVERIFIED', 'PARTIAL', 'VERIFIED'];
 const MAX_SOURCE_STATUS_ENTRIES = 20;
 function nonNegInt(v) {
   const n = Number(v);
@@ -235,6 +238,13 @@ function validateChatBody(body) {
       sourceId: clip(String((s0 && s0.sourceId) || ''), MAX_DOC_NAME),
       name: clip(String((s0 && s0.name) || ''), MAX_DOC_NAME),
       status: ALLOWED_SOURCE_STATUSES.includes(s0 && s0.status) ? s0.status : 'INCOMPLETE',
+      // PHẦN III/N (progressive ingestion): 3 trục mới + cờ usableNow — nếu thiếu (client cũ chưa
+      // nâng cấp), để undefined/false chứ KHÔNG suy đoán true, downstream (isSourceUsableFromStatus)
+      // tự fallback về status==='READY' khi usableNow không phải boolean (xem sourceProvenance.js).
+      availabilityStatus: ALLOWED_AVAILABILITY_STATUSES.includes(s0 && s0.availabilityStatus) ? s0.availabilityStatus : undefined,
+      processingStatus: ALLOWED_PROCESSING_STATUS_AXIS.includes(s0 && s0.processingStatus) ? s0.processingStatus : undefined,
+      verificationStatus: ALLOWED_VERIFICATION_STATUSES.includes(s0 && s0.verificationStatus) ? s0.verificationStatus : undefined,
+      usableNow: typeof (s0 && s0.usableNow) === 'boolean' ? s0.usableNow : undefined,
       extractionMethod: ALLOWED_EXTRACTION_METHODS.includes(s0 && s0.extractionMethod) ? s0.extractionMethod : 'unknown',
       extractionVersion: Number.isFinite(Number(s0 && s0.extractionVersion)) ? Number(s0.extractionVersion) : 0,
       totalPages: nonNegInt(s0 && s0.totalPages),
@@ -251,6 +261,18 @@ function validateChatBody(body) {
   // Số lượt history GỐC phía client (trước khi selectRelevantHistory() lọc) — chỉ để telemetry
   // historyTurnsRaw vs historyTurnsSent (PHẦN S), KHÔNG ảnh hưởng nội dung prompt.
   const historyTurnsRaw = nonNegInt(body.historyTurnsRaw);
+
+  // PHẦN F BỔ SUNG — CHỐNG BỊA BÀI TẬP CÓ SỐ THỨ TỰ CỤ THỂ.
+  // Root cause thật đã xảy ra: user hỏi "giải bài 1.9 đến 1.11", retrieval KHÔNG tìm thấy evidence
+  // đúng nhãn "1.9" (OCR/format khác), rơi xuống tầng khớp từ khoá chung và tình cờ lấy trúng đoạn
+  // của MỤC KHÁC trong cùng tài liệu (hệ thức Chasles) — model trình bày nhầm nội dung đó như thể là
+  // bài 1.9 thật. `unmatchedRequirementLabels` là danh sách nhãn KHÔNG có bằng chứng thật, dùng để
+  // cấm cứng hành vi này ở promptBuilder + gắn cờ ở completenessCheck nếu model vẫn lỡ làm.
+  const clipLabel = (x) => clip(String(x || ''), 40);
+  const requirementLabels = Array.isArray(body.requirementLabels)
+    ? body.requirementLabels.slice(0, 30).map(clipLabel).filter(Boolean) : [];
+  const unmatchedRequirementLabels = Array.isArray(body.unmatchedRequirementLabels)
+    ? body.unmatchedRequirementLabels.slice(0, 30).map(clipLabel).filter(Boolean) : [];
 
   const bodySettings = body.settings || {};
   const school = Object.prototype.hasOwnProperty.call(SCHOOL_GRADES, bodySettings.school)
@@ -276,7 +298,7 @@ function validateChatBody(body) {
       })).filter((h) => h.content)
     : [];
 
-  return { query, deepThinking, crossCheck, image, sourceImages, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, settings, history, stage, approachText };
+  return { query, deepThinking, crossCheck, image, sourceImages, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText };
 }
 
 /** Validate body của các endpoint /api/generate/* (flashcards + mindmap dùng chung) */

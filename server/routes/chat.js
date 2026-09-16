@@ -205,7 +205,8 @@ async function ensureCompleteNonStream(callOnce, initialResult, ctx) {
   const evaluate = (text, sig) => checkCompletenessWithDrawings(text, {
     stage: ctx.stage, coverageList, approachText: ctx.approachText, contexts: ctx.contexts,
     finishReason: sig.finishReason, interrupted: sig.interrupted,
-    validCiteNos: ctx.validCiteNos, aliasOf: ctx.aliasOf
+    validCiteNos: ctx.validCiteNos, aliasOf: ctx.aliasOf,
+    sourceReadiness: ctx.sourceReadiness, unmatchedRequirementLabels: ctx.unmatchedRequirementLabels
   });
 
   const run = await runResumableNonStream({
@@ -528,10 +529,12 @@ router.post('/', async (req, res, next) => {
     // nơi (prompt, completeness/citation validation, sourceCoverage, cache key, payload trả client)
     // đều dùng `effectiveContexts` — KHÔNG dùng `input.contexts` thô nữa, để 3 nơi sinh số citation
     // không thể lệch nhau được nữa.
-    // ---------- PHẦN C/N: LỌC TRƯỚC KHI LÀM BẤT CỨ VIỆC GÌ KHÁC ----------
-    // Placeholder ("⏳ Đang đọc…") và evidence của nguồn CHƯA READY bị loại NGAY TẠI ĐÂY, trước cả
+    // ---------- PHẦN C/VII/VIII: LỌC TRƯỚC KHI LÀM BẤT CỨ VIỆC GÌ KHÁC ----------
+    // Placeholder ("⏳ Đang đọc…") vẫn bị loại tuyệt đối. Evidence của nguồn CHƯA usableNow (chưa có
+    // bất kỳ evidence thật nào — không phải "chưa 100% verified") bị loại NGAY TẠI ĐÂY, trước cả
     // citation index — nếu để lọt, chúng sẽ có citeNo hợp lệ và model có thể trích dẫn 1 dòng báo
-    // trạng thái như thể đó là nội dung tài liệu (TEST 13).
+    // trạng thái như thể đó là nội dung tài liệu (TEST 13). Nguồn đang xử lý nền nhưng ĐÃ có evidence
+    // thật (PARTIAL) KHÔNG bị loại ở đây nữa (PHẦN VIII — root cause cũ đã sửa cả 2 phía client/server).
     const provenanceFilter = sourceProvenance.filterUsableContexts(input.contexts, input.sourceStatus);
     if (provenanceFilter.dropped.length) {
       reqLogger.log({
@@ -1068,7 +1071,7 @@ router.post('/', async (req, res, next) => {
             evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
               stage: 'detail', coverageList, approachText: input.approachText,
               contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted,
-              validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness
+              validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness, unmatchedRequirementLabels: input.unmatchedRequirementLabels
             }),
             resolveRecovery: makeRecoveryResolver({
               reserveState: reconcileReserveState, deadline: globalDeadline,
@@ -1188,7 +1191,7 @@ router.post('/', async (req, res, next) => {
           evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
             stage: input.stage, coverageList, approachText: input.approachText,
             contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted,
-            validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness
+            validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness, unmatchedRequirementLabels: input.unmatchedRequirementLabels
           }),
           resolveRecovery: makeRecoveryResolver({
             reserveState: directReserveState, deadline: globalDeadline,
@@ -1361,7 +1364,7 @@ router.post('/', async (req, res, next) => {
           messages, problemText, stage: 'detail', deadline: globalDeadline,
           approachText: input.approachText, contexts: input.contexts, signal,
           requestId: reqLogger.requestId,
-          validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness,
+          validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness, unmatchedRequirementLabels: input.unmatchedRequirementLabels,
           resolveRecovery: jsonReconcileRecovery,
           isDisconnected: () => disconnected
         }
@@ -1439,7 +1442,7 @@ router.post('/', async (req, res, next) => {
         messages, problemText, stage: input.stage, deadline: globalDeadline,
         approachText: input.approachText, contexts: input.contexts, signal,
         requestId: reqLogger.requestId,
-        validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness,
+        validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness, unmatchedRequirementLabels: input.unmatchedRequirementLabels,
         resolveRecovery: jsonDirectRecovery,
         isDisconnected: () => disconnected
       }
