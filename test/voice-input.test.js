@@ -55,10 +55,11 @@ test('V3. nút có aria-label + title đi qua i18n (không hard-code UI text)', 
 });
 
 test('V4. voiceInput.js được nạp bằng <script src> và có trong danh sách build', () => {
-  assert.ok(/<script src="\/js\/voiceInput\.js"><\/script>/.test(indexHtml), 'thiếu thẻ script');
+  const htmlAssets = require('./_htmlAssets');
+  assert.ok(htmlAssets.scriptSrcs(indexHtml).includes('/js/voiceInput.js'), 'thiếu thẻ script');
   // So sánh theo THỨ TỰ THẺ <script> thật, không phải theo lần xuất hiện đầu tiên của chuỗi đường
   // dẫn — index.html có nhiều comment nhắc tới "public/js/app.js" nằm phía trên phần script.
-  const scriptSrcs = [...indexHtml.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1]);
+  const scriptSrcs = htmlAssets.scriptSrcs(indexHtml); // bỏ content-hash: bất biến là THỨ TỰ, không phải tên file
   const iVoice = scriptSrcs.indexOf('/js/voiceInput.js');
   const iApp = scriptSrcs.indexOf('/js/app.js');
   assert.ok(iVoice >= 0, 'không tìm thấy thẻ script voiceInput.js');

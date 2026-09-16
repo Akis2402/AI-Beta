@@ -44,8 +44,9 @@ test("app.js el('subjectBtn')/el('subjectPopover')/el('subjectBtnWrap')/el('hist
 
 // ---------- Thứ tự script: subjects.js PHẢI nạp trước app.js (app.js dùng window.SUBJECTS lúc parse) ----------
 test('index.html nạp /js/subjects.js TRƯỚC /js/app.js', () => {
-  const idxSubjects = html.indexOf('src="/js/subjects.js"');
-  const idxApp = html.indexOf('src="/js/app.js"');
+  const { scriptIndex } = require('./_htmlAssets');
+  const idxSubjects = scriptIndex(html, '/js/subjects.js');
+  const idxApp = scriptIndex(html, '/js/app.js');
   assert.ok(idxSubjects !== -1, 'thiếu thẻ <script src="/js/subjects.js">');
   assert.ok(idxApp !== -1, 'thiếu thẻ <script src="/js/app.js">');
   assert.ok(idxSubjects < idxApp, 'subjects.js phải nạp trước app.js');

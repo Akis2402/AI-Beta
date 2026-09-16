@@ -219,14 +219,22 @@ test('C4. ranh giới từ Unicode — "vẽ"/"ảnh" phải khớp (\\b của J
   assert.ok(decisionEngine.detectImageOnlyRequest('Cho tôi xem ảnh não bộ').imageOnly);
 });
 
-test('C5. chat.js: nhánh image-only nằm TRƯỚC mọi nhánh giải bài và dùng đúng 1 lượt text', () => {
+test('C5. chat.js: ý định image-only được quyết TRƯỚC mọi chuẩn bị, và KHÔNG tốn lệnh gọi model cho chú thích', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'chat.js'), 'utf8');
-  const iDetect = src.indexOf('detectImageOnlyRequest');
+  // PROMPT V5 PHẦN E/F: việc phân loại chuyển sang intentRouter (thuần luật, 0 token) và chạy NGAY
+  // sau validate — sớm hơn hẳn vị trí cũ. Bất biến được kiểm vẫn là: quyết định ý định đứng trước
+  // pipeline giải bài, và nhánh image-only không mượn công việc của pipeline đó.
+  const iRoute = src.indexOf('routeIntent({');
+  const iValidate = src.indexOf('validateChatBody(req.body)');
+  const iCompress = src.indexOf('compressHistoryForBudget(input.history');
   const iStream = src.indexOf('if (wantsStream) {\n      sseHeaders(res);');
-  assert.ok(iDetect > 0, 'chưa nối detectImageOnlyRequest vào route');
-  assert.ok(iDetect < iStream, 'nhánh image-only phải chạy TRƯỚC pipeline giải bài');
-  assert.ok(/generateImageCaption/.test(src), 'thiếu hàm sinh chú thích');
-  assert.ok(/reasoningBudget: 0/.test(src), 'chú thích không cần native reasoning');
+  assert.ok(iRoute > 0, 'chưa nối routeIntent vào route');
+  assert.ok(iValidate < iRoute && iRoute < iCompress,
+    'ý định phải được xác định ngay sau validate và TRƯỚC nén history/context — nếu không thì công việc chuẩn bị đã bị đốt rồi mới rẽ nhánh');
+  assert.ok(iRoute < iStream, 'nhánh image-only phải chạy TRƯỚC pipeline giải bài');
+  assert.ok(/deterministicCaption\.buildDeterministicCaption/.test(src),
+    'chú thích mặc định phải deterministic — image-only là ĐÚNG 1 lệnh gọi AI (sinh ảnh)');
+  assert.ok(/captionModelEnabled\(\)/.test(src), 'lệnh gọi model cho caption chỉ được tồn tại sau cờ bật tường minh');
   assert.ok(/state: STATES\.COMPLETED,\s*\n\s*partial: false,\s*\n\s*text: captionText/.test(src),
     'yêu cầu tạo hình phải LUÔN COMPLETED — không được hiện "CHƯA ĐẦY ĐỦ"');
 });

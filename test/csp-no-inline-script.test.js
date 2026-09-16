@@ -44,11 +44,12 @@ while ((m = scriptTagRe.exec(htmlNoComments))) {
 }
 ok(totalScripts > 0, `tìm thấy ${totalScripts} thẻ <script> trong index.html để kiểm tra`);
 ok(inlineFound === 0, `không còn thẻ <script> nội tuyến nào (tất cả đều dùng src=) — CSP script-src không cần 'unsafe-inline'`);
-ok(html.includes('<script src="/js/boot.js"></script>'), `boot.js được nạp qua <script src="/js/boot.js"> (bên ngoài, hợp lệ với CSP 'self')`);
+const { scriptSrcs } = require('./_htmlAssets');
+ok(scriptSrcs(html).includes('/js/boot.js'), `boot.js được nạp qua <script src="/js/boot.js"> (bên ngoài, hợp lệ với CSP 'self') — tên có thể đã được build gắn content-hash`);
 
 // boot.js phải nạp SỚM — trước mọi script CDN (pdf.js/mammoth/katex/mathjs/three/docx) — để bắt
 // được lỗi ngay cả khi các CDN đó tải/parse thất bại.
-const bootIdx = html.indexOf('<script src="/js/boot.js">');
+const bootIdx = html.search(/<script\s+src="\/js\/boot(?:\.[0-9a-f]{10})?\.js"/);
 const firstCdnIdx = html.indexOf('<script src="https://');
 ok(bootIdx !== -1 && (firstCdnIdx === -1 || bootIdx < firstCdnIdx),
   'boot.js được nạp TRƯỚC mọi <script> CDN bên thứ 3 trong index.html');

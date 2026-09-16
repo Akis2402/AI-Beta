@@ -23,16 +23,44 @@ console.log('\n== A6/A11: validateSourceVisionBody() ==');
 }
 
 {
-  const tinyPngBase64 = Buffer.alloc(200, 1).toString('base64'); // đủ dài để qua check độ dài, không cần là PNG thật cho test validate
+  // PHẦN D: ràng buộc THẬT không còn là "8 trang" mà là SỐ BYTE. 15 trang nhẹ nay được nhận đủ.
+  const { makePng } = require('./_imageFixtures');
+  const tinyPngBase64 = makePng(200);
   const pages = Array.from({ length: 15 }, (_, i) => ({ page: i + 1, mediaType: 'image/png', base64: tinyPngBase64 }));
   const result = validateSourceVisionBody({ pages });
-  ok(result.pages.length === 8, `nhận 15 trang trong 1 request nhưng bị CẮT còn đúng 8 (MAX_VISION_BATCH_PAGES, mục A6 "không nổ token 1 request") — nhận được ${result.pages.length}`);
-  ok(result.pages[0].page === 1 && result.pages[7].page === 8, 'giữ đúng 8 trang ĐẦU tiên theo thứ tự gửi lên');
+  ok(result.pages.length === 15, `15 trang NHẸ vừa ngân sách byte -> nhận đủ, không cắt theo con số cố định (nhận ${result.pages.length})`);
+  ok(result.pages[0].page === 1 && result.pages[14].page === 15, 'giữ nguyên thứ tự trang gửi lên');
 }
 
 {
-  const result = validateSourceVisionBody({ pages: [{ page: 3, mediaType: 'image/png', base64: 'AAAA' }, { page: 4, mediaType: 'application/x-evil', base64: 'AAAA' }] });
-  ok(result.pages.length === 1 && result.pages[0].page === 3, 'trang có mediaType không hợp lệ bị loại âm thầm, KHÔNG chặn cả batch (giữ đúng các trang hợp lệ còn lại)');
+  // Ràng buộc byte có hiệu lực THẬT: trang nặng vượt tổng ngân sách bị loại, và loại CÓ BÁO CÁO.
+  const { makePng } = require('./_imageFixtures');
+  const heavy = makePng(1.2 * 1024 * 1024);
+  const pages = Array.from({ length: 6 }, (_, i) => ({ page: i + 1, mediaType: 'image/png', base64: heavy }));
+  const result = validateSourceVisionBody({ pages });
+  ok(result.pages.length < 6, `trang nặng: batch bị cắt theo BYTE (nhận ${result.pages.length}/6)`);
+  ok(result.rejected.length > 0 && result.rejected.every((r) => r.reason), 'mọi trang bị loại đều có lý do đi kèm');
+}
+
+{
+  // PHẦN E: KHÔNG còn "loại âm thầm". Trang sai MIME vẫn bị loại nhưng PHẢI xuất hiện trong rejected[].
+  const { makePng } = require('./_imageFixtures');
+  const good = makePng(64);
+  const result = validateSourceVisionBody({ pages: [{ page: 3, mediaType: 'image/png', base64: good }, { page: 4, mediaType: 'application/x-evil', base64: good }] });
+  ok(result.pages.length === 1 && result.pages[0].page === 3, 'trang hợp lệ còn lại vẫn được xử lý, KHÔNG chặn cả batch');
+  ok(result.rejected.length === 1 && result.rejected[0].page === 4 && result.rejected[0].reason === 'image_type_unsupported',
+    'trang bị loại được BÁO CÁO kèm lý do (không im lặng)');
+}
+
+{
+  // PHẦN G: nhãn MIME nói PNG nhưng byte là JPEG -> từ chối, không đẩy binary lạ vào vision.
+  const { makeJpeg } = require('./_imageFixtures');
+  const result = validateSourceVisionBody({ pages: [
+    { page: 1, mediaType: 'image/jpeg', base64: makeJpeg(64) },
+    { page: 2, mediaType: 'image/png', base64: makeJpeg(64) }
+  ] });
+  ok(result.pages.length === 1 && result.pages[0].page === 1, 'nhãn MIME sai lệch so với byte thật bị loại');
+  ok(result.rejected[0].reason === 'image_mime_mismatch', 'lý do phải là mime_mismatch, không phải lý do chung chung');
 }
 
 console.log('\n== A6/A11: parseVisionJson() ==');

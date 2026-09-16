@@ -62,14 +62,19 @@ test('chặn trần maxEntries — Map không phình vô hạn', () => {
 const recommendSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'recommend.js'), 'utf8');
 
 test('recommend.js check cache TRƯỚC lệnh gọi fetchAiLinks() (cache-before-call, không phải sau)', () => {
-  const idxCacheCheck = recommendSrc.indexOf('recommendCache.get(query)');
+  // PHẦN I: cache nay có 2 tầng nên call-site dùng getAsync(); BẤT BIẾN được kiểm vẫn y nguyên —
+  // đọc cache PHẢI đứng trước lệnh gọi AI.
+  const idxCacheCheck = Math.max(
+    recommendSrc.indexOf('recommendCache.get(query)'),
+    recommendSrc.indexOf('recommendCache.getAsync(query)')
+  );
   const idxFetchAi = recommendSrc.indexOf('await fetchAiLinks(query)');
   assert.ok(idxCacheCheck > 0 && idxFetchAi > 0, 'phải tìm thấy cả 2 dòng');
   assert.ok(idxCacheCheck < idxFetchAi, 'kiểm tra cache PHẢI đứng trước lệnh gọi AI, không phải ngược lại');
 });
 
 test('recommend.js return sớm khi cache hit (không rơi tiếp xuống fetchAiLinks)', () => {
-  assert.ok(/if \(cached\) return res\.json\(\{ \.\.\.cached, fromCache: true \}\);/.test(recommendSrc), 'cache hit phải return ngay, không tiếp tục gọi AI');
+  assert.ok(/if \(cached\) return res\.json\(\{[^}]*fromCache: true[^}]*\}\);/.test(recommendSrc), 'cache hit phải return ngay, không tiếp tục gọi AI');
 });
 
 test('recommend.js dùng createRecommendCache() thật (không phải Map trần không TTL)', () => {

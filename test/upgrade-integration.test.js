@@ -434,7 +434,7 @@ test('mọi file JS mới đều được nạp trong index.html, đúng thứ t
   // CHỈ xét các thẻ <script src> THẬT — index.html có chú thích nhắc tên file (vd "public/js/app.js")
   // ở phía trên phần <script>, nếu dùng indexOf trên cả file sẽ bắt phải chú thích đó và báo sai
   // thứ tự nạp.
-  const scriptSrcs = [...indexHtml.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1]);
+  const scriptSrcs = require('./_htmlAssets').scriptSrcs(indexHtml);
   const idx = order.map((f) => {
     const i = scriptSrcs.indexOf(f);
     assert.ok(i > -1, `index.html chưa nạp ${f} bằng thẻ <script src>`);
@@ -448,7 +448,10 @@ test('mọi file JS mới đều được nạp trong index.html, đúng thứ t
 test('build script fingerprint đủ các asset mới (tránh HTML mới + JS cũ trên Vercel)', () => {
   const buildJs = read('scripts/build.js');
   ['scene3d.js', 'translations.js', 'languageStore.js', 'i18n.js',
-    'puterAdapter.js', 'providerRouter.js', 'conversationTaskManager.js'].forEach((f) => {
+    'puterAdapter.js', 'providerRouter.js', 'conversationTaskManager.js',
+    // PHẦN A/C: 2 asset mới BẮT BUỘC phải được fingerprint như mọi asset core khác, nếu không sẽ
+    // tái diễn đúng lớp lỗi "HTML mới + JS cũ" trên Vercel.
+    'payloadBudget.js', 'exprEval.js'].forEach((f) => {
     assert.ok(buildJs.includes(`'${f}'`), `scripts/build.js chưa fingerprint ${f}`);
   });
 });
