@@ -79,8 +79,13 @@ async function ensureDocx() {
 }
 
 const state = {
-  docs: [],              // {id, name, ext, status:'loading'|'ready'|'error', chunks:[{id,text,garbled}]} — mọi nguồn đã tải lên đều tự động được dùng khi trả lời, không cần bật/tắt thủ công
-  docParsePromises: [],  // Promise[] các file đang được đọc dở — waitForPendingDocs() chờ hết trước khi lấy contexts cho câu hỏi hiện tại (fix race gửi câu hỏi trước khi đọc file xong)
+  docs: [],              // {id, name, ext, status:'loading'|'ready'|'error', processing:{...}, chunks:[{id,text,garbled}]} — mọi nguồn đã tải lên đều tự động được dùng khi trả lời, không cần bật/tắt thủ công
+  // ROOT CAUSE FIX (PHẦN A/B): TRƯỚC ĐÂY chỉ theo dõi `docParsePromises` (parse/rasterize) còn
+  // vision extraction được bắn kiểu fire-and-forget `processPdfVisionEvidence(doc).catch(...)` —
+  // nên doc bị coi là 'ready' ngay khi RENDER xong ảnh, trong khi AI CHƯA ĐỌC trang nào. NAY: mỗi
+  // source có ĐÚNG 1 promise bao trọn parse -> rasterize -> vision extract -> verify, và
+  // waitForAllSourceProcessing() chờ trọn vòng đời đó trước khi bất kỳ request nào được dựng.
+  sourceProcessingPromises: [],
   rules: [],
   // Ghi chú KHÔNG lưu ở mảng riêng nữa — mỗi ghi chú gắn trực tiếp vào tin nhắn AI tương ứng
   // (msg.userNote / msg.userNoteAt trong conversations bên dưới), nhờ vậy luôn đồng bộ 1-1 với
@@ -433,6 +438,9 @@ function loadAll() {
       state.recentSources = all.filter((d) => d.listStatus === 'recent')
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, 3);
       sourceCounter = all.reduce((max, d) => Math.max(max, d.id), 0);
+      // PHẦN J: khôi phục vòng đời SAU F5. Source đã READY -> dùng cache, KHÔNG parse/vision lại.
+      // Source dở dang -> KHÔNG giả vờ READY: đánh INCOMPLETE rồi resume đúng phần còn thiếu.
+      state.docs.forEach(rehydrateSourceProcessing);
       renderSources();
       renderRecentSources();
     })
@@ -781,7 +789,14 @@ function chunkText(pages, meta = {}, size = 900) {
     }
   });
   const totalChunks = out.length;
-  return out.map((c, idx) => ({ id: idx + 1, chunkIndex: idx + 1, totalChunks, ...c }));
+  // PHẦN F: mỗi chunk mang sẵn provenance đầy đủ (evidenceId/extractionMethod/extractionStatus) để
+  // citationMap phía server không phải suy luận lại từ vị trí mảng.
+  return out.map((c, idx) => ({
+    id: idx + 1, chunkIndex: idx + 1, totalChunks,
+    evidenceId: `${sourceId != null ? sourceId : 'src'}:c${idx + 1}${c.page != null ? `:p${c.page}` : ''}`,
+    extractionMethod: 'text', extractionStatus: 'ok',
+    ...c
+  }));
 }
 // FIX: PDF "chỉ ảnh" (bài scan/chụp rồi gộp vào PDF, không có text layer) — trước đây parsePDF() chỉ
 // gọi getTextContent() nên trả về chuỗi RỖNG, doc vẫn được đánh dấu 'ready' nhưng không có nội dung
@@ -896,7 +911,81 @@ async function parseDocx(file) {
 async function parseTxt(file) { return await file.text(); }
 function iconFor(ext) { return ext === 'pdf' ? ICONS.outline : ext === 'docx' ? ICONS.note : ICONS.outline; }
 
+/** PHẦN J: sau F5 — READY thì giữ nguyên (cache), dở dang thì resume ĐÚNG phần còn thiếu.
+ * Evidence từng trang đã lưu trong IndexedDB nên trang nào đọc rồi KHÔNG bao giờ gọi vision lại. */
+function rehydrateSourceProcessing(doc) {
+  const ps = ensureSourceProcessingState(doc);
+  if (ps.status === SOURCE_STATUS.READY || ps.status === SOURCE_STATUS.ERROR) return null;
+  // Không còn ảnh trang (không persist được / bị dọn) -> không thể resume, giữ INCOMPLETE trung thực.
+  if (!(doc.sourceType === 'image-pdf' && doc.pageImages && doc.pageImages.length)) {
+    setSourceStatus(doc, SOURCE_STATUS.INCOMPLETE);
+    return null;
+  }
+  setSourceStatus(doc, SOURCE_STATUS.INCOMPLETE);
+  const resume = processPdfVisionEvidence(doc).catch((e) => {
+    console.error('[vision-extract] resume lỗi:', e);
+    setSourceStatus(doc, SOURCE_STATUS.INCOMPLETE, { lastError: String((e && e.message) || e) });
+  });
+  state.sourceProcessingPromises.push(resume);
+  resume.finally(() => {
+    const idx = state.sourceProcessingPromises.indexOf(resume);
+    if (idx !== -1) state.sourceProcessingPromises.splice(idx, 1);
+  });
+  return resume;
+}
+
+/* ---------- PHẦN Q: NHÃN TRẠNG THÁI NGUỒN — mỗi giai đoạn 1 câu chữ khác nhau ---------- */
+function sourceCardLabel(doc) {
+  const ps = ensureSourceProcessingState(doc);
+  const total = ps.totalPages || 0;
+  switch (ps.status) {
+    case SOURCE_STATUS.UPLOADING: return 'Đang tải lên…';
+    case SOURCE_STATUS.PARSING: return 'Đang phân tích tài liệu…';
+    case SOURCE_STATUS.RASTERIZING: return `Đang dựng ảnh trang ${ps.renderedPages}/${total || '?'}…`;
+    case SOURCE_STATUS.EXTRACTING: return `Đang đọc trang ${ps.extractedPages}/${total || '?'}…`;
+    case SOURCE_STATUS.VERIFYING: return 'Đang xác minh nguồn…';
+    case SOURCE_STATUS.ERROR: return '⚠️ Không đọc được tài liệu này';
+    case SOURCE_STATUS.INCOMPLETE: {
+      const miss = ps.failedPages.length;
+      return `⚠️ Mới đọc ${ps.verifiedPages}/${total} trang${miss ? ` · không đọc được ${miss} trang` : ''} · chưa sẵn sàng`;
+    }
+    case SOURCE_STATUS.READY:
+    default: {
+      if (ps.extractionMethod === 'vision') return `${ps.verifiedPages}/${total} trang · AI đã đọc xong`;
+      const chunks = (doc.chunks || []).filter((c) => !c[SOURCE_PLACEHOLDER_FLAG]).length;
+      return `${chunks} đoạn${total > 1 ? ` · ${total} trang` : ''} · đã đọc ${ps.verifiedPages}/${total}`;
+    }
+  }
+}
+
+/* ---------- PHẦN C: KHÔNG ĐỂ USER GỬI REQUEST DÙNG NGUỒN CHƯA READY ----------
+ * Nút gửi bị disable trong lúc còn nguồn đang xử lý, kèm trạng thái rõ ràng. Người dùng vẫn gõ được;
+ * khi nguồn xong nút tự bật lại. sendMessage() vẫn await waitForAllSourceProcessing() như hàng rào
+ * thứ hai (phòng khi UI bị bỏ qua). */
+function updateComposerSourceState() {
+  const btn = typeof el === 'function' ? el('sendBtn') : null;
+  const statusTextEl = typeof el === 'function' ? el('statusText') : null;
+  if (!btn) return;
+  const summary = sourceReadinessSummary();
+  if (summary.processing > 0) {
+    const d = summary.processingDocs[0];
+    const ps = ensureSourceProcessingState(d);
+    btn.disabled = true;
+    btn.dataset.blockedBySource = '1';
+    if (statusTextEl) {
+      statusTextEl.textContent = ps.status === SOURCE_STATUS.EXTRACTING && ps.totalPages
+        ? `Đang đọc trang ${ps.extractedPages}/${ps.totalPages}…`
+        : (ps.status === SOURCE_STATUS.VERIFYING ? 'Đang xác minh nguồn…' : 'Đang đọc toàn bộ tài liệu…');
+    }
+  } else if (btn.dataset.blockedBySource === '1') {
+    btn.disabled = false;
+    delete btn.dataset.blockedBySource;
+    if (statusTextEl) statusTextEl.textContent = typeof t === 'function' ? t('chat.statusReady') : '';
+  }
+}
+
 function renderSources() {
+  updateComposerSourceState();
   const list = el('sourceList');
   list.innerHTML = '';
   el('emptySources').style.display = state.docs.length ? 'none' : 'block';
@@ -909,26 +998,9 @@ function renderSources() {
     const firstChunk = doc.chunks[0];
     // PHẦN D: hiển thị coverage THẬT thay vì chỉ "X ký tự" — người dùng cần biết PDF đã đọc bao
     // nhiêu % để không nghi ngờ nhầm lúc AI trả lời thiếu (vd PDF scan đang xử lý dở, chưa xong hẳn).
-    let coverageLabel;
-    if (doc.sourceType === 'image-pdf' && doc.pageCoverage) {
-      const pc = doc.pageCoverage;
-      const vp = doc.visionProgress;
-      if (pc.coveragePercent < 100) {
-        coverageLabel = `${pc.renderedPages}/${pc.totalPages} trang · ${pc.coveragePercent}% · chưa render xong`;
-      } else if (vp && vp.processed < vp.total) {
-        // PHẦN A12: KHÔNG được nói "đã đọc xong" khi vision extraction (đọc chữ bằng AI, mục A6/A11)
-        // còn dở — coverage RENDER 100% chỉ nghĩa là đã có ảnh từng trang, không phải đã "đọc" hết.
-        coverageLabel = `${pc.totalPages}/${pc.totalPages} trang (ảnh) · đang đọc bằng AI: ${vp.processed}/${vp.total}`;
-      } else if (vp && vp.processed >= vp.total) {
-        coverageLabel = `${pc.totalPages}/${pc.totalPages} trang · 100% · AI đã đọc xong`;
-      } else {
-        coverageLabel = `${pc.totalPages}/${pc.totalPages} trang · đã render, chờ đọc bằng AI`;
-      }
-    } else {
-      const pages = doc.chunks.map((c) => c.page).filter((p) => p != null);
-      const totalPages = pages.length ? Math.max(...pages) : null;
-      coverageLabel = `${doc.chunks.length} đoạn${totalPages ? ` · ${totalPages} trang` : ''} · 100% đã đọc`;
-    }
+    // PHẦN Q: nhãn PHẢI phân biệt render vs đã đọc vs đã xác minh. TUYỆT ĐỐI không "100% đã đọc"
+    // khi mới rasterize xong.
+    const coverageLabel = sourceCardLabel(doc);
     // Nguồn tự động được dùng ngay khi tải lên (không còn tick chọn thủ công) — nếu đoạn đầu bị
     // "vỡ font" (xem garbledRatio), hiển thị ghi chú thân thiện thay vì đổ chuỗi ký tự rác ra preview.
     const previewText = firstChunk
@@ -1093,14 +1165,168 @@ function renderRecentSources() {
   });
 }
 
+/* ============================================================================================
+ * SOURCE PROCESSING LIFECYCLE (PHẦN A/B/D) — 1 MÁY TRẠNG THÁI DUY NHẤT CHO MỌI NGUỒN
+ * ============================================================================================
+ * ROOT CAUSE đã sửa: 'ready' TRƯỚC ĐÂY chỉ có nghĩa "đã parse/đã render ảnh xong". Với PDF scan,
+ * render xong ≠ ĐỌC xong — vision extraction mới là bước đọc, mà nó lại chạy fire-and-forget. Kết
+ * quả: user hỏi ngay sau upload -> retrieveContext() chỉ thấy 1 chunk ghi chú -> AI nói "không tìm
+ * thấy trong nguồn"; các câu sau chất lượng trồi sụt theo tiến độ nền.
+ *
+ * NAY vòng đời tường minh:
+ *   UPLOADING -> PARSING -> (RASTERIZING -> EXTRACTING) -> VERIFYING -> READY | INCOMPLETE | ERROR
+ * và READY CHỈ được đặt khi có BẰNG CHỨNG (PHẦN D): verifiedPages === totalPages, failedPages rỗng.
+ * Ba loại coverage được tách hẳn, KHÔNG được dùng lẫn nhau:
+ *   renderCoverage   — đã có ảnh/đã đọc được text thô của bao nhiêu trang
+ *   readCoverage     — AI/parser đã TRÍCH XUẤT nội dung của bao nhiêu trang
+ *   verifiedCoverage — bao nhiêu trang đã qua kiểm tra metadata (đúng số trang, có nội dung thật)
+ */
+const SOURCE_EXTRACTION_VERSION = 2; // đổi số này khi thuật toán trích xuất đổi -> cache cũ tự invalidate (PHẦN T)
+const SOURCE_STATUS = {
+  UPLOADING: 'UPLOADING', PARSING: 'PARSING', RASTERIZING: 'RASTERIZING', EXTRACTING: 'EXTRACTING',
+  VERIFYING: 'VERIFYING', READY: 'READY', INCOMPLETE: 'INCOMPLETE', ERROR: 'ERROR'
+};
+const SOURCE_TERMINAL_STATUSES = [SOURCE_STATUS.READY, SOURCE_STATUS.INCOMPLETE, SOURCE_STATUS.ERROR];
+// Mọi chunk do hệ thống tự sinh để BÁO TRẠNG THÁI (không phải nội dung nguồn) đều mang cờ này và
+// TUYỆT ĐỐI không bao giờ được lọt vào contexts gửi cho AI (PHẦN C / TEST 13).
+const SOURCE_PLACEHOLDER_FLAG = 'placeholder';
+
+function coveragePct(done, total) { return total > 0 ? Math.round((Number(done) || 0) / total * 100) : 0; }
+
+function createSourceProcessingState(patch) {
+  return Object.assign({
+    status: SOURCE_STATUS.UPLOADING,
+    extractionMethod: 'unknown',        // 'text' (parser) | 'vision' | 'none'
+    extractionVersion: SOURCE_EXTRACTION_VERSION,
+    totalPages: 0,
+    parsedPages: 0,
+    renderedPages: 0,
+    extractedPages: 0,
+    verifiedPages: 0,
+    failedPages: [],
+    renderCoverage: 0,
+    readCoverage: 0,
+    verifiedCoverage: 0,
+    coveragePercent: 0,                 // = verifiedCoverage, KHÔNG BAO GIỜ = renderCoverage
+    startedAt: Date.now(),
+    completedAt: null,
+    lastError: null
+  }, patch || {});
+}
+
+function recomputeSourceCoverage(ps) {
+  const total = ps.totalPages || 0;
+  const isVision = ps.extractionMethod === 'vision';
+  ps.renderCoverage = coveragePct(isVision ? ps.renderedPages : ps.parsedPages, total);
+  ps.readCoverage = coveragePct(isVision ? ps.extractedPages : ps.parsedPages, total);
+  ps.verifiedCoverage = coveragePct(ps.verifiedPages, total);
+  // PHẦN D/Q: "đã đọc %" hiển thị và gửi đi PHẢI là verified, không phải render.
+  ps.coveragePercent = ps.verifiedCoverage;
+  return ps;
+}
+
+/** Đặt trạng thái + đồng bộ các field cũ (doc.status/doc.pageCoverage) để phần UI/code cũ không vỡ. */
+function setSourceStatus(doc, status, patch) {
+  const base = doc.processing || createSourceProcessingState({});
+  const ps = Object.assign(base, patch || {}, { status });
+  if (!Array.isArray(ps.failedPages)) ps.failedPages = [];
+  recomputeSourceCoverage(ps);
+  if (status === SOURCE_STATUS.READY && !ps.completedAt) ps.completedAt = Date.now();
+  if (status !== SOURCE_STATUS.READY) ps.completedAt = null;
+  doc.processing = ps;
+  // doc.status giữ 3 giá trị cũ cho code/UI cũ, nhưng 'ready' NAY chỉ ứng với READY thật sự.
+  doc.status = status === SOURCE_STATUS.READY ? 'ready' : (status === SOURCE_STATUS.ERROR ? 'error' : 'loading');
+  // pageCoverage = ảnh phản chiếu của phần RENDER (giữ tên cũ cho UI/test cũ), không phải "đã đọc".
+  doc.pageCoverage = {
+    totalPages: ps.totalPages, renderedPages: ps.renderedPages, failedPages: ps.failedPages.slice(),
+    coveragePercent: ps.renderCoverage
+  };
+  return ps;
+}
+
+/** PHẦN D: chốt READY CHỈ khi có bằng chứng đầy đủ; thiếu 1 trang -> INCOMPLETE, không giả vờ. */
+function finalizeSourceStatus(doc) {
+  const ps = doc.processing;
+  if (!ps) return null;
+  const total = ps.totalPages || 0;
+  const extracted = ps.extractionMethod === 'vision'
+    ? (ps.renderedPages >= total && ps.extractedPages >= total)
+    : ps.parsedPages >= total;
+  const complete = total > 0 && extracted && ps.verifiedPages >= total && ps.failedPages.length === 0;
+  return setSourceStatus(doc, complete ? SOURCE_STATUS.READY : SOURCE_STATUS.INCOMPLETE);
+}
+
+/** Doc cũ khôi phục từ IndexedDB (trước khi có lifecycle) — SUY RA trạng thái từ field cũ, KHÔNG
+ * parse/vision lại (PHẦN J: đã READY thì dùng cache). */
+function ensureSourceProcessingState(doc) {
+  if (doc && doc.processing && doc.processing.status) return doc.processing;
+  if (!doc) return createSourceProcessingState({});
+  const legacyReady = !doc.status || doc.status === 'ready';
+  const pc = doc.pageCoverage || null;
+  const chunkPages = (doc.chunks || []).map((c) => c.page).filter((p) => p != null);
+  const total = pc && pc.totalPages ? pc.totalPages : (chunkPages.length ? Math.max.apply(null, chunkPages) : 1);
+  const method = doc.sourceType === 'image-pdf' ? 'vision' : 'text';
+  doc.processing = createSourceProcessingState({
+    status: legacyReady ? SOURCE_STATUS.READY : (doc.status === 'error' ? SOURCE_STATUS.ERROR : SOURCE_STATUS.INCOMPLETE),
+    extractionMethod: method,
+    extractionVersion: 1, // bản cũ -> version 1 để cache key phân biệt được (PHẦN T)
+    totalPages: total,
+    parsedPages: legacyReady ? total : 0,
+    renderedPages: pc && pc.renderedPages != null ? pc.renderedPages : (legacyReady ? total : 0),
+    extractedPages: legacyReady ? total : 0,
+    verifiedPages: legacyReady ? total : 0,
+    failedPages: pc && Array.isArray(pc.failedPages) ? pc.failedPages.slice() : [],
+    completedAt: legacyReady ? (doc.updatedAt || Date.now()) : null
+  });
+  recomputeSourceCoverage(doc.processing);
+  return doc.processing;
+}
+
+function isSourceReady(doc) {
+  return ensureSourceProcessingState(doc).status === SOURCE_STATUS.READY;
+}
+function isSourceProcessing(doc) {
+  const st = ensureSourceProcessingState(doc).status;
+  return SOURCE_TERMINAL_STATUSES.indexOf(st) === -1;
+}
+/** Tóm tắt trạng thái mọi nguồn — dùng cho UI composer + gửi kèm request (PHẦN N/Q/S). */
+function sourceReadinessSummary() {
+  const docs = state.docs || [];
+  const processing = docs.filter(isSourceProcessing);
+  const incomplete = docs.filter((d) => ensureSourceProcessingState(d).status === SOURCE_STATUS.INCOMPLETE);
+  return {
+    total: docs.length,
+    ready: docs.filter(isSourceReady).length,
+    processing: processing.length,
+    incomplete: incomplete.length,
+    allReady: processing.length === 0,
+    processingDocs: processing
+  };
+}
+/** Payload trạng thái nguồn gửi kèm MỌI request (PHẦN N: server biết nguồn đã READY hay chưa để
+ * cấm AI kết luận "tài liệu không có thông tin"). Chỉ vài con số — không phải nội dung. */
+function buildSourceStatusPayload() {
+  return (state.docs || []).map((d) => {
+    const ps = ensureSourceProcessingState(d);
+    return {
+      sourceId: String(d.id), name: d.name, status: ps.status,
+      extractionMethod: ps.extractionMethod, extractionVersion: ps.extractionVersion,
+      totalPages: ps.totalPages, parsedPages: ps.parsedPages, renderedPages: ps.renderedPages,
+      extractedPages: ps.extractedPages, verifiedPages: ps.verifiedPages,
+      failedPages: ps.failedPages.slice(0, 20),
+      renderCoverage: ps.renderCoverage, readCoverage: ps.readCoverage, verifiedCoverage: ps.verifiedCoverage
+    };
+  });
+}
+
 // FIX (race: gửi câu hỏi TRƯỚC KHI file đọc xong): handleFiles() trước đây gán ngay chunk placeholder
 // "⏳ Đang đọc…" vào doc.chunks rồi mới await parse — nếu người dùng bấm gửi câu hỏi trong lúc file
 // còn đang đọc (rất dễ xảy ra vì họ vừa upload xong là gõ luôn câu hỏi), retrieveContext() không có
 // cách nào phân biệt được đây là placeholder hay nội dung thật, nên nó gửi thẳng CHUỖI "⏳ Đang đọc…"
 // cho AI làm "nguồn tài liệu" — model nhận đúng như vậy nên trả lời "không nhận được nội dung trích
 // dẫn" dù người dùng RÕ RÀNG đã tải nguồn lên trước đó. FIX: đánh dấu doc.status ('loading'/'ready'/
-// 'error') và lưu Promise đọc file vào state.docParsePromises để nơi gửi câu hỏi có thể await xong hết
-// trước khi lấy contexts (xem waitForPendingDocs()); đồng thời retrieveContext() tự loại doc chưa
+// 'error') và lưu Promise xử lý nguồn vào state.sourceProcessingPromises để nơi gửi câu hỏi await hết
+// trước khi lấy contexts (xem waitForAllSourceProcessing()); đồng thời retrieveContext() tự loại doc chưa
 // 'ready' để không bao giờ lọt placeholder vào nguồn gửi AI dù lỡ quên await ở đâu đó.
 async function handleFiles(files) {
   // FIX P0: chờ storage khởi tạo xong (migration/load từ IndexedDB) trước khi đụng vào state.docs
@@ -1119,71 +1345,115 @@ async function handleFiles(files) {
     }
     // File đã đang active (upload trùng trong lúc đang mở) — không tạo bản sao thứ 2.
     if (state.docs.some((d) => d.fingerprint === fingerprint)) continue;
-    const doc = { id: ++sourceCounter, name: file.name, ext, status: 'loading', fingerprint, updatedAt: Date.now(), chunks: [{ id: 1, text: '⏳ Đang đọc…' }] };
+    const doc = {
+      id: ++sourceCounter, name: file.name, ext, status: 'loading', fingerprint, updatedAt: Date.now(),
+      // Chunk báo trạng thái PHẢI có cờ placeholder — retrieveContext()/buildContexts() loại tuyệt
+      // đối theo cờ này, không dựa vào việc "đoán nội dung" (TEST 13).
+      chunks: [{ id: 1, text: '⏳ Đang đọc…', [SOURCE_PLACEHOLDER_FLAG]: true }]
+    };
+    setSourceStatus(doc, SOURCE_STATUS.UPLOADING, createSourceProcessingState({ extractionMethod: ext === 'pdf' ? 'unknown' : 'text' }));
     state.docs.push(doc);
     renderSources();
-    const parsePromise = (async () => {
+    // 1 PROMISE DUY NHẤT bao TRỌN vòng đời: parse -> rasterize -> vision extract -> verify.
+    const processingPromise = (async () => {
       try {
+        setSourceStatus(doc, SOURCE_STATUS.PARSING);
+        renderSources();
         if (ext === 'pdf') {
           const result = await parsePDF(file);
           if (result.isImageOnly) {
             doc.pageImages = result.pageImages;
             doc.sourceType = 'image-pdf';
-            // PHẦN A10/PHẦN D: lưu coverage thật (không chỉ "đã render") để UI + system prompt biết
-            // chính xác đã xử lý bao nhiêu % thay vì âm thầm coi 1 phần là toàn bộ.
-            doc.pageCoverage = {
-              totalPages: result.totalPages, renderedPages: result.renderedPages,
-              failedPages: result.failedPages || [], coveragePercent: result.coveragePercent
-            };
+            setSourceStatus(doc, SOURCE_STATUS.RASTERIZING, {
+              extractionMethod: 'vision', totalPages: result.totalPages,
+              parsedPages: 0, renderedPages: result.renderedPages,
+              extractedPages: 0, verifiedPages: 0, failedPages: (result.failedPages || []).slice()
+            });
             const failNote = (result.failedPages && result.failedPages.length)
-              ? ` (lỗi ${result.failedPages.length} trang: ${result.failedPages.slice(0, 10).join(', ')}${result.failedPages.length > 10 ? '…' : ''} — thử tải lại nếu cần các trang này)`
+              ? ` (lỗi ${result.failedPages.length} trang: ${result.failedPages.slice(0, 10).join(', ')}${result.failedPages.length > 10 ? '…' : ''})`
               : '';
-            const note = result.pageImages.length
-              ? `📄 PDF này là bản scan/ảnh chụp (không có chữ để trích) — đã xử lý ${result.renderedPages}/${result.totalPages} trang (${result.coveragePercent}% coverage)${failNote}. Mỗi câu hỏi sẽ tự chọn các trang liên quan nhất (theo số trang bạn nhắc tới, hoặc trải đều nếu không hỏi trang cụ thể) để gửi cho AI.`
-              : '⚠️ PDF này là bản scan/ảnh chụp nhưng không render được trang nào — vui lòng thử lại hoặc đổi file khác.';
-            doc.chunks = [{ id: 1, text: note, garbled: false }];
+            doc.chunks = [{
+              id: 1, garbled: false, [SOURCE_PLACEHOLDER_FLAG]: true,
+              text: result.pageImages.length
+                ? `⏳ PDF scan/ảnh chụp — đã render ${result.renderedPages}/${result.totalPages} trang${failNote}, đang đọc bằng AI…`
+                : '⚠️ PDF này là bản scan/ảnh chụp nhưng không render được trang nào.'
+            }];
+            renderSources();
+            // AWAIT THẬT — không còn fire-and-forget (ROOT CAUSE, PHẦN B).
+            await processPdfVisionEvidence(doc);
           } else {
+            doc.sourceType = 'pdf';
             doc.chunks = chunkText(result.pages, { doc: doc.name, sourceId: doc.id });
-            doc.pageCoverage = { totalPages: result.totalPages, renderedPages: result.totalPages, failedPages: [], coveragePercent: 100 };
+            const parsedPages = result.pages.filter((p) => String(p.text || '').trim().length > 0).length;
+            setSourceStatus(doc, SOURCE_STATUS.VERIFYING, {
+              extractionMethod: 'text', totalPages: result.totalPages,
+              parsedPages: result.totalPages, renderedPages: result.totalPages,
+              extractedPages: parsedPages, verifiedPages: 0, failedPages: []
+            });
+            verifyTextSource(doc, result.totalPages);
           }
         } else {
           let text = '';
           if (ext === 'docx') text = await parseDocx(file);
           else text = await parseTxt(file);
+          doc.sourceType = ext;
           doc.chunks = chunkText(text, { doc: doc.name, sourceId: doc.id });
+          // DOCX/TXT không có khái niệm trang -> coi toàn văn bản là 1 "trang logic".
+          setSourceStatus(doc, SOURCE_STATUS.VERIFYING, {
+            extractionMethod: 'text', totalPages: 1, parsedPages: 1, renderedPages: 1,
+            extractedPages: doc.chunks.length ? 1 : 0, verifiedPages: 0, failedPages: []
+          });
+          verifyTextSource(doc, 1);
         }
-        doc.status = 'ready';
       } catch (e) {
-        doc.chunks = [{ id: 1, text: '⚠️ Không đọc được nội dung file này.' }];
-        doc.status = 'error';
+        doc.chunks = [{ id: 1, text: '⚠️ Không đọc được nội dung file này.', [SOURCE_PLACEHOLDER_FLAG]: true }];
+        setSourceStatus(doc, SOURCE_STATUS.ERROR, { lastError: String((e && e.message) || e) });
         console.error(e);
       }
+      persistDocs();
       renderSources();
-      // PHẦN A6/A11: kích hoạt trích xuất vision NỀN cho PDF scan — không await (không chặn UI),
-      // lỗi mạng/API tự log bên trong processPdfVisionEvidence(), không văng ra ngoài làm hỏng
-      // handleFiles(). Chỉ chạy khi doc thực sự sẵn sàng và có ảnh trang để đọc.
-      if (doc.status === 'ready' && doc.sourceType === 'image-pdf' && doc.pageImages && doc.pageImages.length) {
-        processPdfVisionEvidence(doc).catch((e) => console.error('[vision-extract] không khởi động được:', e));
-      }
     })();
-    state.docParsePromises.push(parsePromise);
+    state.sourceProcessingPromises.push(processingPromise);
     // Tự dọn khỏi mảng theo dõi khi xong (thành công lẫn lỗi), tránh mảng phình to vô hạn qua nhiều
-    // lượt upload trong 1 phiên — waitForPendingDocs() chỉ cần quan tâm các Promise CHƯA settle.
-    parsePromise.finally(() => {
-      const idx = state.docParsePromises.indexOf(parsePromise);
-      if (idx !== -1) state.docParsePromises.splice(idx, 1);
+    // lượt upload — waitForAllSourceProcessing() chỉ quan tâm các Promise CHƯA settle.
+    processingPromise.finally(() => {
+      const idx = state.sourceProcessingPromises.indexOf(processingPromise);
+      if (idx !== -1) state.sourceProcessingPromises.splice(idx, 1);
+      renderSources();
     });
   }
-  // Không await từng parsePromise ở đây (giữ hành vi cũ: nhiều file đọc song song, UI cập nhật dần
-  // từng file một qua renderSources() bên trong closure) — nơi GỬI câu hỏi mới là nơi cần chờ, qua
-  // waitForPendingDocs().
+  // Nhiều file xử lý SONG SONG nhưng MỖI file có state riêng (PHẦN B) — nơi GỬI câu hỏi mới là nơi
+  // phải chờ, qua waitForAllSourceProcessing().
 }
 
-/** Chờ mọi file đang đọc dở (nếu có) xong hẳn trước khi lấy nguồn cho câu hỏi hiện tại. Dùng
- * allSettled để 1 file lỗi không chặn các file khác/không làm treo việc gửi câu hỏi. */
-async function waitForPendingDocs() {
-  if (!state.docParsePromises.length) return;
-  await Promise.allSettled(state.docParsePromises.slice());
+/** PHẦN D (bằng chứng cho nguồn text): mỗi trang phải parse ra nội dung thật thì mới tính verified.
+ * Trang trắng trong PDF là hợp lệ (không phải lỗi) nên vẫn tính verified, nhưng nếu KHÔNG trang nào
+ * có nội dung thì source là INCOMPLETE — không được giả vờ đã đọc. */
+function verifyTextSource(doc, totalPages) {
+  const ps = doc.processing;
+  const pagesWithText = new Set(doc.chunks.filter((c) => !c[SOURCE_PLACEHOLDER_FLAG] && String(c.text || '').trim()).map((c) => c.page));
+  const anyText = doc.chunks.some((c) => !c[SOURCE_PLACEHOLDER_FLAG] && String(c.text || '').trim().length > 0);
+  setSourceStatus(doc, SOURCE_STATUS.VERIFYING, {
+    verifiedPages: anyText ? totalPages : 0,
+    extractedPages: totalPages === 1 ? (anyText ? 1 : 0) : Math.max(ps ? ps.extractedPages : 0, pagesWithText.size),
+    failedPages: anyText ? [] : [1]
+  });
+  if (anyText) {
+    // Với PDF text-layer: extractedPages có thể < totalPages (trang trắng) — điều kiện READY của
+    // nguồn text là parsedPages === totalPages, nên đồng bộ lại extractedPages ở đây.
+    setSourceStatus(doc, SOURCE_STATUS.VERIFYING, { extractedPages: totalPages });
+  }
+  return finalizeSourceStatus(doc);
+}
+
+/** Chờ TOÀN BỘ vòng đời xử lý nguồn (parse + rasterize + vision + verify) trước khi dựng request.
+ * Dùng allSettled để 1 file lỗi không chặn các file khác/không treo việc gửi câu hỏi. */
+async function waitForAllSourceProcessing() {
+  // Vòng lặp: 1 promise có thể sinh thêm promise khác (vd retry/resume sau F5) — chờ tới khi sạch,
+  // BOUNDED để không bao giờ chờ vô hạn (PHẦN I: no infinite loop).
+  for (let round = 0; round < 8 && state.sourceProcessingPromises.length; round++) {
+    await Promise.allSettled(state.sourceProcessingPromises.slice());
+  }
 }
 
 /** Gom ảnh trang PDF-chỉ-ảnh từ mọi doc 'ready' để gửi kèm request (xem parsePDF()/handleFiles()).
@@ -1225,7 +1495,9 @@ function capImagesToByteBudget(images, maxBytes) {
 }
 function collectSourceImages(query = '') {
   const pageHints = extractPageHints(query);
-  const imagePdfDocs = state.docs.filter((doc) => (!doc.status || doc.status === 'ready') && doc.sourceType === 'image-pdf' && doc.pageImages && doc.pageImages.length);
+  // PHẦN B/C: chỉ nguồn ĐÃ READY mới được gửi kèm ảnh — nguồn đang đọc dở không được xuất hiện như
+  // nguồn hoàn chỉnh.
+  const imagePdfDocs = state.docs.filter((doc) => isSourceReady(doc) && doc.sourceType === 'image-pdf' && doc.pageImages && doc.pageImages.length);
   const out = [];
   imagePdfDocs.forEach((doc) => {
     // PHẦN A11: trang ĐÃ có vision evidence (text đã trích xong, xem processPdfVisionEvidence())
@@ -1279,38 +1551,135 @@ function rebuildChunksFromEvidence(doc) {
     return {
       id: idx + 1, chunkIndex: idx + 1, totalChunks, page: p, startPage: p, endPage: p,
       doc: doc.name, sourceId: doc.id, garbled: false,
+      // PHẦN F: provenance đi kèm TỪNG evidence, không suy luận lại ở bất kỳ tầng nào phía sau.
+      evidenceId: `${doc.id}:p${p}:v${SOURCE_EXTRACTION_VERSION}`,
+      extractionMethod: 'vision', extractionStatus: 'ok',
+      confidence: ev.confidence != null ? ev.confidence : null,
       text: extra ? `${ev.extractedText}\n${extra}` : ev.extractedText
     };
   });
 }
-async function processPdfVisionEvidence(doc) {
-  if (!doc.pageImages || !doc.pageImages.length) return;
-  doc.pageEvidence = doc.pageEvidence || {};
-  doc.visionProgress = { processed: Object.keys(doc.pageEvidence).length, total: doc.pageImages.length };
-  const pending = doc.pageImages.filter((img) => !doc.pageEvidence[img.page]);
-  for (let i = 0; i < pending.length; i += PDF_RASTER_BATCH_SIZE) {
-    const batch = pending.slice(i, i + PDF_RASTER_BATCH_SIZE);
+// PHẦN I: retry BOUNDED và CHỈ trang lỗi (TEST 8). 1 trang hỏng KHÔNG bao giờ kéo cả PDF đọc lại.
+const VISION_PAGE_MAX_ATTEMPTS = 2; // 1 lần đầu + tối đa 1 lần retry
+
+/** Gọi vision cho ĐÚNG danh sách trang truyền vào, theo batch. Trả về số trang đọc thành công. */
+async function runVisionBatches(doc, pages) {
+  for (let i = 0; i < pages.length; i += PDF_RASTER_BATCH_SIZE) {
+    const batch = pages.slice(i, i + PDF_RASTER_BATCH_SIZE);
     try {
       const resp = await apiPost('/api/source/vision-extract', {
         pages: batch.map((img) => ({ page: img.page, mediaType: img.mediaType, base64: img.base64 }))
       });
       (resp && resp.results ? resp.results : []).forEach((r) => {
+        const prev = doc.pageEvidence[r.page];
+        const attempts = (prev && prev.attempts ? prev.attempts : 0) + 1;
         doc.pageEvidence[r.page] = r.ok
-          ? { ok: true, extractedText: r.extractedText || '', equations: r.equations || [], diagrams: r.diagrams || [], confidence: r.confidence }
-          : { ok: false, reason: r.reason || 'unknown' };
+          ? {
+            ok: true, page: r.page, attempts,
+            extractedText: r.extractedText || '', equations: r.equations || [],
+            diagrams: r.diagrams || [], confidence: r.confidence,
+            extractionMethod: 'vision', extractionVersion: SOURCE_EXTRACTION_VERSION
+          }
+          : { ok: false, page: r.page, attempts, reason: r.reason || 'unknown' };
+      });
+      // Trang nằm trong batch nhưng server không trả kết quả nào -> vẫn phải đếm attempt, nếu không
+      // vòng retry bên dưới sẽ lặp vô hạn.
+      batch.forEach((img) => {
+        if (!doc.pageEvidence[img.page]) doc.pageEvidence[img.page] = { ok: false, page: img.page, attempts: 1, reason: 'missing_result' };
       });
     } catch (e) {
-      // Lỗi mạng/API cho cả batch: đánh dấu các trang trong batch là chưa xử lý được (KHÔNG giả vờ
-      // đã đọc) — collectSourceImages() vẫn dùng ảnh thô làm fallback cho các trang này.
       console.error('[vision-extract] batch lỗi:', e);
-      batch.forEach((img) => { if (!doc.pageEvidence[img.page]) doc.pageEvidence[img.page] = { ok: false, reason: 'network_error' }; });
+      batch.forEach((img) => {
+        const prev = doc.pageEvidence[img.page];
+        const attempts = (prev && prev.attempts ? prev.attempts : 0) + 1;
+        if (!prev || !prev.ok) doc.pageEvidence[img.page] = { ok: false, page: img.page, attempts, reason: 'network_error' };
+      });
     }
-    doc.visionProgress = { processed: Object.keys(doc.pageEvidence).length, total: doc.pageImages.length };
-    // Dựng lại doc.chunks NGAY SAU BATCH NÀY — không đợi hết toàn bộ PDF (xem giải thích ở trên).
+    syncVisionProgress(doc);
+    // Dựng lại doc.chunks NGAY SAU BATCH NÀY — tiến độ tới đâu, evidence dùng được tới đó (nhưng
+    // source vẫn CHƯA READY cho tới khi verify đủ).
     rebuildChunksFromEvidence(doc);
     persistDocs();
     renderSources();
   }
+}
+
+function syncVisionProgress(doc) {
+  const total = doc.pageImages ? doc.pageImages.length : 0;
+  const okPages = Object.keys(doc.pageEvidence || {}).filter((p) => doc.pageEvidence[p] && doc.pageEvidence[p].ok);
+  doc.visionProgress = { processed: Object.keys(doc.pageEvidence || {}).length, total, extracted: okPages.length };
+  setSourceStatus(doc, doc.processing ? doc.processing.status : SOURCE_STATUS.EXTRACTING, {
+    extractedPages: okPages.length
+  });
+}
+
+/** PHẦN D: VERIFY từng trang — evidence phải (1) tồn tại, (2) ok, (3) đúng số trang, (4) đúng
+ * extractionVersion hiện hành, (5) có nội dung THẬT hoặc là trang trắng đáng tin.
+ *
+ * Điểm (5) đáng nói: model vision đôi khi trả `ok:true` với extractedText RỖNG kèm confidence rất
+ * thấp — đó không phải "trang trắng", đó là "tôi không đọc được". Phân biệt hai ca này bằng chính
+ * confidence model tự khai: rỗng + confidence >= ngưỡng = trang trắng thật (hợp lệ); rỗng +
+ * confidence thấp = đọc hỏng (vào failedPages). Ngưỡng cố tình để THẤP (0.2) vì trang scan mờ/chữ
+ * viết tay vẫn đọc được nội dung dù model tự tin thấp — đánh trượt chúng sẽ chặn READY một cách oan uổng.
+ * Trang đọc được nhưng confidence thấp KHÔNG bị coi là lỗi, chỉ được ghi vào lowConfidencePages để
+ * hiển thị/manifest nói rõ, đúng tinh thần "trung thực về chất lượng nguồn". */
+const VISION_MIN_CONFIDENCE = Number.isFinite(Number(window.VISION_MIN_CONFIDENCE))
+  ? Number(window.VISION_MIN_CONFIDENCE) : 0.2;
+
+function verifyVisionEvidence(doc) {
+  const pages = (doc.pageImages || []).map((img) => img.page);
+  const failed = [];
+  const lowConfidence = [];
+  let verified = 0;
+  pages.forEach((p) => {
+    const ev = doc.pageEvidence ? doc.pageEvidence[p] : null;
+    const shapeOk = !!ev && ev.ok === true
+      && (ev.page == null || Number(ev.page) === Number(p))
+      && typeof ev.extractedText === 'string'
+      && ev.extractionVersion === SOURCE_EXTRACTION_VERSION;
+    if (!shapeOk) { failed.push(p); return; }
+    const conf = Number.isFinite(Number(ev.confidence)) ? Number(ev.confidence) : 1;
+    const hasContent = ev.extractedText.trim().length > 0
+      || (ev.equations && ev.equations.length) || (ev.diagrams && ev.diagrams.length);
+    if (!hasContent && conf < VISION_MIN_CONFIDENCE) { failed.push(p); return; }
+    if (conf < VISION_MIN_CONFIDENCE) lowConfidence.push(p);
+    verified++;
+  });
+  doc.lowConfidencePages = lowConfidence;
+  setSourceStatus(doc, SOURCE_STATUS.VERIFYING, { verifiedPages: verified, failedPages: failed, lowConfidencePages: lowConfidence });
+  return { verified, failed, lowConfidence };
+}
+
+/** PHẦN A6/A11/B: đọc TOÀN BỘ trang PDF scan bằng vision, cache theo trang, retry BOUNDED đúng
+ * trang lỗi, rồi VERIFY. Hàm trả về Promise hoàn chỉnh cho CẢ document — nơi gọi PHẢI await.
+ * Trang đã có evidence hợp lệ (từ cache/IndexedDB) KHÔNG BAO GIỜ được đọc lại (PHẦN H/TEST 6). */
+async function processPdfVisionEvidence(doc) {
+  if (!doc.pageImages || !doc.pageImages.length) { finalizeSourceStatus(doc); return doc.processing; }
+  doc.pageEvidence = doc.pageEvidence || {};
+  setSourceStatus(doc, SOURCE_STATUS.EXTRACTING, { extractionMethod: 'vision', totalPages: doc.pageImages.length });
+  syncVisionProgress(doc);
+
+  const needsWork = (img) => {
+    const ev = doc.pageEvidence[img.page];
+    if (!ev) return true;
+    if (ev.ok && ev.extractionVersion === SOURCE_EXTRACTION_VERSION) return false; // CACHE HIT — không gọi lại
+    return (ev.attempts || 0) < VISION_PAGE_MAX_ATTEMPTS;
+  };
+
+  // Vòng lặp BOUNDED: tối đa VISION_PAGE_MAX_ATTEMPTS lượt, mỗi lượt chỉ xử lý trang còn thiếu.
+  for (let attempt = 0; attempt < VISION_PAGE_MAX_ATTEMPTS; attempt++) {
+    const pending = doc.pageImages.filter(needsWork);
+    if (!pending.length) break;
+    await runVisionBatches(doc, pending);
+  }
+
+  setSourceStatus(doc, SOURCE_STATUS.VERIFYING);
+  verifyVisionEvidence(doc);
+  rebuildChunksFromEvidence(doc);
+  finalizeSourceStatus(doc);
+  persistDocs();
+  renderSources();
+  return doc.processing;
 }
 // =====================================================================================
 // SourceUploadController — PHẦN B/FIX "Thả tài liệu vào đây" không thêm nguồn (audit 52 phần).
@@ -1766,26 +2135,52 @@ function renderImagePreview() {
  * `limit` tham số cũ vẫn được chấp nhận (tương thích ngược) nhưng chỉ còn tác dụng NÂNG trần, không
  * còn tác dụng ép về đúng 1 số nhỏ như trước.
  */
-const SOURCE_COMPLETE_CAP = 400; // trần kỹ thuật (tránh phình payload/crash trình duyệt), không phải "limit nội dung"
-const DEFAULT_RETRIEVAL_CAP = 40; // trước đây mặc định là 4 — nay chỉ là trần AN TOÀN, không phải mức bình thường
+const SOURCE_COMPLETE_CAP = 400;   // trần kỹ thuật (tránh phình payload/crash trình duyệt), không phải "limit nội dung"
+const DEFAULT_RETRIEVAL_CAP = 40;  // trước đây mặc định là 4 — nay chỉ là trần AN TOÀN, không phải mức bình thường
+// PHẦN H/P: trần KÝ TỰ cho toàn bộ contexts 1 request. Đây là thứ giữ token thấp — chúng ta index
+// TOÀN BỘ nguồn 1 lần lúc upload, nhưng MỖI CÂU HỎI chỉ gửi đúng evidence cần thiết.
+const RETRIEVAL_CHAR_BUDGET = 60000;        // ~18-20k token cho câu hỏi thường
+const SOURCE_COMPLETE_CHAR_BUDGET = 120000; // chế độ "toàn bộ tài liệu" được nới, vẫn có trần
+const PER_REQUIREMENT_EVIDENCE_CAP = 8;     // mỗi yêu cầu lấy tối đa ngần này evidence trước khi sang tầng 2
+const NEIGHBOR_RADIUS = 1;                  // tầng 3: lấy chunk liền trước/liền sau
 
 function isFullSourceRequest(query) {
   return /(toàn bộ|tất cả|cả\s+(tài liệu|pdf|file)|hết\s+(tài liệu|pdf|file)|full\s+(source|document|pdf))/i.test(query || '');
 }
 
-// Nhận diện các "yêu cầu" cụ thể trong câu hỏi (mục A4): số bài dạng "1.7", khoảng "1.7 đến 1.11" /
-// "1.7-1.11" / "câu 3 đến câu 8", hoặc liệt kê rời rạc "bài 1.7, 1.8, 1.9".
+/* ---------- PHẦN O: NORMALIZE để hết false-negative ----------
+ * retrieveContext() cũ dùng substring thô trên chuỗi chưa chuẩn hoá: "1,9" không khớp "1.9", dấu
+ * gạch ngang – — − không khớp -, Unicode tổ hợp không khớp Unicode dựng sẵn. Hệ quả: chunk CHỨA
+ * ĐÚNG bài 1.9 bị thua chunk chỉ chứa chữ "bài". Chuẩn hoá 1 lần, dùng chung mọi nơi. */
+function normalizeForMatch(str) {
+  let s = String(str == null ? '' : str);
+  try { s = s.normalize('NFC'); } catch (e) { /* môi trường không hỗ trợ -> dùng nguyên bản */ }
+  return s
+    .toLowerCase()
+    .replace(/[\u2010-\u2015\u2212]/g, '-')   // – — ‒ − ... -> -
+    .replace(/[\u2018\u2019\u201C\u201D]/g, "'")
+    .replace(/(\d)\s*,\s*(\d)/g, '$1.$2')      // "1,9" -> "1.9" (dạng số VN)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function normalizeLabel(label) {
+  return normalizeForMatch(label).replace(/\s+/g, '');
+}
+
+// Nhận diện các "yêu cầu" cụ thể trong câu hỏi (mục A4/PHẦN O): số bài dạng "1.9", khoảng
+// "1.9 đến 1.11" / "1.9-1.11" / "câu 3 đến câu 8", hoặc liệt kê rời rạc "bài 1.7, 1.8, 1.9".
 function extractRequirementLabels(query) {
   const labels = new Set();
-  const rangeRe = /(?:bài|câu|ví dụ|exercise)?\s*(\d+(?:\.\d+)?)\s*(?:-|–|đến|tới)\s*(?:bài|câu)?\s*(\d+(?:\.\d+)?)/gi;
+  const q = normalizeForMatch(query);
+  const rangeRe = /(?:bài|câu|ví dụ|exercise)?\s*(\d+(?:\.\d+)?)\s*(?:-|đến|tới|to)\s*(?:bài|câu)?\s*(\d+(?:\.\d+)?)/gi;
   let m;
-  while ((m = rangeRe.exec(query || ''))) {
+  while ((m = rangeRe.exec(q))) {
     const a = m[1], b = m[2];
     if (a.includes('.') && b.includes('.')) {
-      const [aMaj, aMin] = a.split('.').map(Number);
-      const [bMaj, bMin] = b.split('.').map(Number);
-      if (aMaj === bMaj && Number.isFinite(aMin) && Number.isFinite(bMin) && bMin >= aMin && (bMin - aMin) < 60) {
-        for (let i = aMin; i <= bMin; i++) labels.add(`${aMaj}.${i}`);
+      const aParts = a.split('.').map(Number);
+      const bParts = b.split('.').map(Number);
+      if (aParts[0] === bParts[0] && Number.isFinite(aParts[1]) && Number.isFinite(bParts[1]) && bParts[1] >= aParts[1] && (bParts[1] - aParts[1]) < 60) {
+        for (let i = aParts[1]; i <= bParts[1]; i++) labels.add(`${aParts[0]}.${i}`);
         continue;
       }
     }
@@ -1796,101 +2191,233 @@ function extractRequirementLabels(query) {
     }
     labels.add(a); labels.add(b);
   }
-  const listRe = /(?:bài|câu|ví dụ)\s*(\d+(?:\.\d+)?)/gi;
-  while ((m = listRe.exec(query || ''))) labels.add(m[1]);
+  const listRe = /(?:bài|câu|ví dụ|mục)\s*(\d+(?:\.\d+)?)/gi;
+  while ((m = listRe.exec(q))) labels.add(m[1]);
+  // Nhãn dạng "1.9" đứng một mình (không có từ "bài"/"câu" phía trước) vẫn là yêu cầu rõ ràng.
+  const bareRe = /(?:^|[^\d.])(\d+\.\d+)(?![\d.])/g;
+  while ((m = bareRe.exec(q))) labels.add(m[1]);
   return Array.from(labels);
 }
 
-// SOURCE MANIFEST (mục A3): metadata NHẸ tóm tắt coverage của mọi nguồn active, chèn kèm request để
-// AI/server luôn biết "tài liệu này có bao nhiêu trang/đoạn, đã đọc bao nhiêu %" — tránh model tự
-// suy luận sai "chỉ có vài đoạn = đó là toàn bộ tài liệu". KHÔNG gộp toàn bộ PDF thành 1 chuỗi khổng
-// lồ (mục A3 cấm) — đây chỉ là vài dòng thống kê, nội dung thật vẫn nằm trong các chunk/ảnh riêng.
+/** Regex khớp nhãn yêu cầu trong text đã normalize.
+ * Hai bẫy phải tránh CÙNG LÚC:
+ *   - "1.1" KHÔNG được khớp bên trong "1.10" (khác bài hoàn toàn)  -> chặn chữ số ngay sau nhãn
+ *   - "1.9" PHẢI khớp trong "Bài 1.9. Giải..."                     -> dấu chấm câu ngay sau nhãn là hợp lệ
+ * Lookahead `(?!\.?\d)` giải quyết cả hai: cấm chữ số liền sau và cấm ".<chữ số>", nhưng cho phép
+ * "." đứng cuối câu. Bản cũ dùng `([^\d.]|$)` nên trượt đúng trường hợp phổ biến nhất của đề Việt.
+ */
+function requirementRegex(label) {
+  const esc = normalizeLabel(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^\\d.])${esc}(?!\\.?\\d)`);
+}
+
+/** Gom mọi chunk của các nguồn ĐÃ READY (loại tuyệt đối chunk placeholder — TEST 13). */
+function collectReadyChunks(query) {
+  const qWords = (normalizeForMatch(query).match(/[\p{L}\p{N}.]+/gu) || []).filter((w) => w.length > 2);
+  const readyDocs = (state.docs || []).filter(isSourceReady);
+  const out = [];
+  readyDocs.forEach((doc) => {
+    const ps = ensureSourceProcessingState(doc);
+    (doc.chunks || []).forEach((ch) => {
+      if (ch[SOURCE_PLACEHOLDER_FLAG]) return;                    // KHÔNG BAO GIỜ gửi placeholder cho AI
+      if (ch.extractionStatus && ch.extractionStatus !== 'ok') return; // chunk lỗi -> loại
+      const norm = normalizeForMatch(ch.text);
+      let score = 0;
+      qWords.forEach((w) => { if (norm.includes(w)) score += 1; });
+      out.push({
+        doc: doc.name, id: ch.id, text: ch.text, garbled: !!ch.garbled, score,
+        page: ch.page != null ? ch.page : null,
+        startPage: ch.startPage != null ? ch.startPage : null,
+        endPage: ch.endPage != null ? ch.endPage : null,
+        chunkIndex: ch.chunkIndex || null, totalChunks: ch.totalChunks || null,
+        sourceId: doc.id,
+        evidenceId: ch.evidenceId || `${doc.id}:c${ch.id}`,
+        extractionMethod: ch.extractionMethod || ps.extractionMethod || 'text',
+        extractionStatus: 'ok',
+        _norm: norm
+      });
+    });
+  });
+  return out;
+}
+
+function stripInternal(c) {
+  const out = Object.assign({}, c);
+  delete out._norm;
+  delete out.score;
+  return out;
+}
+
+/** PHẦN P: khi vượt trần ký tự, KHÔNG cắt bớt evidence (mất yêu cầu) mà rút gọn NỘI DUNG từng
+ * evidence thành bản tóm gọn có đánh dấu truncated — server/AI vẫn thấy đủ trang/đủ yêu cầu. */
+function fitToCharBudget(list, budget) {
+  const total = list.reduce((a, c) => a + c.text.length, 0);
+  if (total <= budget || !list.length) return list.map(stripInternal);
+  const per = Math.max(240, Math.floor(budget / list.length));
+  return list.map((c) => {
+    const out = stripInternal(c);
+    if (out.text.length > per) {
+      out.text = out.text.slice(0, per) + '…';
+      out.truncated = true; // validators/sourceCoverage sẽ coi đây là EXCERPT, không kết luận "nguồn không có"
+    }
+    return out;
+  });
+}
+
+/* ================= Truy hồi ngữ cảnh từ nguồn — RETRIEVAL 3 TẦNG (PHẦN G/O) =================
+ * TẦNG 1 — Exact requirement retrieval: mọi nhãn yêu cầu ("bài 1.9", "câu 3", "trang 72") PHẢI có
+ *          evidence RIÊNG của nó. Đây là tầng ưu tiên cao nhất và luôn được xếp LÊN ĐẦU.
+ * TẦNG 2 — semantic/keyword relevance cho phần còn lại của câu hỏi.
+ * TẦNG 3 — neighbor context: chunk liền trước/liền sau các evidence tầng 1 (đề bài thường nằm vắt
+ *          qua ranh giới chunk/trang).
+ * Không có top-k mù (`slice(0,4)`), cũng KHÔNG gửi cả tài liệu mỗi lượt — trần là ngân sách ký tự.
+ */
+function retrieveContext(query, limit) {
+  const all = collectReadyChunks(query);
+  if (!all.length) return [];
+
+  // Chế độ SOURCE-COMPLETE: người dùng xin "toàn bộ tài liệu" -> giữ ĐỦ số evidence (không bỏ sót
+  // phần nào), nội dung được rút gọn theo ngân sách nếu quá lớn (PHẦN P).
+  if (isFullSourceRequest(query)) {
+    return fitToCharBudget(all.slice(0, SOURCE_COMPLETE_CAP), SOURCE_COMPLETE_CHAR_BUDGET);
+  }
+
+  const picked = new Map();
+  const keyOf = (c) => `${c.sourceId}:${c.id}`;
+  const add = (c, tier, requirement) => {
+    const k = keyOf(c);
+    if (picked.has(k)) return;
+    picked.set(k, Object.assign({}, c, { retrievalTier: tier, requirement: requirement || null }));
+  };
+
+  // ---------- TẦNG 1: exact requirement + trang được chỉ đích danh ----------
+  const requirementLabels = extractRequirementLabels(query);
+  const pageHints = Array.from(extractPageHints(query));
+  const tier1Keys = [];
+  requirementLabels.forEach((label) => {
+    const re = requirementRegex(label);
+    let taken = 0;
+    all.forEach((c) => {
+      if (taken >= PER_REQUIREMENT_EVIDENCE_CAP) return;
+      if (!re.test(c._norm)) return;
+      add(c, 1, label); tier1Keys.push(keyOf(c)); taken++;
+    });
+  });
+  pageHints.forEach((p) => {
+    all.forEach((c) => {
+      if (c.page != null && Number(c.page) === Number(p)) { add(c, 1, `trang ${p}`); tier1Keys.push(keyOf(c)); }
+    });
+  });
+
+  // ---------- TẦNG 3 (tính trước, chèn sau tầng 2): neighbor của evidence tầng 1 ----------
+  const neighbors = [];
+  const byKey = new Map(all.map((c) => [keyOf(c), c]));
+  tier1Keys.forEach((k) => {
+    const c = byKey.get(k);
+    if (!c || c.chunkIndex == null) return;
+    for (let d = 1; d <= NEIGHBOR_RADIUS; d++) {
+      [c.chunkIndex - d, c.chunkIndex + d].forEach((idx) => {
+        const n = all.find((x) => x.sourceId === c.sourceId && x.chunkIndex === idx);
+        if (n) neighbors.push(n);
+      });
+    }
+  });
+
+  // ---------- TẦNG 2: semantic/keyword ----------
+  const scored = all.filter((c) => c.score > 0).sort((a, b) => b.score - a.score);
+  // Không có đoạn nào khớp từ khoá (rất dễ xảy ra với so khớp từ khoá đơn giản) -> vẫn đưa evidence
+  // để AI tự đánh giá, thay vì trả [] khiến AI kết luận "không có nguồn".
+  const tier2 = scored.length ? scored : all;
+  const cap = Number.isFinite(limit) && limit > DEFAULT_RETRIEVAL_CAP ? limit : DEFAULT_RETRIEVAL_CAP;
+  const tier2Cap = Math.max(cap, picked.size + cap);
+  tier2.forEach((c) => { if (picked.size < tier2Cap) add(c, 2, null); });
+  neighbors.forEach((c) => { if (picked.size < SOURCE_COMPLETE_CAP) add(c, 3, null); });
+
+  // Tầng 1 luôn đứng trước (PHẦN K: current query/source evidence ưu tiên tuyệt đối).
+  const ordered = Array.from(picked.values()).sort((a, b) => a.retrievalTier - b.retrievalTier);
+  return fitToCharBudget(ordered.slice(0, SOURCE_COMPLETE_CAP), RETRIEVAL_CHAR_BUDGET);
+}
+
+/* ---------- SOURCE MANIFEST (PHẦN E) — CHỈ SỐ LIỆU THẬT, KHÔNG "coverage 100%" hardcode ----------
+ * Bản cũ in thẳng chuỗi "coverage 100% (toàn bộ nội dung đã parse...)" cho MỌI nguồn text, và với
+ * PDF scan thì in số RENDER như thể là số ĐÃ ĐỌC. Đó là lời nói dối đi thẳng vào system prompt.
+ * NAY mọi con số lấy từ doc.processing và trạng thái in ra đúng như máy trạng thái đang giữ. */
 function buildSourceManifest() {
-  const activeDocs = state.docs.filter((d) => !d.status || d.status === 'ready');
-  if (!activeDocs.length) return '';
+  const docs = state.docs || [];
+  if (!docs.length) return '';
   const lines = ['SOURCE MANIFEST'];
-  activeDocs.forEach((d) => {
-    if (d.sourceType === 'image-pdf' && d.pageCoverage) {
-      const pc = d.pageCoverage;
-      lines.push(`- ${d.name}: PDF scan, ${pc.totalPages} trang, đã xử lý ${pc.renderedPages}/${pc.totalPages} (${pc.coveragePercent}%)${pc.failedPages.length ? `, lỗi trang: ${pc.failedPages.join(',')}` : ''}`);
+  docs.forEach((d) => {
+    const ps = ensureSourceProcessingState(d);
+    const doc = d;
+    if (ps.extractionMethod === 'vision') {
+      lines.push(`- ${d.name}`);
+      lines.push(`  type: pdf-image  sourceId: ${d.id}`);
+      lines.push(`  pages: ${ps.totalPages}`);
+      lines.push(`  rendered: ${ps.renderedPages}/${ps.totalPages}`);
+      lines.push(`  visionExtracted: ${ps.extractedPages}/${ps.totalPages}`);
+      lines.push(`  verified: ${ps.verifiedPages}/${ps.totalPages}`);
+      if (ps.failedPages.length) lines.push(`  failedPages: ${ps.failedPages.slice(0, 20).join(',')}`);
+      // Trang đọc được nhưng model tự khai độ tin cậy thấp: vẫn dùng, nhưng nói rõ để model biết
+      // phần nào cần đối chiếu kỹ thay vì tin tuyệt đối.
+      if (doc && doc.lowConfidencePages && doc.lowConfidencePages.length) {
+        lines.push(`  lowConfidencePages: ${doc.lowConfidencePages.slice(0, 20).join(',')}`);
+      }
+      lines.push(`  status: ${ps.status}`);
       return;
     }
-    const pages = d.chunks.map((c) => c.page).filter((p) => p != null);
-    const totalPages = pages.length ? Math.max(...pages) : (d.pageCoverage ? d.pageCoverage.totalPages : null);
-    lines.push(`- ${d.name}: ${d.chunks.length} đoạn${totalPages ? `, ${totalPages} trang` : ''}, coverage 100% (toàn bộ nội dung đã parse, có thể truy hồi bất kỳ đoạn nào)`);
+    lines.push(`- ${d.name}`);
+    lines.push(`  type: ${d.ext === 'pdf' ? 'pdf-text' : (d.ext || 'text')}  sourceId: ${d.id}`);
+    lines.push(`  pages: ${ps.totalPages}`);
+    lines.push(`  parsed: ${ps.parsedPages}/${ps.totalPages}`);
+    lines.push(`  verified: ${ps.verifiedPages}/${ps.totalPages}`);
+    lines.push(`  chunks: ${(d.chunks || []).filter((c) => !c[SOURCE_PLACEHOLDER_FLAG]).length}`);
+    if (ps.failedPages.length) lines.push(`  failedPages: ${ps.failedPages.slice(0, 20).join(',')}`);
+    lines.push(`  status: ${ps.status}`);
   });
   return lines.join('\n');
 }
 
-function retrieveContext(query, limit) {
-  const qWords = query.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
-  // Mọi nguồn đã tải lên đều tự động tham gia truy hồi — không lọc theo cờ "included" nữa (đã bỏ
-  // cơ chế tick chọn thủ công); muốn loại 1 nguồn thì xóa hẳn nó khỏi danh sách.
-  // Chỉ dùng doc đã đọc XONG THẬT ('ready') — bỏ qua doc còn 'loading' (chunk vẫn là placeholder "⏳
-  // Đang đọc…") hoặc 'error' (chunk là thông báo lỗi), nếu không 2 loại chunk này có thể bị gửi thẳng
-  // cho AI như thể là nội dung nguồn thật (xem comment FIX ở handleFiles()). Doc cũ tải từ trước khi
-  // có field `status` (khôi phục từ IndexedDB) không có `status` — coi như 'ready' để không loại oan.
-  // Doc 'image-pdf' (PDF chỉ ảnh, không có text thật) cũng bị loại khỏi truy hồi TEXT ở đây — nội
-  // dung của nó được gửi cho AI qua ảnh (xem collectSourceImages()), không qua trích dẫn [n] theo
-  // đoạn text như các nguồn khác, nên không nên lọt vào danh sách "contexts" (chunk của nó chỉ là 1
-  // câu ghi chú, không phải nội dung thật, đưa vào contexts sẽ khiến model trích dẫn nhầm câu ghi chú).
-  // PHẦN A11: TRƯỚC đây loại hẳn doc image-pdf khỏi retrieval (chỉ dùng collectSourceImages() gửi
-  // ảnh thô). NAY nếu processPdfVisionEvidence() đã trích xuất xong 1 số trang, doc.chunks của
-  // image-pdf chứa TEXT thật (evidence) — cho vào chung pipeline retrieval như PDF có text layer,
-  // để trả lời dùng evidence CÓ CITE TRANG thay vì luôn phải gửi lại ảnh gốc (giảm token request).
-  const activeDocs = state.docs.filter((doc) => !doc.status || doc.status === 'ready');
-  if (activeDocs.length === 0) return [];
-  const allChunks = [];
-  activeDocs.forEach((doc) => {
-    doc.chunks.forEach((ch) => {
-      const lower = ch.text.toLowerCase();
-      let score = 0;
-      qWords.forEach((w) => { if (w.length > 2 && lower.includes(w)) score++; });
-      allChunks.push({
-        doc: doc.name, id: ch.id, text: ch.text, garbled: !!ch.garbled, score,
-        page: ch.page != null ? ch.page : null, startPage: ch.startPage != null ? ch.startPage : null,
-        endPage: ch.endPage != null ? ch.endPage : null, chunkIndex: ch.chunkIndex || null,
-        totalChunks: ch.totalChunks || null, sourceId: doc.id
-      });
-    });
-  });
-  if (!allChunks.length) return [];
+/* ---------- PHẦN K/L: CHỌN HISTORY THEO MỨC LIÊN QUAN, KHÔNG NHỒI 20 LƯỢT MỖI REQUEST ----------
+ * Mỗi câu hỏi là 1 TASK ĐỘC LẬP. Query hiện tại + evidence nguồn hiện tại luôn thắng history cũ.
+ * Chỉ khi câu hỏi THẬT SỰ là lượt nối tiếp ("tiếp tục", "bước tiếp theo", "câu trên"...) thì history
+ * mới được giữ mạnh hơn. */
+const FOLLOW_UP_RE = /(tiếp tục|tiếp theo|nói tiếp|vừa rồi|vừa xong|câu (trên|vừa)|bài (trên|vừa)|phần (trên|vừa)|như trên|ở trên|bước (tiếp|sau)|giải thích (thêm|rõ)|chi tiết hơn|rõ hơn|làm rõ|continue|go on|previous|above)/i;
+const MAX_FOLLOW_UP_MESSAGES = 8;       // ~4 lượt hỏi-đáp
+const MAX_INDEPENDENT_MESSAGES = 2;     // ~1 lượt, và chỉ khi thật sự liên quan
 
-  // Chế độ 1 — SOURCE-COMPLETE (mục A1 bước 4/5): người dùng xin "toàn bộ tài liệu" -> trả về TẤT
-  // CẢ chunk, không được coi chunk đầu tiên là đại diện cho toàn bộ PDF.
-  if (isFullSourceRequest(query)) return allChunks.slice(0, SOURCE_COMPLETE_CAP);
+function isFollowUpQuery(query) {
+  const q = normalizeForMatch(query);
+  if (!q) return true; // không có chữ (chỉ ảnh) -> giữ ngữ cảnh gần nhất cho an toàn
+  return FOLLOW_UP_RE.test(q) || q.length <= 12;
+}
 
-  allChunks.sort((a, b) => b.score - a.score);
-  const matched = allChunks.filter((c) => c.score > 0);
-  // TRƯỚC ĐÂY: nếu không đoạn nào khớp từ khóa theo kiểu so khớp chuỗi thô (score=0 hết — rất dễ
-  // xảy ra vì đây chỉ là so khớp từ khóa đơn giản, không phải embedding), hàm trả về [] khiến
-  // promptBuilder coi như "không có nguồn liên quan" và để AI tự trả lời bằng kiến thức chung —
-  // dù người dùng RÕ RÀNG đã tải nguồn lên. Đây là nguyên nhân chính của lỗi "hỏi trích nguồn
-  // nhưng AI trả lời không dựa trên nguồn". Nay: nếu có nguồn đã tải lên mà không đoạn nào khớp
-  // từ khóa, vẫn gửi kèm các đoạn để AI tự đánh giá mức độ liên quan (system prompt đã yêu cầu AI
-  // chỉ chèn [n] khi thực sự liên quan, nên không lo AI trích dẫn bừa).
-  const base = matched.length ? matched : allChunks;
+function keywordOverlapRatio(a, b) {
+  const wordsOf = (s) => new Set((normalizeForMatch(s).match(/[\p{L}\p{N}.]+/gu) || []).filter((w) => w.length > 2));
+  const A = wordsOf(a), B = wordsOf(b);
+  if (!A.size) return 0;
+  let hit = 0;
+  A.forEach((w) => { if (B.has(w)) hit++; });
+  return hit / A.size;
+}
 
-  // Chế độ 2 — REQUIREMENT COVERAGE (mục A4): nhiều yêu cầu cụ thể trong 1 câu hỏi (vd "giải bài 1.7
-  // đến 1.11") -> đảm bảo TỪNG yêu cầu có chunk chứa đúng nhãn của nó, không chỉ "4 đoạn điểm cao
-  // nhất rồi dừng" (điều này khiến bài ở trang sau — điểm khớp từ khóa thấp hơn — bị bỏ sót).
-  const requirementLabels = extractRequirementLabels(query);
-  if (requirementLabels.length >= 2) {
-    const picked = new Map();
-    requirementLabels.forEach((label) => {
-      const esc = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const re = new RegExp(`(^|[^\\d.])${esc}([^\\d.]|$)`);
-      allChunks.forEach((c) => { if (re.test(c.text)) picked.set(`${c.sourceId}:${c.id}`, c); });
-    });
-    // Bổ sung thêm các đoạn khớp từ khóa chung quanh các bài (giữ ngữ cảnh), tới trần an toàn.
-    base.forEach((c) => { if (picked.size < SOURCE_COMPLETE_CAP) picked.set(`${c.sourceId}:${c.id}`, c); });
-    return Array.from(picked.values()).slice(0, SOURCE_COMPLETE_CAP);
-  }
+/* PHẦN L: TRẦN BỘ NHỚ HISTORY PHÍA CLIENT.
+ * Trước đây 5 chỗ khác nhau cùng viết `if (state.history.length > 20) ... slice(-20)` — 5 bản sao
+ * của cùng một quyết định, sửa 1 chỗ là lệch 4 chỗ còn lại. Gom về đúng 1 hàm + 1 hằng số.
+ * Con số hạ từ 20 xuống 12 tin nhắn (~6 lượt): thứ THỰC SỰ được gửi đi do selectRelevantHistory()
+ * quyết định (query độc lập -> 0 lượt), nên giữ 20 lượt trong RAM chỉ là rác không ai dùng. */
+const HISTORY_MEMORY_CAP = 12;
+function trimHistoryMemory() {
+  if (state.history.length > HISTORY_MEMORY_CAP) state.history = state.history.slice(-HISTORY_MEMORY_CAP);
+}
 
-  // Chế độ 3 — mặc định: `limit` cũ (nếu nơi gọi còn truyền, tương thích ngược) chỉ được phép NÂNG
-  // trần, không còn quyền ép cắt xuống 1 số nhỏ như 4 nữa.
-  const cap = Number.isFinite(limit) && limit > DEFAULT_RETRIEVAL_CAP ? limit : DEFAULT_RETRIEVAL_CAP;
-  return base.slice(0, cap);
+function selectRelevantHistory(query, history) {
+  const h = Array.isArray(history) ? history : [];
+  if (!h.length) return [];
+  if (isFollowUpQuery(query)) return h.slice(-MAX_FOLLOW_UP_MESSAGES);
+  const recent = h.slice(-MAX_INDEPENDENT_MESSAGES);
+  const related = recent.some((m) => keywordOverlapRatio(query, m.content) >= 0.3);
+  // Query độc lập và KHÔNG liên quan lượt trước -> bỏ hẳn history (PHẦN K/TEST 9/TEST 16).
+  return related ? recent : [];
 }
 function highlightSnippet(text, query) {
   const qWords = (query.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter((w) => w.length > 2);
@@ -2463,7 +2990,7 @@ async function loadConversation(id, silent) {
     if (msg.role === 'user') state.history.push({ role: 'user', content: msg.text || '[Người dùng đã gửi ảnh đề bài để giải]' });
     else state.history.push({ role: 'assistant', content: msg.detail || msg.approach || '' });
   });
-  if (state.history.length > 20) state.history = state.history.slice(-20);
+  trimHistoryMemory();
   el('chatTitle').textContent = conv.title;
   lsSet(LS_KEYS.currentConv, id);
   updateChatMeta();
@@ -3655,7 +4182,18 @@ function getUsedContexts(contexts, answerText, citationMap) {
       .map((entry) => {
         const idx = Array.isArray(entry.originalIndexes) ? entry.originalIndexes[0] : undefined;
         const c = (contexts || [])[idx];
-        return c ? { c, num: entry.citeNo } : null;
+        if (!c) return null;
+        // PHẦN F: provenance do SERVER gửi về (doc/page/evidenceId) thắng mọi suy luận phía client —
+        // nếu server nói [5] là trang 72 thì client hiển thị đúng trang 72, không đoán lại theo mảng.
+        const merged = Object.assign({}, c, {
+          doc: entry.doc || c.doc,
+          page: entry.page != null ? entry.page : c.page,
+          startPage: entry.startPage != null ? entry.startPage : c.startPage,
+          endPage: entry.endPage != null ? entry.endPage : c.endPage,
+          evidenceId: entry.evidenceId || c.evidenceId || null,
+          extractionMethod: entry.extractionMethod || c.extractionMethod || null
+        });
+        return { c: merged, num: entry.citeNo };
       })
       .filter(Boolean);
   }
@@ -3976,7 +4514,7 @@ function finalizePendingTurnIfAny() {
   if (!pendingTurn) return;
   state.history.push({ role: 'user', content: pendingTurn.query || '[Người dùng đã gửi ảnh đề bài để giải]' });
   state.history.push({ role: 'assistant', content: pendingTurn.approachRaw || '' });
-  if (state.history.length > 20) state.history = state.history.slice(-20);
+  trimHistoryMemory();
   pendingTurn = null;
 }
 
@@ -4061,7 +4599,7 @@ async function sendMessage() {
     return;
   }
 
-  await waitForPendingDocs(); // fix: đừng lấy nguồn khi file vừa upload còn đang đọc dở
+  await waitForAllSourceProcessing(); // PHẦN B: chờ TRỌN vòng đời nguồn (parse+rasterize+vision+verify) trước khi dựng request
   const contexts = retrieveContext(query);
   // imageId gắn thêm vào chính aiMsgObj (không chỉ userMsgObj) — để fetchDetail()/renderStoredAiMessage()
   // sau F5 tra được ảnh cần khôi phục ngay từ message AI mà không phải dò ngược message user liền trước.
@@ -4097,8 +4635,13 @@ async function sendMessage() {
       query, deepThinking: state.deepThinking, crossCheck: state.crossCheck, stage: 'approach',
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
       sourceImages: collectSourceImages(query),
-      rules: state.rules, contexts, settings: settingsSnapshot, history: state.history,
-      sourceManifest: buildSourceManifest()
+      rules: state.rules, contexts, settings: settingsSnapshot,
+      // PHẦN K/L: chỉ gửi history THỰC SỰ liên quan (query độc lập -> gần như 0 lượt), và báo số
+      // lượt gốc để server log được historyTurnsRaw vs historyTurnsSent (PHẦN S).
+      history: selectRelevantHistory(query, state.history),
+      historyTurnsRaw: state.history.length,
+      sourceManifest: buildSourceManifest(),
+      sourceStatus: buildSourceStatusPayload()
     }, {
       onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
@@ -4230,8 +4773,11 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
       query: msgObj.query, deepThinking, crossCheck, stage: 'detail', approachText: msgObj.approach,
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
       sourceImages: collectSourceImages(msgObj.query),
-      rules: state.rules, contexts: msgObj.contexts, settings: settingsSnapshot, history: state.history,
-      sourceManifest: buildSourceManifest()
+      rules: state.rules, contexts: msgObj.contexts, settings: settingsSnapshot,
+      history: selectRelevantHistory(msgObj.query, state.history),
+      historyTurnsRaw: state.history.length,
+      sourceManifest: buildSourceManifest(),
+      sourceStatus: buildSourceStatusPayload()
     }, {
       onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
@@ -4273,7 +4819,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
 
     state.history.push({ role: 'user', content: msgObj.query || '[Người dùng đã gửi ảnh đề bài để giải]' });
     state.history.push({ role: 'assistant', content: raw });
-    if (state.history.length > 20) state.history = state.history.slice(-20);
+    trimHistoryMemory();
     if (pendingTurn && pendingTurn.msgObj === msgObj) pendingTurn = null;
 
     // FIX PHẦN G: dùng ownerConv (chốt từ đầu hàm) thay vì currentConversation() đọc lại sau await.
@@ -4310,7 +4856,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
  * trả lời đã giải).
  */
 async function handleOutlineOnlyTurn(query, conv) {
-  await waitForPendingDocs(); // fix: đừng lấy nguồn khi file vừa upload còn đang đọc dở
+  await waitForAllSourceProcessing(); // PHẦN B: chờ TRỌN vòng đời nguồn (parse+rasterize+vision+verify) trước khi dựng request
   const contexts = retrieveContext(query);
   const aiMsgObj = { id: uid(), role: 'ai', query, approach: '', detail: null, contexts: [], crossChecked: false, outlineSpec: null };
   const aiRow = addAiMsg('Đề cương');
@@ -4335,7 +4881,7 @@ async function handleOutlineOnlyTurn(query, conv) {
 
     state.history.push({ role: 'user', content: query });
     state.history.push({ role: 'assistant', content: aiMsgObj.approach });
-    if (state.history.length > 20) state.history = state.history.slice(-20);
+    trimHistoryMemory();
   } catch (e) {
     const msg = (e && e.message) || 'Không soạn được đề cương, vui lòng thử lại.';
     contentEl.innerHTML = `
@@ -5389,7 +5935,7 @@ function isMindmapRequest(text) {
 }
 
 async function handleMindmapOnlyTurn(query, conv) {
-  await waitForPendingDocs(); // fix: đừng lấy nguồn khi file vừa upload còn đang đọc dở
+  await waitForAllSourceProcessing(); // PHẦN B: chờ TRỌN vòng đời nguồn (parse+rasterize+vision+verify) trước khi dựng request
   const contexts = retrieveContext(query);
   // mindmapOnly: true đánh dấu đây là tin nhắn CHỈ có mindmap (không có Hướng giải/Lời giải chi
   // tiết riêng) — dùng để renderStoredAiMessage() phân biệt với trường hợp mindmap được vẽ THÊM vào
@@ -5421,7 +5967,7 @@ async function handleMindmapOnlyTurn(query, conv) {
 
     state.history.push({ role: 'user', content: query });
     state.history.push({ role: 'assistant', content: aiMsgObj.approach });
-    if (state.history.length > 20) state.history = state.history.slice(-20);
+    trimHistoryMemory();
   } catch (e) {
     const msg = (e && e.message) || 'Không tạo được mindmap, vui lòng thử lại.';
     const escaped = escapeHtml(msg).replace(/\n/g, '<br>');
