@@ -262,6 +262,18 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 :root{--empty-ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/%3E%3Cpath d='M14 2v6h6'/%3E%3Cline x1='9' y1='13' x2='15' y2='13'/%3E%3Cline x1='9' y1='17' x2='13' y2='17'/%3E%3C/svg%3E");}
 .side-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;min-height:0;}
 
+/* ---------- Lịch sử: chỉ hiện ~6 item đầu trong viewport, phần còn lại cuộn xuống ----------
+   Dùng chung kiến trúc .side-list (flex:1 + overflow-y:auto) đã có ở trên — KHÔNG tạo hệ scroll
+   thứ 2. Chỉ thêm max-height RIÊNG cho #historyList (không đụng #sourceList/#ruleList/#formulaList
+   vốn cũng dùng class .side-list) để panel này luôn dừng ở khoảng chiều cao của 6 thẻ, bất kể màn
+   hình cao bao nhiêu; item thứ 7 trở đi vẫn nằm nguyên trong DOM (renderHistoryList() không slice
+   dữ liệu), chỉ cần cuộn để thấy. --hist-card-h ước lượng chiều cao thực tế 1 .hist-card (padding
+   9px trên/dưới + 2 dòng text title/meta) — nếu font-size đổi sau này, chỉnh lại biến này. */
+#historyList{
+  --hist-card-h: 52px;
+  max-height: calc(var(--hist-card-h) * 6 + 6px * 5);
+}
+
 /* ---------- Lịch sử trò chuyện ---------- */
 .hist-card{
   display:flex;align-items:center;gap:9px;background:transparent;border:1px solid transparent;border-radius:var(--r-md);
@@ -638,16 +650,16 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .stream-text.typing-cursor::after{content:'▍';display:inline-block;margin-left:1px;color:var(--primary);animation:blink 1s step-start infinite;}
 @keyframes blink{50%{opacity:0;}}
 
-/* Tăng padding + cho phép panel rộng hơn (khớp viewBox 640x460 mới của drawShape/drawPlot, trước
-   đây panel bó sát 420px khiến hình luôn bị "ép nhỏ" dù màn hình còn nhiều chỗ trống). Nền dùng
-   var(--paper-3) (trắng tinh ở theme sáng / đậm hơn paper-2 ở theme tối) để hình geometry có nền
-   "tờ giấy" sạch, tương phản tốt với nét vẽ thay vì nền xám be trước đây. */
+/* Khung cho khối vẽ nhúng trong câu trả lời. Sau đợt chuyển sang AI image-first, khối này CHỈ còn
+   phục vụ: (a) scene 3D tương tác Three.js (.draw-wrap-3d), (b) ghi chú cho khối ```plot/```shape
+   kiểu cũ (.draw-wrap-legacy). Hình minh hoạ 2D tĩnh nay là ảnh AI, nằm trong .visual-card. */
 .draw-wrap{margin:18px 0;border:1px solid var(--rule);border-radius:var(--r-md);background:var(--paper-3);padding:18px;overflow-x:auto;box-shadow:0 1px 2px rgba(0,0,0,.04);}
-.draw-wrap svg{display:block;margin:0 auto;max-width:100%;height:auto;}
-.draw-wrap .draw-legend{margin-top:11px;font-size:12.5px;color:var(--text);text-align:center;}
+.draw-wrap-legacy{padding:12px;}
+.draw-legacy-note{margin:0;font-size:12.5px;color:var(--muted);}
 .draw-wrap-3d{padding:12px;text-align:center;}
 .draw-wrap-3d canvas{border-radius:var(--r-sm);}
-.draw-wrap-3d .draw-legend{font-size:11px;color:var(--muted);}
+/* solid3d.js gắn .draw-legend cho dòng chú thích dưới canvas 3D (Three.js) — giữ lại. */
+.draw-wrap-3d .draw-legend{margin-top:9px;font-size:11px;color:var(--muted);text-align:center;}
 /* PHẦN P — scene3d.js: toolbar tương tác 0-AI-request (orbit/zoom/pan/axes/grid/fit/fullscreen) */
 .scene3d-wrap{padding:10px;}
 .scene3d-toolbar{display:flex;gap:6px;justify-content:flex-end;margin-bottom:6px;flex-wrap:wrap;}
@@ -860,7 +872,6 @@ body.mm-lock-scroll{overflow:hidden;}
 .tool-btn.has-image{border-color:var(--primary);background:var(--highlight);}
 
 /* MỤC 2.7: nhãn "sơ đồ thay thế" trên tiêu đề card hình. */
-.visual-fallback-badge{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:999px;border:1px solid var(--rule);font-size:11px;font-weight:500;opacity:.72;vertical-align:middle;white-space:nowrap;}
 
 /* ============================================================================================
    TỐI ƯU ĐIỆN THOẠI cho thanh nhập + hình minh hoạ
@@ -900,7 +911,6 @@ body.mm-lock-scroll{overflow:hidden;}
   .visual-figure{margin-left:0;margin-right:0;}
   .visual-card-image img{max-height:62vh;object-fit:contain;}
   .visual-card-head{font-size:13.5px;line-height:1.4;}
-  .visual-fallback-badge{margin-left:0;margin-top:4px;display:block;width:fit-content;}
 }
 
 /* ---------- PHẦN D/18: nút microphone (Voice Input) ---------- */
@@ -1333,8 +1343,7 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
   border-radius: 12px;
   background: var(--card, transparent);
 }
-.visual-figure .visual-svg { color: var(--fg); line-height: 0; }
-.visual-figure .visual-svg svg { max-width: 100%; height: auto; }
+.visual-error-hint { font-size: 12.5px; color: var(--muted); margin: 4px 0 8px; }
 
 /* ---------- MỤC 1.4: card hình minh hoạ (nền riêng, bo lớn, shadow nhẹ) ---------- */
 /* Ảnh KHÔNG được chiếm hết khung chat: max-height cố định + object-fit: contain, muốn xem to thì

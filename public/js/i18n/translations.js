@@ -123,8 +123,8 @@ window.TRANSLATIONS = {
     // ---- composer ----
     'input.placeholder': 'Nhập câu hỏi, dán đề bài, dán ảnh (Ctrl+V), kéo-thả ảnh hoặc tải ảnh từ máy…',
     'composer.hint': 'Enter để gửi · Shift+Enter xuống dòng · AI sẽ đưa hướng giải trước, bấm "Xem lời giải chi tiết" khi cần',
-    'chat.visualFallbackBadge': 'sơ đồ thay thế',
-    'chat.visualFallbackHint': 'Chưa tạo được ảnh AI cho phần này nên hệ thống dựng sơ đồ thay thế từ chính nội dung lời giải.',
+    'chat.visualNoProvider': 'Chưa cấu hình nhà cung cấp ảnh AI — kiểm tra cấu hình API hình ảnh rồi bấm "Thử tạo lại".',
+    'error.legacyDrawBlock': '⚠️ Khối hình 2D kiểu cũ không còn được vẽ tại chỗ. Hình minh hoạ tĩnh nay do AI tạo và hiển thị trong thẻ hình bên dưới.',
     // ---- PHẦN D/F: nhập bằng giọng nói ----
     'voice.micTitle': 'Nhập câu hỏi bằng giọng nói',
     'voice.micAria': 'Nhập câu hỏi bằng giọng nói',
@@ -381,8 +381,8 @@ window.TRANSLATIONS = {
 
     'input.placeholder': 'Type a question, paste a problem, paste an image (Ctrl+V), drag & drop or upload an image…',
     'composer.hint': 'Enter to send · Shift+Enter for a new line · The AI gives an approach first — click "View full solution" when you need it',
-    'chat.visualFallbackBadge': 'fallback diagram',
-    'chat.visualFallbackHint': 'AI image generation was unavailable, so this diagram was built from the solution text instead.',
+    'chat.visualNoProvider': 'No AI image provider is configured — check the image API settings, then click "Try again".',
+    'error.legacyDrawBlock': '⚠️ Legacy 2D drawing blocks are no longer rendered inline. Static illustrations are now AI-generated and shown in the image card below.',
     // ---- Voice input ----
     'voice.micTitle': 'Ask by voice',
     'voice.micAria': 'Ask by voice',

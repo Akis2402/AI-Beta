@@ -103,6 +103,9 @@ const state = {
   activeFlashcardSet: null,
   flashcardLibraryPage: 0
 };
+// Expose cho devtools/console và cho test harness (vm sandbox không thấy được top-level const nếu
+// không gắn vào global) — không đổi hành vi runtime, chỉ thêm 1 tham chiếu debug.
+window.state = state;
 
 let pendingTurn = null; // lượt hỏi đang chờ (đã có "Hướng giải", chưa bấm "Xem chi tiết")
 // PHẦN E/F/G (thay thế "chatAbortController" toàn cục cũ — đúng anti-pattern mà PHẦN F liệt kê):
@@ -1271,24 +1274,149 @@ async function processPdfVisionEvidence(doc) {
   persistDocs();
   renderSources();
 }
-// PHẦN B1: bấm "+ Thêm nguồn" giờ MỞ PANEL (upload + Nguồn gần đây) thay vì gọi thẳng
-// fileInput.click() như trước — dropHint (khu vực kéo-thả trong sidebar) giữ nguyên hành vi cũ
-// (mục B12: không được làm hỏng drag/drop hiện có).
+// =====================================================================================
+// SourceUploadController — PHẦN B/FIX "Thả tài liệu vào đây" không thêm nguồn (audit 52 phần).
+//
+// CÁC ĐIỂM RỦI RO CỤ THỂ đã xác định trong event chain cũ (từng nơi tự xử lý khác nhau, không có
+// pipeline chung — đúng vấn đề nêu ở PHẦN 1/2):
+//   el('dropHint').onclick = () => el('fileInput').click();
+//   el('fileInput').onchange = (e) => { handleFiles(e.target.files); closeAddSourcePanel(); e.target.value = ''; };
+//   1) Chỉ gọi input.click() trần — một số trình duyệt/mobile không mở picker đáng tin cậy khi
+//      input ẩn (display:none) hoặc gọi gián tiếp qua nhiều lớp handler (PHẦN 3 yêu cầu fallback
+//      showPicker()).
+//   2) closeAddSourcePanel() chạy VÔ ĐIỀU KIỆN ngay sau handleFiles() — không hề biết handleFiles
+//      có thật sự nhận được file hợp lệ hay không (handleFiles là async, không được await). Panel
+//      đóng dù file bị lỗi, khiến lỗi "biến mất" khỏi tầm nhìn user (PHẦN 6/41: không được silent
+//      failure).
+//   3) fileInput không có validate: bất kỳ phần mở rộng nào (kể cả .exe) đều bị đẩy thẳng vào
+//      handleFiles() → tạo doc, thử parseTxt() trên file nhị phân, fail với lỗi khó hiểu — mà user
+//      hoàn toàn không được thông báo lý do (không đúng PHẦN 40/41: phải phân loại lỗi + báo rõ).
+//   4) e.target.value = '' được set NGAY sau lời gọi handleFiles() không-await — rủi ro thật với
+//      FileList sống nếu handleFiles() có await trước khi kịp đọc xong files (PHẦN 4 yêu cầu rõ:
+//      luôn copy FileList thành Array TRƯỚC khi làm bất cứ điều gì khác, kể cả khi hành vi cụ thể
+//      của từng trình duyệt có khác nhau — đây là phòng ngừa, không phải chờ tái hiện được bug rồi
+//      mới sửa).
+//
+// FIX: 1 controller trung tâm — mọi entry point (nút, dropzone sidebar, dropzone modal, drag&drop,
+// mobile picker) đều đi qua CÙNG 1 pipeline:
+//   acceptSourceFiles(files) → normalize (copy FileList→Array NGAY, không giữ tham chiếu sống)
+//   → validateSourceFiles() (phân loại UNSUPPORTED_FILE/FILE_TOO_LARGE, báo lỗi rõ, không chặn các
+//   file hợp lệ khác) → handleFiles() (đã tự dedupe theo fingerprint + đăng ký source ngay, xem
+//   handleFiles() phía trên) → trả kết quả {accepted, rejected} để UI quyết định đóng panel (CHỈ khi
+//   accepted.length > 0) hay giữ panel mở kèm cảnh báo. input.value chỉ reset SAU KHI đã copy xong
+//   FileList thành mảng thường — xem test/source-upload-picker.test.js để có bằng chứng hành vi.
+// =====================================================================================
+const SOURCE_ALLOWED_EXT = ['pdf', 'docx', 'txt'];
+const SOURCE_MAX_FILE_BYTES = 50 * 1024 * 1024; // 50MB — trần hợp lý phía client, khác trần bảo mật server
+const SOURCE_UPLOAD_DEBUG = /[?&]debug=1\b/.test(location.search) || /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+function sourceUploadLog(...args) { if (SOURCE_UPLOAD_DEBUG) console.log('[source-upload]', ...args); }
+
+/** PHẦN 3: fallback picker an toàn — showPicker() nếu trình duyệt hỗ trợ (một số trình duyệt/mobile
+ * không mở picker đáng tin cậy với .click() khi gọi gián tiếp qua nhiều lớp handler), rơi về
+ * .click() nếu không. Mọi entry point PHẢI gọi hàm này thay vì tự gọi fileInput.click() rải rác. */
+function openSourceFilePicker(entry) {
+  sourceUploadLog(`entry=${entry || 'unknown'}`);
+  const input = el('fileInput');
+  if (!input) return;
+  try {
+    if (typeof input.showPicker === 'function') { input.showPicker(); return; }
+  } catch (e) { /* một số trình duyệt throw nếu gọi ngoài user-gesture hoặc chưa hỗ trợ — rơi xuống .click() */ }
+  input.click();
+}
+
+/** Kiểm tra hợp lệ TỪNG file trước khi đưa vào handleFiles(): đúng định dạng + không vượt kích
+ * thước. Trả {accepted:File[], rejected:{file,reason}[]} — KHÔNG throw, để 1 file lỗi không chặn
+ * các file hợp lệ khác trong cùng lượt chọn. */
+function validateSourceFiles(fileArray) {
+  const accepted = [];
+  const rejected = [];
+  for (const file of fileArray) {
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!SOURCE_ALLOWED_EXT.includes(ext)) { rejected.push({ file, reason: 'UNSUPPORTED_FILE' }); continue; }
+    if (file.size > SOURCE_MAX_FILE_BYTES) { rejected.push({ file, reason: 'FILE_TOO_LARGE' }); continue; }
+    accepted.push(file);
+  }
+  return { accepted, rejected };
+}
+
+/** Pipeline chuẩn DUY NHẤT cho mọi nguồn upload (PHẦN 2). Nhận File[] hoặc FileList (đã được copy
+ * thành mảng thường bởi caller — xem normalizeSourceFileList()), validate, rồi giao cho
+ * handleFiles() (nơi đăng ký source ngay + dedupe theo fingerprint + bắt đầu ingest nền). */
+async function acceptSourceFiles(fileArray, entry) {
+  const files = Array.from(fileArray || []);
+  sourceUploadLog(`files-selected count=${files.length}`, entry ? `entry=${entry}` : '');
+  if (!files.length) return { accepted: [], rejected: [] };
+  const { accepted, rejected } = validateSourceFiles(files);
+  sourceUploadLog(`accepted count=${accepted.length}`, `rejected count=${rejected.length}`);
+  if (rejected.length) {
+    const names = rejected.map((r) => r.file.name).slice(0, 5).join(', ');
+    alert(`Không thể thêm ${rejected.length} file (${names}${rejected.length > 5 ? '…' : ''}): chỉ hỗ trợ PDF/DOCX/TXT, tối đa 50MB mỗi file.`);
+  }
+  if (accepted.length) {
+    try {
+      await handleFiles(accepted);
+    } catch (e) {
+      console.error('[source-upload] SOURCE_REGISTER_ERROR', e);
+      alert('Không thể thêm nguồn. Vui lòng thử lại.');
+      return { accepted: [], rejected: [...rejected, ...accepted.map((file) => ({ file, reason: 'SOURCE_REGISTER_ERROR' }))] };
+    }
+  }
+  return { accepted, rejected };
+}
+
+/** PHẦN 4: copy FileList thành Array THẬT SỰ ngay khi còn sống (trước khi input.value bị reset ở
+ * bất kỳ đâu) — đây là fix cho root cause đã nêu ở trên. */
+function normalizeSourceFileList(fileList) {
+  return Array.from(fileList || []);
+}
+
+// --- Entry point 1: nút "+ Thêm nguồn" → mở panel (PHẦN B1, không đổi hành vi) ---
 el('addSourceBtn').onclick = (e) => openAddSourcePanel(e.currentTarget);
-el('dropHint').onclick = () => el('fileInput').click();
-el('fileInput').onchange = (e) => { handleFiles(e.target.files); closeAddSourcePanel(); e.target.value = ''; };
-// PHẦN B1/B9: dropzone bên trong panel — click hoặc Enter/Space đều mở file picker; kéo-thả file
-// trực tiếp vào panel cũng hoạt động (không chỉ desktop, touch drag hiếm khi dùng trên mobile nên
-// vẫn giữ file picker làm đường chính trên mobile).
+
+// --- Entry point 2: click/drag&drop vùng "Thả tài liệu vào đây" ở sidebar ---
+el('dropHint').addEventListener('click', () => openSourceFilePicker('sidebar-click'));
+el('dropHint').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSourceFilePicker('sidebar-key'); }
+});
+['dragover', 'dragleave', 'drop'].forEach((evt) => {
+  el('dropHint').addEventListener(evt, (e) => {
+    e.preventDefault();
+    el('dropHint').classList.toggle('dragover', evt === 'dragover');
+    if (evt === 'drop' && e.dataTransfer && e.dataTransfer.files.length) {
+      acceptSourceFiles(normalizeSourceFileList(e.dataTransfer.files), 'sidebar-drop');
+    }
+  });
+});
+
+// --- Entry point 3: <input type=file> dùng chung cho MỌI picker (sidebar + modal) ---
+// FIX ROOT CAUSE: copy files thành mảng NGAY trong handler đồng bộ (trước khi có bất kỳ await nào
+// chen vào), rồi mới gọi acceptSourceFiles() bất đồng bộ. Panel CHỈ đóng khi thật sự có ít nhất 1
+// file được chấp nhận (PHẦN 6) — file không hợp lệ hoặc lỗi register thì GIỮ PANEL MỞ để user thấy
+// lỗi và thử lại. input.value chỉ reset SAU KHI đã copy xong (PHẦN 4).
+el('fileInput').onchange = (e) => {
+  const files = normalizeSourceFileList(e.target.files);
+  e.target.value = ''; // an toàn: files đã được copy thành mảng thường ở dòng trên, reset ở đây
+                        // không còn nguy cơ làm rỗng dữ liệu đang được acceptSourceFiles() xử lý.
+  acceptSourceFiles(files, 'file-input').then((result) => {
+    if (result.accepted.length > 0) closeAddSourcePanel();
+  });
+};
+
+// --- Entry point 4: dropzone bên trong modal "Thêm nguồn" — click/Enter/Space mở picker, kéo-thả
+// file trực tiếp vào modal cũng hoạt động (PHẦN B1/B9, PHẦN 5). ---
 if (el('addSourceDropZone')) {
   const dz = el('addSourceDropZone');
-  dz.addEventListener('click', () => el('fileInput').click());
-  dz.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el('fileInput').click(); } });
+  dz.addEventListener('click', () => openSourceFilePicker('modal-click'));
+  dz.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSourceFilePicker('modal-key'); } });
   ['dragover', 'dragleave', 'drop'].forEach((evt) => {
     dz.addEventListener(evt, (e) => {
       e.preventDefault();
       dz.classList.toggle('dragover', evt === 'dragover');
-      if (evt === 'drop' && e.dataTransfer && e.dataTransfer.files.length) { handleFiles(e.dataTransfer.files); closeAddSourcePanel(); }
+      if (evt === 'drop' && e.dataTransfer && e.dataTransfer.files.length) {
+        acceptSourceFiles(normalizeSourceFileList(e.dataTransfer.files), 'modal-drop').then((result) => {
+          if (result.accepted.length > 0) closeAddSourcePanel();
+        });
+      }
     });
   });
 }
@@ -1298,13 +1426,6 @@ if (el('addSourceOverlay')) {
   el('addSourceOverlay').addEventListener('click', (e) => { if (e.target.id === 'addSourceOverlay') closeAddSourcePanel(); });
   el('addSourceOverlay').addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAddSourcePanel(); });
 }
-['dragover', 'dragleave', 'drop'].forEach((evt) => {
-  el('dropHint').addEventListener(evt, (e) => {
-    e.preventDefault();
-    el('dropHint').classList.toggle('dragover', evt === 'dragover');
-    if (evt === 'drop') handleFiles(e.dataTransfer.files);
-  });
-});
 
 /* ================= Ảnh đính kèm ================= */
 /**
@@ -1991,7 +2112,7 @@ function renderMarkdownLite(text) {
     draws.push({ id, kind: b.kind, spec: b.spec });
     // PHẦN L: scenepatch KHÔNG dựng container riêng — áp lên khối scene3d gần nhất phía trước.
     if (b.kind === 'scenepatch') return `\u0000PATCH${draws.length - 1}\u0000`;
-    const cls = (b.kind === 'solid3d' || b.kind === 'scene3d') ? 'draw-wrap draw-wrap-3d' : 'draw-wrap';
+    const cls = (b.kind === 'solid3d' || b.kind === 'scene3d') ? 'draw-wrap draw-wrap-3d' : 'draw-wrap draw-wrap-legacy';
     return `<div class="${cls}" id="${id}"></div>`;
   });
   // scenepatch không tạo container riêng — placeholder của nó có thể còn nằm trong 1 <p> rỗng, bỏ đi.
@@ -1999,16 +2120,19 @@ function renderMarkdownLite(text) {
   return { html, draws };
 }
 
-/* ---------- Vẽ hình học & đồ thị hàm số ---------- */
+/* ---------- Render khối vẽ trong câu trả lời ---------- */
+// KIẾN TRÚC AI IMAGE-FIRST: frontend KHÔNG còn dựng bất kỳ hình minh hoạ 2D nào bằng SVG.
+//   - Hình 2D TĨNH (hình học, đồ thị, mạch điện, flowchart, sơ đồ...) do backend tạo bằng AI image
+//     provider và gửi xuống trong `visuals[]` -> renderVisualCard() dựng thẻ <img> thật.
+//   - Scene 3D TƯƠNG TÁC vẫn do Three.js đảm nhiệm (solid3d.js / scene3d.js) — không đổi.
+//   - Khối ```plot/```shape kiểu cũ (nếu model vẫn sinh ra theo thói quen) KHÔNG được render thành
+//     SVG nữa: chỉ hiện một dòng ghi chú, hình thật đến từ thẻ hình AI phía dưới.
 function renderDrawing(container, kind, spec) {
   if (!container) return;
   try {
-    if (kind === 'plot') drawPlot(container, spec);
-    else if (kind === 'solid3d') {
-      // FIX ROOT CAUSE (PHẦN VII audit): three.js giờ lazy-load on-demand (không còn eager trong
-      // index.html) nên khối 3D đầu tiên trong phiên phải CHỜ tải xong trước khi vẽ được — hiện
-      // placeholder "Đang tải..." trong lúc chờ thay vì để trống, rồi vẽ ngay khi sẵn sàng. Các khối
-      // 3D sau đó trong CÙNG phiên vẽ ngay lập tức vì ensureThree() trả về ngay (window.THREE đã có).
+    if (kind === 'solid3d') {
+      // three.js lazy-load on-demand: khối 3D đầu tiên trong phiên phải CHỜ tải xong trước khi vẽ
+      // được — hiện placeholder trong lúc chờ rồi vẽ ngay khi sẵn sàng.
       container.innerHTML = `<p style="font-size:12px;color:#6b7593;">${escapeHtml(t('loading.3dEngine'))}</p>`;
       ensureThree().then(() => {
         if (window.drawSolid3D) window.drawSolid3D(container, spec);
@@ -2016,117 +2140,38 @@ function renderDrawing(container, kind, spec) {
       }).catch(() => {
         container.innerHTML = `<p style="font-size:12px;color:#c0392b;">${escapeHtml(t('error.load3dNetwork'))}</p>`;
       });
-    }
-    else if (kind === 'scene3d') {
-      // PHẦN K/O: scene3d dùng cùng lazy-load three.js với solid3d, nhưng renderer riêng (scene3d.js)
-      // hỗ trợ compact JSON đa-object + patch + quality tiers + WebGL fallback.
+    } else if (kind === 'scene3d') {
+      // scene3d dùng cùng lazy-load three.js với solid3d, nhưng renderer riêng (scene3d.js) hỗ trợ
+      // compact JSON đa-object + patch + quality tiers + WebGL fallback.
       container.innerHTML = `<p style="font-size:12px;color:#6b7593;">${escapeHtml(t('loading.3dEngine'))}</p>`;
       ensureThree().then(() => {
         if (window.renderScene3D) window.renderScene3D(container, spec);
         else container.innerHTML = `<p style="font-size:12px;color:#c0392b;">${escapeHtml(t('error.load3d'))}</p>`;
       }).catch(() => {
-        if (window.renderScene3D) window.renderScene3D(container, spec); // vẫn thử -> tự fallback 2D/text nếu WebGL không khả dụng
+        if (window.renderScene3D) window.renderScene3D(container, spec); // tự fallback text nếu WebGL không khả dụng
         else container.innerHTML = `<p style="font-size:12px;color:#c0392b;">${escapeHtml(t('error.load3dNetwork'))}</p>`;
       });
+    } else {
+      renderLegacy2dNotice(container);
     }
-    else drawShape(container, spec);
   } catch (e) {
     container.innerHTML = `<p style="color:#c0392b;font-size:12px;">${escapeHtml(t('error.drawFailed'))}</p>`;
     console.error(e);
   }
 }
-function drawPlot(container, spec) {
-  // Đồng bộ kích thước lớn hơn với drawShape() ở dưới (trước đây 520x300, hơi nhỏ/thưa lưới).
-  const W = 640, H = 420, pad = 44;
-  const xr = (spec.xrange && spec.xrange.length === 2) ? spec.xrange.map(Number) : [-10, 10];
-  const exprs = (spec.expressions || []).slice(0, 4).filter(Boolean);
-  const N = 240;
-  const colors = ['#2955ff', '#0ea8b0', '#e0503f', '#b98a2b'];
-  const series = exprs.map((expr) => {
-    const pts = [];
-    for (let i = 0; i <= N; i++) {
-      const x = xr[0] + (xr[1] - xr[0]) * i / N;
-      let y;
-      try { y = math.evaluate(expr, { x }); } catch (e) { y = NaN; }
-      pts.push([x, (typeof y === 'number' && isFinite(y)) ? y : null]);
-    }
-    return { expr, pts };
-  });
-  let yr = (spec.yrange && spec.yrange.length === 2) ? spec.yrange.map(Number) : null;
-  if (!yr) {
-    const vals = [];
-    series.forEach((s) => s.pts.forEach((p) => { if (p[1] !== null) vals.push(p[1]); }));
-    let mn = vals.length ? Math.min(...vals) : -1, mx = vals.length ? Math.max(...vals) : 1;
-    if (mn === mx) { mn -= 1; mx += 1; }
-    const m = (mx - mn) * 0.12 || 1;
-    yr = [mn - m, mx + m];
-  }
-  const sx = (x) => pad + (x - xr[0]) / (xr[1] - xr[0]) * (W - 2 * pad);
-  const sy = (y) => H - pad - (y - yr[0]) / (yr[1] - yr[0]) * (H - 2 * pad);
 
-  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px">`;
-  svg += `<rect x="0.5" y="0.5" width="${W - 1}" height="${H - 1}" rx="10" fill="var(--paper-3)" stroke="var(--rule)" stroke-width="1"/>`;
-
-  // Lưới nhạt bên trong khung đồ thị — trước đây chỉ có khung ngoài trơn, đồ thị trông "trống"
-  // và khó ước lượng toạ độ bằng mắt. Chia đều ~8 cột x 6 hàng, kẻ mảnh + rất nhạt để không
-  // lấn át đường cong chính.
-  const gridCols = 8, gridRows = 6;
-  for (let i = 1; i < gridCols; i++) {
-    const gx = pad + (W - 2 * pad) * i / gridCols;
-    svg += `<line x1="${gx.toFixed(1)}" y1="${pad}" x2="${gx.toFixed(1)}" y2="${H - pad}" stroke="var(--rule)" stroke-width="1" opacity="0.55"/>`;
-  }
-  for (let i = 1; i < gridRows; i++) {
-    const gy = pad + (H - 2 * pad) * i / gridRows;
-    svg += `<line x1="${pad}" y1="${gy.toFixed(1)}" x2="${W - pad}" y2="${gy.toFixed(1)}" stroke="var(--rule)" stroke-width="1" opacity="0.55"/>`;
-  }
-  svg += `<rect x="${pad}" y="${pad}" width="${W - 2 * pad}" height="${H - 2 * pad}" fill="none" stroke="var(--rule)" stroke-width="1.3"/>`;
-  if (xr[0] <= 0 && xr[1] >= 0) svg += `<line x1="${sx(0)}" y1="${pad}" x2="${sx(0)}" y2="${H - pad}" stroke="var(--muted)" stroke-width="1.6"/>`;
-  if (yr[0] <= 0 && yr[1] >= 0) svg += `<line x1="${pad}" y1="${sy(0)}" x2="${W - pad}" y2="${sy(0)}" stroke="var(--muted)" stroke-width="1.6"/>`;
-  const yspan = yr[1] - yr[0];
-  series.forEach((s, i) => {
-    let d = ''; let drawing = false;
-    s.pts.forEach((p) => {
-      if (p[1] === null || p[1] < yr[0] - yspan || p[1] > yr[1] + yspan) { drawing = false; return; }
-      const px = sx(p[0]).toFixed(1), py = sy(Math.max(yr[0] - yspan, Math.min(yr[1] + yspan, p[1]))).toFixed(1);
-      d += (drawing ? 'L' : 'M') + px + ',' + py + ' ';
-      drawing = true;
-    });
-    svg += `<path d="${d}" fill="none" stroke="${colors[i % colors.length]}" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>`;
-  });
-  svg += `</svg>`;
-  const legend = series.map((s, i) => `<span style="display:inline-flex;align-items:center;gap:6px;margin:3px 14px 3px 0;"><span style="width:11px;height:11px;border-radius:3px;background:${colors[i % colors.length]};display:inline-block;"></span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;">y = ${s.expr.replace(/</g, '&lt;')}</span></span>`).join('');
-  container.innerHTML = svg + `<div class="draw-legend">${legend}</div>`;
-}
-function drawShape(container, spec) {
-  // Toàn bộ cơ chế hình học (constraint solving, validation, auto-layout, label placement, thứ tự
-  // layer khi render) nay nằm trong Geo2D (public/js/geo2d-engine.js) — một 2D Geometry Engine tổng
-  // quát dùng chung cho MỌI bài, không hardcode/if theo từng bài. drawShape() ở đây chỉ còn là lớp
-  // "adapter" mỏng: gọi engine, và nếu hình học không hợp lệ thì báo lỗi rõ ràng thay vì vẽ ra một
-  // hình sai/vỡ (đúng theo pipeline: Geometry Model -> Constraint Solve -> Validate -> Render).
-  //
-  // Engine hỗ trợ CẢ 2 định dạng:
-  //  - "program" (khuyến nghị, mới): khai báo điểm bằng CÔNG THỨC dựng hình (free/midpoint/foot/
-  //    circumcenter/orthocenter/intersectLines/intersectLineCircle/pointOnCircle/...) — toạ độ được
-  //    ENGINE TỰ TÍNH, không phải AI tự ước lượng.
-  //  - "composite"/đơn giản (cũ): vẫn nhận toạ độ số trực tiếp, giữ tương thích ngược cho các hình
-  //    đơn giản (đa giác/đường tròn/đoạn cho sẵn toạ độ) đã có từ trước.
-  const W = 760, H = 560, pad = 56;
-
-  if (!window.Geo2D) {
-    container.innerHTML = '<p style="color:#c0392b;font-size:12px;">⚠️ Không tải được bộ máy vẽ hình học (geo2d-engine.js).</p>';
-    return;
-  }
-
-  const result = window.Geo2D.renderGeometry(spec, { W, H, pad });
-  if (result.error) {
-    console.error('[Geo2D] Hình học không hợp lệ, không render:', result.error);
-    container.innerHTML = `<p style="color:#c0392b;font-size:12px;">⚠️ Hình vẽ có lỗi hình học nên không thể hiển thị: ${String(result.error).replace(/</g, '&lt;')}</p>`;
-    return;
-  }
-  if (result.issues && result.issues.length) {
-    result.issues.forEach((i) => console.warn('[Geo2D]', i.level, i.msg));
-  }
-  container.innerHTML = result.svg;
+/**
+ * renderLegacy2dNotice() — khối ```plot/```shape kiểu cũ. KHÔNG dựng SVG thay thế (đó chính là cơ
+ * chế đã bị loại bỏ); chỉ nói rõ hình tĩnh nay là ảnh AI trong thẻ hình.
+ */
+function renderLegacy2dNotice(container) {
+  if (!container) return;
+  container.className = 'draw-wrap draw-wrap-legacy';
+  const p = document.createElement('p');
+  p.className = 'draw-legacy-note';
+  p.textContent = t('error.legacyDrawBlock');
+  container.innerHTML = '';
+  container.appendChild(p);
 }
 
 // imageState (dùng khi mở lại conversation cũ, không dùng ở lượt gửi mới):
@@ -2957,15 +3002,16 @@ function renderPartialWarning(container, data) {
  * ============================================================================================
  * renderVisuals() giữ NGUYÊN chữ ký cũ (container, visuals, status) để mọi nơi đang gọi không phải
  * sửa; phần thân tách thành các hàm con để test được từng mảnh:
- *   renderVisualCard()  -> renderVisualImage() / renderVisualSvg()
+ *   renderVisualCard()  -> renderVisualImage()
  *                       -> renderVisualCaption()
  *                       -> renderVisualOverlay()   (MỤC 1.3 — số liệu ĐÃ VERIFY, có nút ẩn/hiện)
  *                       -> renderVisualActions()   (Mở ảnh / Tải PNG)
  *   openVisualLightbox() (Esc đóng, click nền đóng, có nút tải ngay trong lightbox)
  *
- * An toàn: server CHỈ gửi 2 dạng — `format:'svg'` (chuỗi SVG đã qua visualValidator) và
- * `format:'data_url'|'image_url'`. Ở client vẫn kiểm tra lại lần nữa trước khi nhúng — không tin
- * tuyệt đối vào payload mạng. Mọi text đều gán bằng textContent, không innerHTML.
+ * An toàn: server CHỈ gửi ẢNH AI THẬT — `format:'data_url'|'image_url'` (đã qua magic-bytes ở
+ * imageBinaryValidator + visualValidator). Client vẫn kiểm tra lại lần nữa trước khi nhúng
+ * (isGeneratedImageVisual) và KHÔNG BAO GIỜ nhúng SVG/HTML làm nội dung hình. Mọi text đều gán
+ * bằng textContent, không innerHTML.
  */
 
 // === VISUAL_DOWNLOAD_BLOCK_START === (neo cho test/visual-upgrade.test.js: loadVisualModule() trích
@@ -3009,7 +3055,7 @@ function visualProxySrc(v, disposition) {
     + (disposition === 'inline' ? '&inline=1' : '');
 }
 
-/** @returns {boolean} v là ẢNH THẬT do image model sinh (không phải SVG deterministic). */
+/** @returns {boolean} v là ẢNH THẬT do image model sinh. */
 function isGeneratedImageVisual(v) {
   return !!(v && (v.format === 'data_url' || v.format === 'image_url')
     && typeof v.url === 'string' && /^(data:image\/|https:\/\/)/i.test(v.url));
@@ -3046,7 +3092,7 @@ function makeVisualRetryButton(v, hostEl) {
       const merged = {
         ...v, format: data.format, url: data.url, renderer: data.renderer,
         origin: data.origin, fidelity: data.fidelity, model: data.model,
-        renderFailed: false, fallbackSchematic: false
+        renderFailed: false
       };
       const newCard = renderVisualCard(merged);
       const oldCard = hostEl.closest ? hostEl.closest('.visual-card') : null;
@@ -3078,6 +3124,13 @@ function renderVisualFailedCard(v) {
   msg.className = 'visual-error-text';
   msg.textContent = t('chat.visualGenerationFailed');
   fig.appendChild(msg);
+  // Không có provider ảnh: nói THẲNG cần cấu hình gì — hệ thống KHÔNG dựng hình thay thế.
+  if (v.reason === 'no_image_provider') {
+    const hint = document.createElement('p');
+    hint.className = 'visual-error-hint';
+    hint.textContent = t('chat.visualNoProvider');
+    fig.appendChild(hint);
+  }
   fig.appendChild(makeVisualRetryButton(v, fig));
   return fig;
 }
@@ -3106,50 +3159,6 @@ async function downloadVisualPNG(v, btn) {
     a.download = visualDownloadName(v, blob.type);
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
-  } catch (e) {
-    if (btn) btn.textContent = t('chat.visualDownloadFailed');
-    setTimeout(() => { if (btn) { btn.textContent = label; btn.disabled = false; } }, 2500);
-    return;
-  }
-  if (btn) { btn.textContent = label; btn.disabled = false; }
-}
-
-/**
- * downloadVisualSvgPNG() — tải hình deterministic (SVG) về dạng PNG.
- * Dùng ĐÚNG cách đã có sẵn cho mindmap (mmDownloadPNG): serialize SVG -> data URL -> <img> ->
- * canvas 2x -> toBlob -> <a download>. Không thêm thư viện, không gọi mạng, không gọi AI.
- */
-async function downloadVisualSvgPNG(v, holder, btn) {
-  const svgEl = holder && holder.querySelector ? holder.querySelector('svg') : null;
-  if (!svgEl) return;
-  const label = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = t('chat.visualDownloading'); }
-  try {
-    const bg = document.body.classList.contains('dark') ? '#0b1220' : '#ffffff';
-    const clone = svgEl.cloneNode(true);
-    clone.setAttribute('style', 'background:' + bg);
-    const xml = new XMLSerializer().serializeToString(clone);
-    const svg64 = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
-    const img = new Image();
-    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = svg64; });
-    const w = (svgEl.viewBox && svgEl.viewBox.baseVal && svgEl.viewBox.baseVal.width) || img.width || 800;
-    const h = (svgEl.viewBox && svgEl.viewBox.baseVal && svgEl.viewBox.baseVal.height) || img.height || 600;
-    const canvas = document.createElement('canvas');
-    canvas.width = w * 2; canvas.height = h * 2;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    await new Promise((resolve) => canvas.toBlob((blob) => {
-      if (blob) {
-        const objUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = objUrl; a.download = visualDownloadName(v);
-        document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
-      }
-      resolve();
-    }, 'image/png'));
   } catch (e) {
     if (btn) btn.textContent = t('chat.visualDownloadFailed');
     setTimeout(() => { if (btn) { btn.textContent = label; btn.disabled = false; } }, 2500);
@@ -3247,16 +3256,6 @@ function openVisualLightbox(v) {
   document.body.appendChild(box);
   try { close.focus(); } catch (e) { /* môi trường không có focus — bỏ qua */ }
   return box;
-}
-
-/** Thân hình dạng SVG deterministic. @returns {HTMLElement|null} */
-function renderVisualSvg(v) {
-  if (!(v.format === 'svg' && typeof v.content === 'string')) return null;
-  if (/<script|javascript:|\son\w+\s*=|<foreignObject/i.test(v.content)) return null; // fail-safe
-  const holder = document.createElement('div');
-  holder.className = 'visual-svg';
-  holder.innerHTML = v.content;
-  return holder;
 }
 
 /**
@@ -3394,25 +3393,12 @@ function renderVisualOverlay(v) {
 }
 
 /**
- * Hàng nút thao tác. Chỉ ảnh AI THẬT mới có "Mở ảnh"/"Tải PNG" — SVG deterministic giữ nguyên hành
- * vi cũ (không phải trọng tâm phàn nàn, và tải SVG là việc khác).
+ * Hàng nút thao tác. Mọi hình đều là ảnh AI thật -> luôn có "Mở ảnh" (lightbox) + "Tải PNG".
+ * Payload không phải ảnh thật -> không có nút nào (và renderVisualCard cũng không dựng card).
  * @returns {HTMLElement|null}
  */
-function renderVisualActions(v, body) {
-  // SVG deterministic: chỉ có nút tải PNG (không lightbox — SVG đã co giãn theo khung, phóng to
-  // không thêm thông tin gì). Hành vi hiển thị của SVG giữ nguyên như trước.
-  if (!isGeneratedImageVisual(v)) {
-    if (!(v && v.format === 'svg' && body)) return null;
-    const svgBar = document.createElement('div');
-    svgBar.className = 'visual-actions';
-    const svgDl = document.createElement('button');
-    svgDl.type = 'button';
-    svgDl.className = 'visual-btn';
-    svgDl.textContent = t('chat.visualDownload');
-    svgDl.addEventListener('click', () => downloadVisualSvgPNG(v, body, svgDl));
-    svgBar.appendChild(svgDl);
-    return svgBar;
-  }
+function renderVisualActions(v) {
+  if (!isGeneratedImageVisual(v)) return null;
   const bar = document.createElement('div');
   bar.className = 'visual-actions';
 
@@ -3433,31 +3419,22 @@ function renderVisualActions(v, body) {
   return bar;
 }
 
-/** Một card hình hoàn chỉnh. @returns {HTMLElement|null} null khi payload không hợp lệ. */
+/** Một card hình hoàn chỉnh. @returns {HTMLElement|null} null khi payload không phải ảnh AI thật. */
 function renderVisualCard(v) {
   if (!v) return null;
-  if (v.renderFailed) return renderVisualFailedCard(v); // MỤC 16/17: stub lỗi kèm nút thử lại.
-  const body = renderVisualSvg(v) || renderVisualImage(v);
+  if (v.renderFailed) return renderVisualFailedCard(v); // stub lỗi kèm nút thử lại.
+  // Chỉ ẢNH AI THẬT mới được dựng thành card. Không có nhánh SVG nào ở đây nữa: payload lạ ->
+  // không hiển thị gì, text answer vẫn nguyên vẹn.
+  const body = renderVisualImage(v);
   if (!body) return null;
 
   const fig = document.createElement('figure');
-  fig.className = 'visual-figure visual-card';
-  if (isGeneratedImageVisual(v)) fig.classList.add('visual-card-image');
+  fig.className = 'visual-figure visual-card visual-card-image';
 
   if (v.title) {
     const head = document.createElement('div');
     head.className = 'visual-card-head';
     head.textContent = v.title;
-    // MỤC 2.7: nhãn nhỏ phân biệt "sơ đồ thay thế" với ảnh AI thành công. Chỉ hiện khi backend xác
-    // nhận LẼ RA phải có ảnh AI nhưng đã phải hạ xuống sơ đồ — không hiện cho hình vốn dĩ luôn là
-    // deterministic (đồ thị, mạch điện), vì ở đó sơ đồ mới là thứ đúng.
-    if (v.fallbackSchematic) {
-      const badge = document.createElement('span');
-      badge.className = 'visual-fallback-badge';
-      badge.textContent = t('chat.visualFallbackBadge');
-      badge.title = t('chat.visualFallbackHint');
-      head.appendChild(badge);
-    }
     fig.appendChild(head);
   }
   fig.appendChild(body);
@@ -3468,20 +3445,10 @@ function renderVisualCard(v) {
   const overlay = renderVisualOverlay(v);
   if (overlay) fig.appendChild(overlay);
 
-  const actions = renderVisualActions(v, body);
+  const actions = renderVisualActions(v);
   if (actions) fig.appendChild(actions);
 
-  // Rủi ro #3: đề cần hình THẬT (lát cắt/giải phẫu/bản đồ) mà hệ thống chỉ dựng được sơ đồ khái
-  // niệm -> nói rõ với người học, đừng để họ tưởng đang nhìn một hình giải phẫu chính xác.
-  if (v.fidelity === 'schematic_only') {
-    const note = document.createElement('p');
-    note.className = 'visual-fidelity-note';
-    note.textContent = 'Đây là sơ đồ khái niệm, không phải hình giải phẫu/bản đồ thực tế — '
-      + 'dùng để nắm cấu trúc và vị trí tương đối, không dùng để nhận dạng chi tiết.';
-    fig.appendChild(note);
-  }
-  // B9.9/A3: hình do người dùng YÊU CẦU TƯỜNG MINH được nêu rõ là theo yêu cầu, tách khỏi hình
-  // hệ thống tự quyết định tạo.
+  // Hình do người dùng YÊU CẦU TƯỜNG MINH được nêu rõ, tách khỏi hình hệ thống tự quyết định tạo.
   if (v.necessity === 'USER_REQUESTED' || v.overrodeNever) {
     const note = document.createElement('p');
     note.className = 'visual-origin-note';
