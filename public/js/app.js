@@ -84,7 +84,10 @@ const state = {
   // vision extraction được bắn kiểu fire-and-forget `processPdfVisionEvidence(doc).catch(...)` —
   // nên doc bị coi là 'ready' ngay khi RENDER xong ảnh, trong khi AI CHƯA ĐỌC trang nào. NAY: mỗi
   // source có ĐÚNG 1 promise bao trọn parse -> rasterize -> vision extract -> verify, và
-  // waitForAllSourceProcessing() chờ trọn vòng đời đó trước khi bất kỳ request nào được dựng.
+  // waitForAllSourceProcessing() vẫn theo dõi trọn vòng đời đó, nhưng KHÔNG còn là hàng rào bắt buộc
+  // trước MỌI request (PHẦN II.B/IV kiến trúc mới — progressive ingestion): sendMessage() và các flow
+  // tương tự nay dùng collectAvailableEvidence()/isSourceUsableNow() để lấy evidence THẬT đang có
+  // ngay, trong khi mảng này chỉ còn phục vụ nơi cần đợi full coverage thật sự (không phải mọi câu hỏi).
   sourceProcessingPromises: [],
   rules: [],
   // Ghi chú KHÔNG lưu ở mảng riêng nữa — mỗi ghi chú gắn trực tiếp vào tin nhắn AI tương ứng
@@ -958,29 +961,41 @@ function sourceCardLabel(doc) {
   }
 }
 
-/* ---------- PHẦN C: KHÔNG ĐỂ USER GỬI REQUEST DÙNG NGUỒN CHƯA READY ----------
- * Nút gửi bị disable trong lúc còn nguồn đang xử lý, kèm trạng thái rõ ràng. Người dùng vẫn gõ được;
- * khi nguồn xong nút tự bật lại. sendMessage() vẫn await waitForAllSourceProcessing() như hàng rào
- * thứ hai (phòng khi UI bị bỏ qua). */
+/* ---------- PHẦN III/IV/VII (kiến trúc mới — INSTANT SOURCE AVAILABILITY) ----------
+ * TRƯỚC ĐÂY: nút gửi bị disable bất cứ khi nào còn ≥1 nguồn "processing", kể cả khi nguồn đó ĐÃ có
+ * evidence thật dùng được (vd PDF scan 134 trang, 72 trang đã đọc xong) — ép user chờ TOÀN BỘ tài
+ * liệu xử lý xong mới được hỏi, đúng bug bị audit ở mục II.A ("UI chặn gửi khi source còn
+ * processing"). NAY: KHÔNG BAO GIỜ disable nút gửi chỉ vì có nguồn đang xử lý nền — user luôn được
+ * gửi câu hỏi ngay khi họ muốn; retrieveContext()/collectAvailableEvidence() sẽ tự lấy đúng phần
+ * evidence THẬT đang có (xem PHẦN VIII), và completenessCheck ở server tự nhắc nếu câu hỏi cần phần
+ * nguồn CHƯA có evidence (source-aware completeness — đã có sẵn trong promptBuilder/completenessCheck).
+ * statusText chỉ còn vai trò THÔNG BÁO tiến độ nền — không khoá tương tác. */
 function updateComposerSourceState() {
   const btn = typeof el === 'function' ? el('sendBtn') : null;
   const statusTextEl = typeof el === 'function' ? el('statusText') : null;
   if (!btn) return;
+  // Nút gửi không bao giờ bị nguồn-đang-xử-lý disable nữa (PHẦN IV, mục acceptance criteria LXIX:
+  // "Không còn disable Send chỉ vì source đang background processing"). Các lý do disable KHÁC (vd
+  // đang stream câu trả lời) do code chỗ khác quản lý qua dataset key riêng, không đụng ở đây.
+  if (btn.dataset.blockedBySource === '1') { btn.disabled = false; delete btn.dataset.blockedBySource; }
   const summary = sourceReadinessSummary();
-  if (summary.processing > 0) {
+  if (!statusTextEl) return;
+  if (summary.unusableDocs.length > 0) {
+    // Có nguồn CHƯA có 1 evidence thật nào (vừa mới đăng ký/đang parse trang đầu) — báo tiến độ,
+    // KHÔNG nói "sẵn sàng" (mục LXII NO FALSE READY) nhưng cũng không chặn gửi.
+    const d = summary.unusableDocs[0];
+    const ps = ensureSourceProcessingState(d);
+    statusTextEl.textContent = ps.status === SOURCE_STATUS.EXTRACTING && ps.totalPages
+      ? `Đang đọc trang ${ps.extractedPages}/${ps.totalPages}… (có thể hỏi ngay, các nguồn khác đã dùng được)`
+      : `Đang đọc nguồn "${d.name}"…`;
+  } else if (summary.processing > 0) {
+    // Mọi nguồn đều đã usableNow, nhưng vẫn có nguồn đang enrich nền (PHẦN III: PARTIAL_AVAILABLE ->
+    // ENRICHING) — nói rõ đây là PARTIAL, không phải đã đọc xong, tránh false-ready.
     const d = summary.processingDocs[0];
     const ps = ensureSourceProcessingState(d);
-    btn.disabled = true;
-    btn.dataset.blockedBySource = '1';
-    if (statusTextEl) {
-      statusTextEl.textContent = ps.status === SOURCE_STATUS.EXTRACTING && ps.totalPages
-        ? `Đang đọc trang ${ps.extractedPages}/${ps.totalPages}…`
-        : (ps.status === SOURCE_STATUS.VERIFYING ? 'Đang xác minh nguồn…' : 'Đang đọc toàn bộ tài liệu…');
-    }
-  } else if (btn.dataset.blockedBySource === '1') {
-    btn.disabled = false;
-    delete btn.dataset.blockedBySource;
-    if (statusTextEl) statusTextEl.textContent = typeof t === 'function' ? t('chat.statusReady') : '';
+    statusTextEl.textContent = `Đã dùng được — đang đọc thêm ${ps.verifiedPages}/${ps.totalPages || '?'} trang "${d.name}"…`;
+  } else {
+    statusTextEl.textContent = typeof t === 'function' ? t('chat.statusReady') : '';
   }
 }
 
@@ -1193,6 +1208,16 @@ const SOURCE_PLACEHOLDER_FLAG = 'placeholder';
 
 function coveragePct(done, total) { return total > 0 ? Math.round((Number(done) || 0) / total * 100) : 0; }
 
+// PROGRESSIVE INGESTION — 3 trục trạng thái ĐỘC LẬP (không được dùng `status`/READY làm điều kiện
+// DUY NHẤT để quyết định "dùng được hay không" — đó chính là root cause khiến UI/sendMessage/
+// collectReadyChunks/collectSourceImages phải chờ 100% mới cho dùng nguồn). Một nguồn có thể ĐỒNG
+// THỜI: availabilityStatus=AVAILABLE (có evidence thật dùng được ngay) + processingStatus=PROCESSING
+// (nền vẫn đang đọc tiếp) + verificationStatus=PARTIAL (chưa xác minh hết) — đây là trạng thái BÌNH
+// THƯỜNG và MONG MUỐN trong phần lớn thời gian xử lý nguồn lớn, không phải lỗi.
+const AVAILABILITY_STATUS = { UNAVAILABLE: 'UNAVAILABLE', PARTIAL: 'PARTIAL', AVAILABLE: 'AVAILABLE' };
+const PROCESSING_STATUS_AXIS = { IDLE: 'IDLE', PROCESSING: 'PROCESSING', DONE: 'DONE', ERROR: 'ERROR' };
+const VERIFICATION_STATUS = { UNVERIFIED: 'UNVERIFIED', PARTIAL: 'PARTIAL', VERIFIED: 'VERIFIED' };
+
 function createSourceProcessingState(patch) {
   return Object.assign({
     status: SOURCE_STATUS.UPLOADING,
@@ -1208,6 +1233,11 @@ function createSourceProcessingState(patch) {
     readCoverage: 0,
     verifiedCoverage: 0,
     coveragePercent: 0,                 // = verifiedCoverage, KHÔNG BAO GIỜ = renderCoverage
+    // 3 trục progressive-ingestion — xem khối comment ngay phía trên. Giá trị thật được tính trong
+    // recomputeSourceCoverage()/setSourceStatus(), đây chỉ là default trước khi có patch đầu tiên.
+    availabilityStatus: AVAILABILITY_STATUS.UNAVAILABLE,
+    processingStatus: PROCESSING_STATUS_AXIS.IDLE,
+    verificationStatus: VERIFICATION_STATUS.UNVERIFIED,
     startedAt: Date.now(),
     completedAt: null,
     lastError: null
@@ -1222,7 +1252,40 @@ function recomputeSourceCoverage(ps) {
   ps.verifiedCoverage = coveragePct(ps.verifiedPages, total);
   // PHẦN D/Q: "đã đọc %" hiển thị và gửi đi PHẢI là verified, không phải render.
   ps.coveragePercent = ps.verifiedCoverage;
+
+  // --- 3 trục progressive-ingestion (kiến trúc mới, mục III của yêu cầu audit) ---
+  // processingStatus: trục thuần "đang chạy nền hay đã dừng", KHÔNG liên quan gì tới "dùng được chưa".
+  if (ps.status === SOURCE_STATUS.ERROR) ps.processingStatus = PROCESSING_STATUS_AXIS.ERROR;
+  else if (SOURCE_TERMINAL_STATUSES.indexOf(ps.status) !== -1) ps.processingStatus = PROCESSING_STATUS_AXIS.DONE;
+  else if (ps.status === SOURCE_STATUS.UPLOADING) ps.processingStatus = PROCESSING_STATUS_AXIS.IDLE;
+  else ps.processingStatus = PROCESSING_STATUS_AXIS.PROCESSING;
+
+  // verificationStatus: đã VERIFY (PHẦN D — bằng chứng thật, không phải render) được bao nhiêu.
+  if (ps.verifiedPages <= 0) ps.verificationStatus = VERIFICATION_STATUS.UNVERIFIED;
+  else if (total > 0 && ps.verifiedPages >= total && ps.failedPages.length === 0) ps.verificationStatus = VERIFICATION_STATUS.VERIFIED;
+  else ps.verificationStatus = VERIFICATION_STATUS.PARTIAL;
+
+  // availabilityStatus: có evidence THẬT dùng được ngay không (PHẦN VII: usableNow != fullyVerified).
+  // done bên ngoài (isSourceUsableNow cần đọc doc.chunks, ps không có chunks) — set placeholder ở
+  // đây dựa trên verifiedPages/extractedPages làm tín hiệu SỚM, rồi syncDerivedAvailability(doc)
+  // phía dưới ghi đè bằng tín hiệu CHÍNH XÁC (dựa trên chunk thật) mỗi khi có doc trong tay.
+  if (ps.verificationStatus === VERIFICATION_STATUS.VERIFIED) ps.availabilityStatus = AVAILABILITY_STATUS.AVAILABLE;
+  else if (ps.extractedPages > 0 || ps.verifiedPages > 0) ps.availabilityStatus = AVAILABILITY_STATUS.PARTIAL;
+  else ps.availabilityStatus = AVAILABILITY_STATUS.UNAVAILABLE;
   return ps;
+}
+
+/** Ghi đè availabilityStatus bằng tín hiệu CHÍNH XÁC: có ít nhất 1 chunk THẬT (không placeholder,
+ * không lỗi, có nội dung) trong doc.chunks hay không — đây là nguồn sự thật duy nhất cho "usable
+ * now", độc lập với con số processing (vd DOCX/TXT không có totalPages nhưng vẫn usable ngay). Gọi
+ * SAU MỌI lần đổi doc.chunks (rebuildChunksFromEvidence/verifyTextSource/handleFiles) — xem các call
+ * site của setSourceStatus() ở dưới. An toàn khi gọi trước khi doc.chunks tồn tại. */
+function syncDerivedAvailability(doc) {
+  const ps = doc && doc.processing;
+  if (!ps) return;
+  const usableNow = isSourceUsableNow(doc);
+  if (ps.verificationStatus === VERIFICATION_STATUS.VERIFIED) ps.availabilityStatus = AVAILABILITY_STATUS.AVAILABLE;
+  else ps.availabilityStatus = usableNow ? AVAILABILITY_STATUS.PARTIAL : AVAILABILITY_STATUS.UNAVAILABLE;
 }
 
 /** Đặt trạng thái + đồng bộ các field cũ (doc.status/doc.pageCoverage) để phần UI/code cũ không vỡ. */
@@ -1234,6 +1297,7 @@ function setSourceStatus(doc, status, patch) {
   if (status === SOURCE_STATUS.READY && !ps.completedAt) ps.completedAt = Date.now();
   if (status !== SOURCE_STATUS.READY) ps.completedAt = null;
   doc.processing = ps;
+  syncDerivedAvailability(doc); // PHẦN VII: availabilityStatus dựa trên chunk THẬT, không chỉ số processing
   // doc.status giữ 3 giá trị cũ cho code/UI cũ, nhưng 'ready' NAY chỉ ứng với READY thật sự.
   doc.status = status === SOURCE_STATUS.READY ? 'ready' : (status === SOURCE_STATUS.ERROR ? 'error' : 'loading');
   // pageCoverage = ảnh phản chiếu của phần RENDER (giữ tên cũ cho UI/test cũ), không phải "đã đọc".
@@ -1289,18 +1353,43 @@ function isSourceProcessing(doc) {
   const st = ensureSourceProcessingState(doc).status;
   return SOURCE_TERMINAL_STATUSES.indexOf(st) === -1;
 }
+
+/** PHẦN VII (kiến trúc mới): "usable" != "ready". TRUE nếu doc có ÍT NHẤT 1 evidence THẬT dùng
+ * được ngay — không placeholder, không lỗi extraction, có nội dung thật. Đây là điều kiện DÙNG được
+ * nguồn ngay lập tức (retrieval/gửi ảnh/gửi context), khác hẳn isSourceReady() (yêu cầu 100% coverage
+ * đã verify). Nguồn ERROR mà chưa từng có 1 evidence nào -> KHÔNG usable (không có gì thật để dùng).
+ */
+function isSourceUsableNow(doc) {
+  if (!doc) return false;
+  const chunks = doc.chunks || [];
+  return chunks.some((c) => !c[SOURCE_PLACEHOLDER_FLAG]
+    && (!c.extractionStatus || c.extractionStatus === 'ok')
+    && String(c.text || '').trim().length > 0);
+}
+
+/** PHẦN VII: alias tường minh cho ý nghĩa "đã xác minh TOÀN BỘ" — CHÍNH XÁC là isSourceReady(), giữ
+ * tách riêng tên hàm để chỗ gọi nói rõ ý định (tránh nhầm READY với USABLE — mục LXII "NO FALSE READY"). */
+function isSourceFullyVerified(doc) {
+  return isSourceReady(doc);
+}
 /** Tóm tắt trạng thái mọi nguồn — dùng cho UI composer + gửi kèm request (PHẦN N/Q/S). */
 function sourceReadinessSummary() {
   const docs = state.docs || [];
   const processing = docs.filter(isSourceProcessing);
   const incomplete = docs.filter((d) => ensureSourceProcessingState(d).status === SOURCE_STATUS.INCOMPLETE);
+  const usableNow = docs.filter(isSourceUsableNow);
   return {
     total: docs.length,
     ready: docs.filter(isSourceReady).length,
+    // PHẦN III/VII: "processing" KHÔNG còn có nghĩa "chưa dùng được" — chỉ có nghĩa "nền vẫn chạy".
+    // usable: đã có evidence thật, dùng ngay được (kể cả khi vẫn đang processing nền).
+    usable: usableNow.length,
     processing: processing.length,
     incomplete: incomplete.length,
     allReady: processing.length === 0,
-    processingDocs: processing
+    allUsable: docs.length > 0 && usableNow.length === docs.length,
+    processingDocs: processing,
+    unusableDocs: docs.filter((d) => !isSourceUsableNow(d)) // vẫn UPLOADING/PARSING, chưa có evidence nào
   };
 }
 /** Payload trạng thái nguồn gửi kèm MỌI request (PHẦN N: server biết nguồn đã READY hay chưa để
@@ -1310,6 +1399,10 @@ function buildSourceStatusPayload() {
     const ps = ensureSourceProcessingState(d);
     return {
       sourceId: String(d.id), name: d.name, status: ps.status,
+      // PHẦN III/N: server PHẢI thấy cả 3 trục — không được suy "usable" từ status READY duy nhất
+      // (mục LXII "NO FALSE READY": PARTIAL không bao giờ được server/prompt trình bày như FULL).
+      availabilityStatus: ps.availabilityStatus, processingStatus: ps.processingStatus,
+      verificationStatus: ps.verificationStatus, usableNow: isSourceUsableNow(d),
       extractionMethod: ps.extractionMethod, extractionVersion: ps.extractionVersion,
       totalPages: ps.totalPages, parsedPages: ps.parsedPages, renderedPages: ps.renderedPages,
       extractedPages: ps.extractedPages, verifiedPages: ps.verifiedPages,
@@ -1495,9 +1588,12 @@ function capImagesToByteBudget(images, maxBytes) {
 }
 function collectSourceImages(query = '') {
   const pageHints = extractPageHints(query);
-  // PHẦN B/C: chỉ nguồn ĐÃ READY mới được gửi kèm ảnh — nguồn đang đọc dở không được xuất hiện như
-  // nguồn hoàn chỉnh.
-  const imagePdfDocs = state.docs.filter((doc) => isSourceReady(doc) && doc.sourceType === 'image-pdf' && doc.pageImages && doc.pageImages.length);
+  // PHẦN II.D/VIII (kiến trúc mới): TRƯỚC ĐÂY giới hạn vào isSourceReady() (100% verified) — nghĩa
+  // là 1 PDF scan 134 trang phải đọc xong CẢ 134 trang mới được gửi dù trang đã render/có evidence
+  // từ lâu. NAY: page ĐÃ render (doc.pageImages tồn tại — xem parsePDF()) là dùng được ngay, độc lập
+  // với việc source đã fully-verified hay chưa — evidence THẬT (ảnh đã rasterize thật) không cần chờ
+  // verify toàn bộ. Vẫn loại doc còn ERROR mà chưa từng render nổi trang nào (pageImages rỗng).
+  const imagePdfDocs = state.docs.filter((doc) => doc.sourceType === 'image-pdf' && doc.pageImages && doc.pageImages.length);
   const out = [];
   imagePdfDocs.forEach((doc) => {
     // PHẦN A11: trang ĐÃ có vision evidence (text đã trích xong, xem processPdfVisionEvidence())
@@ -2211,12 +2307,16 @@ function requirementRegex(label) {
   return new RegExp(`(^|[^\\d.])${esc}(?!\\.?\\d)`);
 }
 
-/** Gom mọi chunk của các nguồn ĐÃ READY (loại tuyệt đối chunk placeholder — TEST 13). */
-function collectReadyChunks(query) {
+/** PHẦN VIII (kiến trúc mới): gom evidence từ mọi nguồn USABLE NOW — không chỉ nguồn ĐÃ fully
+ * verified (READY). Điều kiện là "source usable AND evidence valid" (mục VIII của audit), KHÔNG còn
+ * `filter(isSourceReady)` đơn thuần — đó chính là root cause làm mất lợi thế evidence đã có trong
+ * lúc nguồn còn processing nền (mục II.C). Vẫn loại TUYỆT ĐỐI chunk placeholder và chunk có
+ * extractionStatus lỗi — evidence phải THẬT, không được suy đoán/giả vờ (TEST 13). */
+function collectAvailableEvidence(query) {
   const qWords = (normalizeForMatch(query).match(/[\p{L}\p{N}.]+/gu) || []).filter((w) => w.length > 2);
-  const readyDocs = (state.docs || []).filter(isSourceReady);
+  const usableDocs = (state.docs || []).filter(isSourceUsableNow);
   const out = [];
-  readyDocs.forEach((doc) => {
+  usableDocs.forEach((doc) => {
     const ps = ensureSourceProcessingState(doc);
     (doc.chunks || []).forEach((ch) => {
       if (ch[SOURCE_PLACEHOLDER_FLAG]) return;                    // KHÔNG BAO GIỜ gửi placeholder cho AI
@@ -2240,6 +2340,9 @@ function collectReadyChunks(query) {
   });
   return out;
 }
+// Tên cũ giữ lại làm alias — vài chỗ (test cũ, code ngoài) có thể còn gọi collectReadyChunks(); hành
+// vi bên trong giờ là "available now", KHÔNG còn nghĩa "chỉ nguồn 100% READY" (xem PHẦN VIII ở trên).
+function collectReadyChunks(query) { return collectAvailableEvidence(query); }
 
 function stripInternal(c) {
   const out = Object.assign({}, c);
@@ -2273,13 +2376,14 @@ function fitToCharBudget(list, budget) {
  * Không có top-k mù (`slice(0,4)`), cũng KHÔNG gửi cả tài liệu mỗi lượt — trần là ngân sách ký tự.
  */
 function retrieveContext(query, limit) {
-  const all = collectReadyChunks(query);
-  if (!all.length) return [];
+  const all = collectAvailableEvidence(query);
+  if (!all.length) return Object.assign([], { requirementLabels: [], matchedRequirementLabels: [], unmatchedRequirementLabels: [] });
 
   // Chế độ SOURCE-COMPLETE: người dùng xin "toàn bộ tài liệu" -> giữ ĐỦ số evidence (không bỏ sót
   // phần nào), nội dung được rút gọn theo ngân sách nếu quá lớn (PHẦN P).
   if (isFullSourceRequest(query)) {
-    return fitToCharBudget(all.slice(0, SOURCE_COMPLETE_CAP), SOURCE_COMPLETE_CHAR_BUDGET);
+    return Object.assign(fitToCharBudget(all.slice(0, SOURCE_COMPLETE_CAP), SOURCE_COMPLETE_CHAR_BUDGET),
+      { requirementLabels: [], matchedRequirementLabels: [], unmatchedRequirementLabels: [] });
   }
 
   const picked = new Map();
@@ -2291,7 +2395,17 @@ function retrieveContext(query, limit) {
   };
 
   // ---------- TẦNG 1: exact requirement + trang được chỉ đích danh ----------
+  // ROOT CAUSE THẬT (phát hiện từ báo lỗi thực tế — user hỏi "giải 1.9 đến 1.11", nguồn CÓ trang
+  // thật nhưng KHÔNG chunk nào chứa literal "1.9" đúng dạng, ví dụ OCR/format khác đi). Bản cũ khi
+  // TẦNG 1 rỗng cho 1 nhãn thì ÂM THẦM rơi xuống TẦNG 2 (keyword chung cho cả câu hỏi) — và TẦNG 2
+  // có thể khớp một đoạn HOÀN TOÀN KHÁC chủ đề (vd "hệ thức Chasles" ở mục trước đó trong CÙNG bài,
+  // trùng từ khoá "góc lượng giác") rồi model trình bày nhầm như thể đó là nội dung bài 1.9 — bịa
+  // đúng nghĩa đen: gắn nhãn thật lên nội dung sai. NAY: mỗi nhãn được yêu cầu PHẢI tự báo cáo nó có
+  // tìm thấy evidence THẬT hay không — không có evidence tier-1 riêng cho nhãn đó thì nhãn đó đi vào
+  // `unmatchedRequirementLabels` và được gửi CÙNG payload để server/model biết KHÔNG được bịa.
   const requirementLabels = extractRequirementLabels(query);
+  const matchedRequirementLabels = [];
+  const unmatchedRequirementLabels = [];
   const pageHints = Array.from(extractPageHints(query));
   const tier1Keys = [];
   requirementLabels.forEach((label) => {
@@ -2302,6 +2416,8 @@ function retrieveContext(query, limit) {
       if (!re.test(c._norm)) return;
       add(c, 1, label); tier1Keys.push(keyOf(c)); taken++;
     });
+    if (taken > 0) matchedRequirementLabels.push(label);
+    else unmatchedRequirementLabels.push(label);
   });
   pageHints.forEach((p) => {
     all.forEach((c) => {
@@ -2324,6 +2440,11 @@ function retrieveContext(query, limit) {
   });
 
   // ---------- TẦNG 2: semantic/keyword ----------
+  // QUAN TRỌNG: tier2 vẫn được gửi (hữu ích khi câu hỏi không nêu số cụ thể, hoặc để model tham
+  // khảo ngữ cảnh xung quanh) — nhưng KHÔNG BAO GIỜ được gắn nhãn `requirement` của 1 label cụ thể
+  // nào (tham số thứ 3 của add() luôn là null ở đây), để server phân biệt rạch ròi "evidence THẬT
+  // của bài X" (tier 1, có requirement=X) với "evidence liên quan chung chung" (tier 2/3, không gắn
+  // với số bài nào) — model không có cớ để nhầm nội dung tier-2 là đúng bài đã hỏi.
   const scored = all.filter((c) => c.score > 0).sort((a, b) => b.score - a.score);
   // Không có đoạn nào khớp từ khoá (rất dễ xảy ra với so khớp từ khoá đơn giản) -> vẫn đưa evidence
   // để AI tự đánh giá, thay vì trả [] khiến AI kết luận "không có nguồn".
@@ -2335,7 +2456,10 @@ function retrieveContext(query, limit) {
 
   // Tầng 1 luôn đứng trước (PHẦN K: current query/source evidence ưu tiên tuyệt đối).
   const ordered = Array.from(picked.values()).sort((a, b) => a.retrievalTier - b.retrievalTier);
-  return fitToCharBudget(ordered.slice(0, SOURCE_COMPLETE_CAP), RETRIEVAL_CHAR_BUDGET);
+  const result = fitToCharBudget(ordered.slice(0, SOURCE_COMPLETE_CAP), RETRIEVAL_CHAR_BUDGET);
+  // Gắn kèm trên chính mảng trả về (không đổi kiểu trả về, mọi call site cũ vẫn coi nó là mảng)
+  // để 3 nơi gửi request đọc được mà không phải gọi lại extractRequirementLabels() lần 2.
+  return Object.assign(result, { requirementLabels, matchedRequirementLabels, unmatchedRequirementLabels });
 }
 
 /* ---------- SOURCE MANIFEST (PHẦN E) — CHỈ SỐ LIỆU THẬT, KHÔNG "coverage 100%" hardcode ----------
@@ -4599,11 +4723,23 @@ async function sendMessage() {
     return;
   }
 
-  await waitForAllSourceProcessing(); // PHẦN B: chờ TRỌN vòng đời nguồn (parse+rasterize+vision+verify) trước khi dựng request
+  // PHẦN II.B/IV (kiến trúc mới): KHÔNG còn await toàn bộ vòng đời nguồn trước khi dựng request —
+  // đó là root cause khiến 1 câu hỏi đơn giản phải chờ CẢ PDF scan 134 trang đọc xong. retrieveContext()
+  // bên dưới tự lấy evidence THẬT đang có qua collectAvailableEvidence() (PHẦN VIII), dùng được ngay
+  // cả khi nguồn còn đang enrich nền. waitForAllSourceProcessing() vẫn tồn tại cho nơi THỰC SỰ cần
+  // full coverage (vd export toàn bộ tài liệu) — không dùng làm hàng rào mặc định cho mọi câu hỏi nữa.
   const contexts = retrieveContext(query);
   // imageId gắn thêm vào chính aiMsgObj (không chỉ userMsgObj) — để fetchDetail()/renderStoredAiMessage()
   // sau F5 tra được ảnh cần khôi phục ngay từ message AI mà không phải dò ngược message user liền trước.
-  const aiMsgObj = { id: uid(), role: 'ai', query, approach: '', detail: null, contexts, crossChecked: false, imageId: image ? image.imageId : null };
+  const aiMsgObj = {
+    id: uid(), role: 'ai', query, approach: '', detail: null, contexts, crossChecked: false, imageId: image ? image.imageId : null,
+    // PHẦN F/PHẦN N BỔ SUNG: lưu lại NGAY tại thời điểm retrieveContext() chạy — lượt "Giải chi
+    // tiết" (stage=detail) tái dùng đúng `msgObj.contexts` đã lưu này (không gọi lại
+    // retrieveContext()), nên phải giữ requirementLabels cùng lúc, không tính lại/đoán lại.
+    requirementLabels: contexts.requirementLabels || [],
+    matchedRequirementLabels: contexts.matchedRequirementLabels || [],
+    unmatchedRequirementLabels: contexts.unmatchedRequirementLabels || []
+  };
   const aiRow = addAiMsg('Hướng giải');
   aiRow.dataset.msgId = aiMsgObj.id;
   const contentEl = aiRow.querySelector('.content');
@@ -4641,7 +4777,11 @@ async function sendMessage() {
       history: selectRelevantHistory(query, state.history),
       historyTurnsRaw: state.history.length,
       sourceManifest: buildSourceManifest(),
-      sourceStatus: buildSourceStatusPayload()
+      sourceStatus: buildSourceStatusPayload(),
+      // PHẦN F BỔ SUNG: nhãn nào KHÔNG có evidence thật — model bị cấm bịa nội dung thay thế cho
+      // đúng những nhãn này (xem buildRequirementIntegrityBlock() ở promptBuilder.js).
+      requirementLabels: aiMsgObj.requirementLabels,
+      unmatchedRequirementLabels: aiMsgObj.unmatchedRequirementLabels
     }, {
       onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
@@ -4777,7 +4917,9 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
       history: selectRelevantHistory(msgObj.query, state.history),
       historyTurnsRaw: state.history.length,
       sourceManifest: buildSourceManifest(),
-      sourceStatus: buildSourceStatusPayload()
+      sourceStatus: buildSourceStatusPayload(),
+      requirementLabels: msgObj.requirementLabels || [],
+      unmatchedRequirementLabels: msgObj.unmatchedRequirementLabels || []
     }, {
       onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
@@ -4856,7 +4998,11 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
  * trả lời đã giải).
  */
 async function handleOutlineOnlyTurn(query, conv) {
-  await waitForAllSourceProcessing(); // PHẦN B: chờ TRỌN vòng đời nguồn (parse+rasterize+vision+verify) trước khi dựng request
+  // PHẦN II.B/IV (kiến trúc mới): KHÔNG còn await toàn bộ vòng đời nguồn trước khi dựng request —
+  // đó là root cause khiến 1 câu hỏi đơn giản phải chờ CẢ PDF scan 134 trang đọc xong. retrieveContext()
+  // bên dưới tự lấy evidence THẬT đang có qua collectAvailableEvidence() (PHẦN VIII), dùng được ngay
+  // cả khi nguồn còn đang enrich nền. waitForAllSourceProcessing() vẫn tồn tại cho nơi THỰC SỰ cần
+  // full coverage (vd export toàn bộ tài liệu) — không dùng làm hàng rào mặc định cho mọi câu hỏi nữa.
   const contexts = retrieveContext(query);
   const aiMsgObj = { id: uid(), role: 'ai', query, approach: '', detail: null, contexts: [], crossChecked: false, outlineSpec: null };
   const aiRow = addAiMsg('Đề cương');
@@ -5935,7 +6081,11 @@ function isMindmapRequest(text) {
 }
 
 async function handleMindmapOnlyTurn(query, conv) {
-  await waitForAllSourceProcessing(); // PHẦN B: chờ TRỌN vòng đời nguồn (parse+rasterize+vision+verify) trước khi dựng request
+  // PHẦN II.B/IV (kiến trúc mới): KHÔNG còn await toàn bộ vòng đời nguồn trước khi dựng request —
+  // đó là root cause khiến 1 câu hỏi đơn giản phải chờ CẢ PDF scan 134 trang đọc xong. retrieveContext()
+  // bên dưới tự lấy evidence THẬT đang có qua collectAvailableEvidence() (PHẦN VIII), dùng được ngay
+  // cả khi nguồn còn đang enrich nền. waitForAllSourceProcessing() vẫn tồn tại cho nơi THỰC SỰ cần
+  // full coverage (vd export toàn bộ tài liệu) — không dùng làm hàng rào mặc định cho mọi câu hỏi nữa.
   const contexts = retrieveContext(query);
   // mindmapOnly: true đánh dấu đây là tin nhắn CHỈ có mindmap (không có Hướng giải/Lời giải chi
   // tiết riêng) — dùng để renderStoredAiMessage() phân biệt với trường hợp mindmap được vẽ THÊM vào
