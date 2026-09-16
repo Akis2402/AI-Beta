@@ -58,7 +58,26 @@ const HARD_REASONS = new Set([
   'drawing_canonical_mismatch',
   'finish_reason_length'
 ]);
-const SOFT_REASONS = new Set(['missing_coverage', 'missing_conclusion']);
+const SOFT_REASONS = new Set(['missing_coverage', 'missing_conclusion', 'source_absence_claim_while_incomplete', 'requirement_without_evidence']);
+
+// PHẦN N — SOURCE-AWARE COMPLETENESS.
+// "Đủ chữ" không phải là đủ. Hai lỗi dưới đây là lỗi VỀ SỰ THẬT chứ không phải về hình thức:
+//  1. Model khẳng định tài liệu không chứa X trong khi nguồn MỚI ĐỌC ĐƯỢC MỘT PHẦN — kết luận này
+//     không có cơ sở, và đây đúng là triệu chứng người dùng gặp ("AI nói không tìm thấy trong nguồn").
+//  2. Đề có N yêu cầu nhưng chỉ một phần có evidence tương ứng đi kèm.
+// Cả hai để SOFT: chúng báo hiệu chất lượng, nhưng ép continuation vì chúng dễ tạo vòng lặp sửa
+// câu chữ vô ích (PHẦN M: continuation chỉ cho hard-fail thật).
+const SOURCE_ABSENCE_CLAIM_RE = /(tài liệu|tài liệu này|nguồn|văn bản|pdf)[^.\n]{0,60}(không (có|chứa|đề cập|nhắc|nói)|chưa (có|đề cập|cung cấp))|(không (tìm thấy|có) (thông tin|nội dung|dữ liệu)[^.\n]{0,40}(trong )?(tài liệu|nguồn|pdf))/i;
+
+/**
+ * @param {string} text Lời giải đã sinh.
+ * @param {{allReady?:boolean, hasSources?:boolean}} readiness Tóm tắt trạng thái nguồn.
+ * @returns {boolean} true nếu model khẳng định nguồn thiếu thông tin TRONG KHI nguồn chưa đọc xong.
+ */
+function claimsSourceAbsenceWhileIncomplete(text, readiness) {
+  if (!readiness || !readiness.hasSources || readiness.allReady) return false;
+  return SOURCE_ABSENCE_CLAIM_RE.test(String(text || ''));
+}
 
 function classifyReasons(reasons) {
   const hard = reasons.filter((r) => HARD_REASONS.has(r));
@@ -274,6 +293,21 @@ function validateSolutionCompleteness(text, opts = {}) {
   const { missing } = checkCoverage(clean, list);
   if (missing.length) reasons.push('missing_coverage');
 
+  // PHẦN N: nguồn chưa READY thì cấm kết luận "tài liệu không có thông tin".
+  if (claimsSourceAbsenceWhileIncomplete(clean, opts.sourceReadiness)) {
+    reasons.push('source_absence_claim_while_incomplete');
+  }
+  // PHẦN N/F: mỗi yêu cầu của đề nên có ít nhất 1 evidence tương ứng khi nguồn CÓ dữ liệu.
+  if (Array.isArray(contexts) && contexts.length && list.length > 1) {
+    const covered = new Set();
+    list.forEach((label) => {
+      const esc = String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`(^|[^\\d.])${esc}([^\\d.]|$)`, 'i');
+      if (contexts.some((c) => re.test(String(c.text || '')))) covered.add(label);
+    });
+    if (covered.size && covered.size < list.length) reasons.push('requirement_without_evidence');
+  }
+
   // "Bước X" cụt ở CUỐI văn bản (không phải trong thân bài — "Bước 1: ..." giữa bài là bình thường).
   if (/Bước\s*\d+\s*[:.]?\s*$/i.test(clean)) reasons.push('cut_mid_step');
 
@@ -320,6 +354,7 @@ function validateSolutionCompleteness(text, opts = {}) {
 
 module.exports = {
   extractCoverageList,
+  claimsSourceAbsenceWhileIncomplete,
   checkCoverage,
   validateSolutionCompleteness,
   hasUnclosedCodeFence,

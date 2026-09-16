@@ -137,6 +137,16 @@ function parseSourceImages(body) {
  * QUAN TRỌNG: client KHÔNG được phép tự gửi "system prompt" — server luôn tự dựng lại
  * system prompt từ các trường đã được kiểm duyệt bên dưới (xem promptBuilder.js).
  */
+// PHẦN F/N: tập giá trị hợp lệ cho provenance + vòng đời nguồn (khớp public/js/app.js).
+const ALLOWED_EXTRACTION_METHODS = ['text', 'vision', 'none', 'unknown'];
+const ALLOWED_EXTRACTION_STATUSES = ['ok', 'failed', 'pending', 'placeholder'];
+const ALLOWED_SOURCE_STATUSES = ['UPLOADING', 'PARSING', 'RASTERIZING', 'EXTRACTING', 'VERIFYING', 'READY', 'INCOMPLETE', 'ERROR'];
+const MAX_SOURCE_STATUS_ENTRIES = 20;
+function nonNegInt(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
 function validateChatBody(body) {
   if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
 
@@ -196,6 +206,13 @@ function validateChatBody(body) {
           sourceId: (c && c.sourceId != null) ? clip(String(c.sourceId), MAX_DOC_NAME) : null,
           chunkIndex: Number.isFinite(Number(c && c.chunkIndex)) ? Number(c.chunkIndex) : null,
           totalChunks: Number.isFinite(Number(c && c.totalChunks)) ? Number(c.totalChunks) : null,
+          // PHẦN F (provenance): mỗi evidence tự khai nó đến từ đâu và bằng cách nào. Nhờ đó
+          // citationMap/validator không phải suy luận lại theo vị trí mảng, và ta chặn được
+          // citation trỏ vào chunk lỗi/placeholder ngay tại cổng vào.
+          evidenceId: (c && c.evidenceId != null) ? clip(String(c.evidenceId), MAX_DOC_NAME) : null,
+          extractionMethod: ALLOWED_EXTRACTION_METHODS.includes(c && c.extractionMethod) ? c.extractionMethod : 'unknown',
+          extractionStatus: ALLOWED_EXTRACTION_STATUSES.includes(c && c.extractionStatus) ? c.extractionStatus : 'ok',
+          retrievalTier: Number.isFinite(Number(c && c.retrievalTier)) ? Number(c.retrievalTier) : null,
           // mục 9: RAW SOURCE vs RETRIEVED/SELECTED/COMPRESSED CONTEXT — client gửi context đã là 1
           // EXCERPT chọn sẵn, KHÔNG phải toàn bộ tài liệu gốc. Đánh dấu rõ khi excerpt này còn bị cắt
           // thêm ở đây (vượt SECURITY_MAX_CONTEXT_LEN) — downstream (sourceCoverage.js) PHẢI coi
@@ -209,6 +226,31 @@ function validateChatBody(body) {
   // mục A3: SOURCE MANIFEST — metadata nhẹ tóm tắt coverage (số trang/đoạn/% đã đọc) của các nguồn
   // đang active, KHÔNG phải nội dung thật (nội dung thật vẫn nằm trong `contexts`/`sourceImages`).
   const sourceManifest = clip(String(body.sourceManifest || '').trim(), MAX_SOURCE_MANIFEST_LEN);
+
+  // PHẦN N/S: TRẠNG THÁI THẬT của từng nguồn (vòng đời lifecycle phía client). Server dùng nó để
+  // (1) cấm model kết luận "tài liệu không có thông tin" khi nguồn chưa đọc xong, (2) log
+  // sourceReady/sourceCoverage, (3) đưa extractionVersion vào cache key (PHẦN T).
+  const sourceStatus = Array.isArray(body.sourceStatus)
+    ? body.sourceStatus.slice(0, MAX_SOURCE_STATUS_ENTRIES).map((s0) => ({
+      sourceId: clip(String((s0 && s0.sourceId) || ''), MAX_DOC_NAME),
+      name: clip(String((s0 && s0.name) || ''), MAX_DOC_NAME),
+      status: ALLOWED_SOURCE_STATUSES.includes(s0 && s0.status) ? s0.status : 'INCOMPLETE',
+      extractionMethod: ALLOWED_EXTRACTION_METHODS.includes(s0 && s0.extractionMethod) ? s0.extractionMethod : 'unknown',
+      extractionVersion: Number.isFinite(Number(s0 && s0.extractionVersion)) ? Number(s0.extractionVersion) : 0,
+      totalPages: nonNegInt(s0 && s0.totalPages),
+      parsedPages: nonNegInt(s0 && s0.parsedPages),
+      renderedPages: nonNegInt(s0 && s0.renderedPages),
+      extractedPages: nonNegInt(s0 && s0.extractedPages),
+      verifiedPages: nonNegInt(s0 && s0.verifiedPages),
+      failedPages: Array.isArray(s0 && s0.failedPages) ? s0.failedPages.slice(0, 50).map((p) => nonNegInt(p)) : [],
+      renderCoverage: nonNegInt(s0 && s0.renderCoverage),
+      readCoverage: nonNegInt(s0 && s0.readCoverage),
+      verifiedCoverage: nonNegInt(s0 && s0.verifiedCoverage)
+    })).filter((s0) => s0.sourceId || s0.name)
+    : [];
+  // Số lượt history GỐC phía client (trước khi selectRelevantHistory() lọc) — chỉ để telemetry
+  // historyTurnsRaw vs historyTurnsSent (PHẦN S), KHÔNG ảnh hưởng nội dung prompt.
+  const historyTurnsRaw = nonNegInt(body.historyTurnsRaw);
 
   const bodySettings = body.settings || {};
   const school = Object.prototype.hasOwnProperty.call(SCHOOL_GRADES, bodySettings.school)
@@ -234,7 +276,7 @@ function validateChatBody(body) {
       })).filter((h) => h.content)
     : [];
 
-  return { query, deepThinking, crossCheck, image, sourceImages, rules, contexts, sourceManifest, settings, history, stage, approachText };
+  return { query, deepThinking, crossCheck, image, sourceImages, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, settings, history, stage, approachText };
 }
 
 /** Validate body của các endpoint /api/generate/* (flashcards + mindmap dùng chung) */

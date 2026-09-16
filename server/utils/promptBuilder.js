@@ -233,9 +233,22 @@ function formatContextLine(c, i) {
 // % coverage của từng nguồn), để model KHÔNG BAO GIỜ tự suy luận "chỉ có vài đoạn = đó là toàn bộ
 // tài liệu" (đây là nguyên nhân trực tiếp của lỗi "AI nói chưa cung cấp nội dung" dù nguồn đã có và
 // đã xử lý xong — xem PHẦN E). Không phải nội dung thật — chỉ vài dòng thống kê.
-function buildSourceManifestBlock(sourceManifest) {
-  if (!sourceManifest) return '';
-  return `\n\n${sourceManifest}\nLƯU Ý: bảng trên là THỐNG KÊ COVERAGE của các nguồn đã tải lên — KHÔNG phải toàn bộ nội dung. Nếu số đoạn trích bên dưới có vẻ ít hơn coverage này, đó là do hệ thống đã CHỌN LỌC đoạn liên quan nhất cho câu hỏi hiện tại (không phải do PDF chỉ có từng đó nội dung) — TUYỆT ĐỐI KHÔNG kết luận "chưa cung cấp nội dung"/"tài liệu không có phần này" chỉ vì không thấy trong các đoạn trích hiện tại; nếu nghi ngờ thiếu, hãy nói rõ phần nào chưa chắc thay vì khẳng định tài liệu không có.`;
+function buildSourceManifestBlock(sourceManifest, sourceReadiness) {
+  if (!sourceManifest) return buildSourceReadinessBlock(sourceReadiness);
+  return buildSourceReadinessBlock(sourceReadiness) + `\n\n${sourceManifest}\nLƯU Ý: bảng trên là THỐNG KÊ COVERAGE của các nguồn đã tải lên — KHÔNG phải toàn bộ nội dung. Nếu số đoạn trích bên dưới có vẻ ít hơn coverage này, đó là do hệ thống đã CHỌN LỌC đoạn liên quan nhất cho câu hỏi hiện tại (không phải do PDF chỉ có từng đó nội dung) — TUYỆT ĐỐI KHÔNG kết luận "chưa cung cấp nội dung"/"tài liệu không có phần này" chỉ vì không thấy trong các đoạn trích hiện tại; nếu nghi ngờ thiếu, hãy nói rõ phần nào chưa chắc thay vì khẳng định tài liệu không có.`;
+}
+
+/* ---------- PHẦN N: SOURCE-AWARE COMPLETENESS ----------
+ * Khi nguồn CHƯA đọc xong, câu "trong tài liệu không có thông tin này" là SAI VỀ MẶT SỰ KIỆN —
+ * hệ thống mới đọc được một phần, không có cơ sở nào để khẳng định phần còn lại không chứa nó.
+ * Đây là chỗ biến trạng thái lifecycle (client đo được) thành ràng buộc CỨNG cho model. */
+function buildSourceReadinessBlock(readiness) {
+  if (!readiness || !readiness.hasSources) return '';
+  if (readiness.allReady) {
+    return `\n\nTRẠNG THÁI NGUỒN: TẤT CẢ nguồn đã được đọc và xác minh XONG (100% số trang). Nếu một nội dung thực sự không có trong các đoạn trích, được phép nói rõ là không tìm thấy trong phần tài liệu liên quan tới câu hỏi này.`;
+  }
+  return `\n\nTRẠNG THÁI NGUỒN — CHƯA ĐỌC XONG: ${readiness.summaryLine}.
+BẮT BUỘC: TUYỆT ĐỐI KHÔNG được viết "tài liệu không có thông tin này"/"nguồn không đề cập"/"không tìm thấy trong tài liệu" — hệ thống MỚI ĐỌC ĐƯỢC MỘT PHẦN nguồn, nên không có căn cứ để khẳng định điều đó. Nếu phần bạn cần không nằm trong các đoạn trích hiện có, hãy nói đúng trạng thái: "nguồn chưa được đọc hoàn tất, phần này chưa nằm trong dữ liệu đã trích xuất" rồi giải bằng kiến thức chuẩn và ghi rõ đó là kiến thức chuẩn, không phải trích từ tài liệu.`;
 }
 
 function buildSourcePolicyBlock({ hasContexts, hasWebSearch, hasSourceNoContext = false }) {
@@ -397,7 +410,7 @@ function buildChatSystemPrompt(input) {
   return buildChatSystemPromptParts(input).text;
 }
 
-function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '' }) {
+function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '', sourceReadiness = null }) {
   const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId, subjectSource);
   const drawingNeeded = needsDrawingInstructions({ problemText, approachText, hasImage: !!image });
   let contextBlock = '';
@@ -406,11 +419,11 @@ function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, 
       '\n\nTrích đoạn liên quan từ các nguồn đang bật, đánh số ' + citeNoRangeLabel(contexts) +
       ']. Khi dùng thông tin nào làm căn cứ, chèn đúng số [n] ngay sau câu liên quan:\n' +
       contexts.map((c, i) => formatContextLine(c, i)).join('\n---\n') +
-      buildSourceManifestBlock(sourceManifest);
+      buildSourceManifestBlock(sourceManifest, sourceReadiness);
   } else if (sourceManifest) {
     // mục PHẦN E, CASE 2 (có source nhưng retrieval chưa tìm được đoạn liên quan): manifest vẫn
     // chèn để model biết nguồn THẬT SỰ tồn tại và đã xử lý — không được coi như "chưa tải tài liệu".
-    contextBlock = buildSourceManifestBlock(sourceManifest);
+    contextBlock = buildSourceManifestBlock(sourceManifest, sourceReadiness);
   }
 
   const rulesBlock = rules.length
@@ -505,12 +518,12 @@ function buildVariantAddendum() {
  * @returns {{staticPart:string, cachedContextPart:string, dynamicPart:string, text:string}}
  */
 function buildReconcileSystemPromptParts(input) {
-  const { contexts = [], sourceManifest = '' } = input;
+  const { contexts = [], sourceManifest = '', sourceReadiness = null } = input;
   const cachedContextPart = contexts.length
     ? '\n\nTrích đoạn liên quan từ các nguồn tài liệu người dùng cung cấp, đánh số ' + citeNoRangeLabel(contexts) + ':\n' +
       contexts.map((c, i) => formatContextLine(c, i)).join('\n---\n') +
-      buildSourceManifestBlock(sourceManifest)
-    : buildSourceManifestBlock(sourceManifest);
+      buildSourceManifestBlock(sourceManifest, sourceReadiness)
+    : buildSourceManifestBlock(sourceManifest, sourceReadiness);
   const dynamicPart = buildReconcileDynamicPart(input);
   return {
     staticPart: STATIC_RECONCILE_PREFIX,
@@ -525,7 +538,7 @@ function buildReconcileSystemPrompt(input) {
   return buildReconcileSystemPromptParts(input).text;
 }
 
-function buildReconcileDynamicPart({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '' }) {
+function buildReconcileDynamicPart({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '', sourceReadiness = null }) {
   // Manual hard lock (mục 1): reconcile TUYỆT ĐỐI không được để candidate/secondarySubjectId kéo
   // môn khác vào bước tổng hợp — ép secondarySubjectId về null bất kể caller truyền gì vào khi
   // subjectSource === 'manual', rồi mới build directive (buildSubjectDirective tự chọn nhánh lock).
@@ -674,6 +687,7 @@ const PROMPT_VERSION = 'chat-prompt-v9'; // v9 (mục 1 audit HARD SUBJECT LOCK)
 
 module.exports = {
   citeNoRangeLabel,
+  buildSourceReadinessBlock,
   PROMPT_VERSION,
   buildChatSystemPrompt,
   buildChatSystemPromptParts,

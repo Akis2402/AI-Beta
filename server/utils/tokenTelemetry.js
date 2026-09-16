@@ -32,6 +32,10 @@ function num(v) {
  */
 function bucketOf(stage) {
   const s = String(stage || '').toLowerCase();
+  // PHẦN S: INDEXING NGUỒN LÀ MỘT KHOẢN CHI RIÊNG. Nó xảy ra 1 lần lúc upload; cộng nó vào token
+  // của mỗi lượt chat sẽ vẽ ra bức tranh sai hoàn toàn về chi phí mỗi câu hỏi (và che mất chính
+  // thứ ta đang tối ưu: chat request chỉ retrieve evidence cần thiết).
+  if (s.includes('source_index') || s.includes('vision_extract') || s.includes('source_vision')) return 'sourceIndexing';
   if (s.includes('cross_check') || s.includes('crosscheck') || s.includes('candidate')) return 'crossCheck';
   if (s.includes('reconcile')) return 'reconcile';
   if (s.includes('recovery') || s.includes('continuation') || s.includes('resume')) return 'recovery';
@@ -52,6 +56,8 @@ class RequestTokenTelemetry {
       reconcileCalls: 0,
       recoveryCalls: 0,
       visualCalls: 0,
+      sourceIndexingCalls: 0,
+      sourceIndexingTokens: 0,   // token đọc nguồn lúc upload — KHÔNG thuộc bất kỳ chat request nào
       // ---- token ----
       inputTokens: 0,            // THẬT (provider trả về)
       outputTokens: 0,           // THẬT, KHÔNG gồm reasoning
@@ -117,6 +123,7 @@ class RequestTokenTelemetry {
     if (bucket === 'crossCheck') t.crossCheckCalls += 1;
     else if (bucket === 'reconcile') t.reconcileCalls += 1;
     else if (bucket === 'visual') t.visualCalls += 1;
+    else if (bucket === 'sourceIndexing') t.sourceIndexingCalls += 1;
     if (bucket === 'recovery' || record.recovery) t.recoveryCalls += 1;
 
     if (hasRealUsage) {
@@ -128,6 +135,7 @@ class RequestTokenTelemetry {
       t.cacheCreationTokens += record.cacheCreationTokens || 0;
       if (bucket === 'recovery' || record.recovery) t.continuationTokens += record.outputTokens || 0;
       if (record.retry) t.retryTokens += record.outputTokens || 0;
+      if (bucket === 'sourceIndexing') t.sourceIndexingTokens += (record.inputTokens || 0) + (record.outputTokens || 0);
     } else {
       t.attemptsEstimatedOnly += 1;
       t.estimatedTokens += record.estimatedOutputTokens || 0;

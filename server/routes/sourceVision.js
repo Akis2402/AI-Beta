@@ -57,6 +57,9 @@ router.post('/vision-extract', async (req, res, next) => {
               ]
             }],
             maxTokens: 1500,
+            // PHẦN S: gắn nhãn stage để tokenTelemetry xếp token này vào sourceIndexing — chi phí
+            // đọc nguồn 1 lần lúc upload, KHÔNG được cộng vào token của các lượt chat sau đó.
+            stage: 'source_indexing_vision_extract',
             requestId: req.requestId
           },
           { requireVision: true, deadline }

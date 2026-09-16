@@ -65,4 +65,69 @@ function detectFabricatedSources(text, contexts) {
   return { fabricatedUrls };
 }
 
-module.exports = { validateCitations, detectFabricatedSources, CITATION_RE };
+/**
+ * PHẦN F — VALIDATE PROVENANCE, không chỉ validate con số.
+ * validateCitations() trả lời "số [n] này có nằm trong tập hợp lệ không". Câu hỏi còn lại quan
+ * trọng không kém: "đoạn mà [n] trỏ tới có PHẢI bằng chứng thật không" — nó có tồn tại trong
+ * evidence map, có thuộc nguồn đã READY, có số trang hợp lệ, có phải placeholder/chunk lỗi không.
+ * Hàm này deterministic hoàn toàn: chỉ đối chiếu metadata, không đoán nội dung.
+ *
+ * @param {string} text
+ * @param {{contexts:Array, validCiteNos?:number[], aliasOf?:object, sourceStatus?:Array}} opts
+ * @returns {{valid:boolean, invalidCitations:number[], unresolved:number[],
+ *   notReadySources:number[], placeholderCitations:number[], resolved:Array}}
+ */
+function validateCitationProvenance(text, opts = {}) {
+  const contexts = Array.isArray(opts.contexts) ? opts.contexts : [];
+  const base = validateCitations(text, contexts, { validCiteNos: opts.validCiteNos, aliasOf: opts.aliasOf });
+  const aliasOf = opts.aliasOf || {};
+  const byCiteNo = new Map();
+  contexts.forEach((c, i) => byCiteNo.set(c && c.citeNo != null ? c.citeNo : i + 1, c));
+
+  const statusByKey = new Map();
+  (Array.isArray(opts.sourceStatus) ? opts.sourceStatus : []).forEach((s) => {
+    if (s && s.sourceId) statusByKey.set(String(s.sourceId), s);
+    if (s && s.name) statusByKey.set(`name:${s.name}`, s);
+  });
+
+  const unresolved = [];
+  const notReadySources = [];
+  const placeholderCitations = [];
+  const resolved = [];
+
+  base.usedContextIds.forEach((n) => {
+    const citeNo = byCiteNo.has(n) ? n : aliasOf[n];
+    const c = byCiteNo.get(citeNo);
+    if (!c) { unresolved.push(n); return; }
+    if (c.extractionStatus && c.extractionStatus !== 'ok') { placeholderCitations.push(n); return; }
+    const st = statusByKey.get(String(c.sourceId)) || statusByKey.get(`name:${c.doc}`);
+    if (st && st.status !== 'READY') { notReadySources.push(n); return; }
+    // Trang phải là số dương và (khi biết tổng số trang) không vượt quá số trang thật của nguồn.
+    if (c.page != null) {
+      const page = Number(c.page);
+      if (!Number.isFinite(page) || page < 1 || (st && st.totalPages && page > st.totalPages)) {
+        unresolved.push(n);
+        return;
+      }
+    }
+    resolved.push({
+      citeNo, doc: c.doc, sourceId: c.sourceId != null ? c.sourceId : null,
+      page: c.page != null ? c.page : null, evidenceId: c.evidenceId || null,
+      chunkIndex: c.chunkIndex != null ? c.chunkIndex : null,
+      extractionMethod: c.extractionMethod || 'unknown'
+    });
+  });
+
+  return {
+    valid: base.valid && !unresolved.length && !notReadySources.length && !placeholderCitations.length,
+    invalidCitations: base.invalidCitations,
+    unresolved,
+    notReadySources,
+    placeholderCitations,
+    resolved,
+    allCitations: base.allCitations,
+    usedContextIds: base.usedContextIds
+  };
+}
+
+module.exports = { validateCitations, validateCitationProvenance, detectFabricatedSources, CITATION_RE };

@@ -60,6 +60,7 @@ const throughputStats = require('../utils/throughputStats');
 const { validateAllDrawingBlocks, checkCanonicalDrawingConsistency } = require('../utils/drawingValidator');
 // Vấn đề #1: citeNo ỔN ĐỊNH -> mới bật được dedupe context an toàn (xem citationIndex.js).
 const { buildCitationIndex } = require('../utils/citationIndex');
+const sourceProvenance = require('../utils/sourceProvenance');
 const { createRequestDeadline } = require('../utils/requestDeadline');
 const { STATES, isFinalSuccess, assertFinalResponseComplete, classifyFinalOutcome } = require('../utils/runtimeState');
 const { analyzeSourceCoverage } = require('../utils/sourceCoverage');
@@ -527,6 +528,22 @@ router.post('/', async (req, res, next) => {
     // nơi (prompt, completeness/citation validation, sourceCoverage, cache key, payload trả client)
     // đều dùng `effectiveContexts` — KHÔNG dùng `input.contexts` thô nữa, để 3 nơi sinh số citation
     // không thể lệch nhau được nữa.
+    // ---------- PHẦN C/N: LỌC TRƯỚC KHI LÀM BẤT CỨ VIỆC GÌ KHÁC ----------
+    // Placeholder ("⏳ Đang đọc…") và evidence của nguồn CHƯA READY bị loại NGAY TẠI ĐÂY, trước cả
+    // citation index — nếu để lọt, chúng sẽ có citeNo hợp lệ và model có thể trích dẫn 1 dòng báo
+    // trạng thái như thể đó là nội dung tài liệu (TEST 13).
+    const provenanceFilter = sourceProvenance.filterUsableContexts(input.contexts, input.sourceStatus);
+    if (provenanceFilter.dropped.length) {
+      reqLogger.log({
+        stage: 'source_provenance_filter',
+        dropped: provenanceFilter.dropped.length,
+        reasons: [...new Set(provenanceFilter.dropped.map((d) => d.reason))]
+      });
+    }
+    input.contexts = provenanceFilter.usable;
+    const sourceReadiness = sourceProvenance.summarizeSourceReadiness(input.sourceStatus);
+    input.sourceReadiness = sourceReadiness;
+
     const citationIndex = buildCitationIndex(input.contexts);
     // ---------- Vấn đề #2: nén NỘI DUNG đoạn trích (header/footer trang lặp lại giữa các đoạn) ----------
     // Chạy SAU buildCitationIndex để citeNo đã cố định (nén nội dung không bao giờ đổi số trích dẫn),
@@ -751,6 +768,11 @@ router.post('/', async (req, res, next) => {
         rulesFp: tokenEconomy.fingerprint(input.rules.join('|')),
         sourceIdsFp: tokenEconomy.fingerprint(sourceIdsFp),
         contextsFp: tokenEconomy.fingerprint(contextsText),
+        // PHẦN T: nếu evidence/phiên bản trích xuất của nguồn thay đổi (đọc thêm trang, đổi thuật
+        // toán extraction), cache CŨ tuyệt đối không được dùng lại — chữ ký này gồm cả
+        // extractionVersion lẫn coverage thật của từng nguồn.
+        sourceVersionFp: tokenEconomy.fingerprint(sourceProvenance.sourceVersionSignature(input.sourceStatus)),
+        evidenceFp: tokenEconomy.fingerprint(effectiveContexts.map((c) => c.evidenceId || `${c.doc}#${c.page}#${c.id}`).join('|')),
         // PHẦN 20 FIX: fingerprint THẬT (SHA-256) của đúng ảnh này khi có — cho phép cache an toàn
         // theo từng ảnh cụ thể thay vì bypass hoàn toàn L1 (xem tokenEconomy.runTokenEconomyPipeline).
         // sourceImages (PDF-chỉ-ảnh): gộp fingerprint từng trang theo thứ tự cố định để 2 PDF khác
@@ -770,6 +792,24 @@ router.post('/', async (req, res, next) => {
     // câu nào còn là MICRO và cổng tiết kiệm token không bao giờ kích hoạt. Đề ngắn nhưng khó
     // (chứng minh, tích phân, giới hạn…) đã được nâng tối thiểu lên SHORT ở classifyProblem().
     currentProblemClass = tePlan.classification.intrinsicClass;
+    // ---------- PHẦN S: OBSERVABILITY 1 DÒNG/REQUEST ----------
+    // retrievedEvidenceCount là số evidence THỰC SỰ đi vào request này (sau dedupe/lọc provenance),
+    // KHÔNG phải tổng số chunk tồn tại trong IndexedDB — nhầm 2 con số này là cách nhanh nhất để
+    // tưởng rằng mình đang gửi ít token trong khi thực tế thì không.
+    reqLogger.log({
+      stage: 'source_retrieval',
+      sourceReady: sourceReadiness.allReady,
+      sourceCount: (input.sourceStatus || []).length,
+      sourceCoverage: sourceReadiness.coveragePercent,
+      retrievedEvidenceCount: effectiveContexts.length,
+      retrievedPages: sourceProvenance.countRetrievedPages(effectiveContexts),
+      contextsDroppedByProvenance: provenanceFilter.dropped.length,
+      historyTurnsRaw: input.historyTurnsRaw || (input.history || []).length,
+      historyTurnsSent: finalHistory.length,
+      sourceRetrievalTokens: Math.ceil(contextsText.length / 3.2),
+      historyTokens: compressedResult.stats.compressedTokens,
+      systemTokens: systemPack.compressedTokens
+    });
     reqLogger.log({
       stage: 'token_economy_classify', problemClass: tePlan.classification.problemClass,
       intrinsicClass: tePlan.classification.intrinsicClass,
@@ -1028,7 +1068,7 @@ router.post('/', async (req, res, next) => {
             evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
               stage: 'detail', coverageList, approachText: input.approachText,
               contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted,
-              validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf
+              validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness
             }),
             resolveRecovery: makeRecoveryResolver({
               reserveState: reconcileReserveState, deadline: globalDeadline,
@@ -1148,7 +1188,7 @@ router.post('/', async (req, res, next) => {
           evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
             stage: input.stage, coverageList, approachText: input.approachText,
             contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted,
-            validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf
+            validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness
           }),
           resolveRecovery: makeRecoveryResolver({
             reserveState: directReserveState, deadline: globalDeadline,
@@ -1321,7 +1361,7 @@ router.post('/', async (req, res, next) => {
           messages, problemText, stage: 'detail', deadline: globalDeadline,
           approachText: input.approachText, contexts: input.contexts, signal,
           requestId: reqLogger.requestId,
-          validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf,
+          validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness,
           resolveRecovery: jsonReconcileRecovery,
           isDisconnected: () => disconnected
         }
@@ -1399,7 +1439,7 @@ router.post('/', async (req, res, next) => {
         messages, problemText, stage: input.stage, deadline: globalDeadline,
         approachText: input.approachText, contexts: input.contexts, signal,
         requestId: reqLogger.requestId,
-        validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf,
+        validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness,
         resolveRecovery: jsonDirectRecovery,
         isDisconnected: () => disconnected
       }
