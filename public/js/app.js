@@ -163,7 +163,36 @@ function apiHeaders() {
   if (window.APP_CONFIG && window.APP_CONFIG.appKey) headers['x-app-key'] = window.APP_CONFIG.appKey;
   return headers;
 }
+/**
+ * PHẦN A2/A4 — KIỂM TRA KÍCH THƯỚC THẬT TRƯỚC KHI GỬI.
+ * Đo bằng JSON.stringify + TextEncoder (đúng thứ nền tảng đếm), giảm tải theo ưu tiên nếu vượt, và
+ * KHÔNG BAO GIỜ gửi đi một request chắc chắn bị 413 — thà báo lỗi rõ ràng để người dùng thu hẹp
+ * phạm vi còn hơn để họ chờ rồi nhận lỗi vô nghĩa.
+ * @returns {{body:object, dropped:object}}
+ */
+function enforceRequestBudget(body) {
+  const PB = window.PayloadBudget;
+  if (!PB) return { body, dropped: null };
+  const result = PB.reduceBodyToBudget(body);
+  if (!result.ok) {
+    const err = new Error(t('error.payloadTooLarge'));
+    err.code = 'PAYLOAD_TOO_LARGE';
+    err.status = 413;
+    err.clientPrevented = true;
+    err.actualSize = result.bytes;
+    err.safeLimit = result.limit;
+    throw err;
+  }
+  const dropped = result.dropped;
+  if (dropped && (dropped.sourceImages || dropped.history || dropped.contexts)) {
+    console.warn('[payload] đã giảm tải để vừa ngân sách', dropped);
+  }
+  return { body: result.body, dropped };
+}
+
 async function apiPost(path, body, { signal } = {}) {
+  const prepared = enforceRequestBudget(body);
+  body = prepared.body;
   const res = await fetch(path, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body), signal });
   let data;
   try { data = await res.json(); } catch (e) { data = null; }
@@ -209,7 +238,8 @@ async function apiPostStream(path, body, { onDelta, onStatus, signal } = {}) {
     return data;
   }
 
-  const res = await fetch(path, { method: 'POST', headers: apiHeaders(), body: JSON.stringify({ ...body, stream: true }), signal });
+  const preparedStream = enforceRequestBudget({ ...body, stream: true });
+  const res = await fetch(path, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(preparedStream.body), signal });
   if (!res.ok || !res.body) {
     // Server từ chối trước khi mở stream (lỗi validate, thiếu API key...) — đọc lỗi JSON thường.
     let data;
@@ -830,7 +860,7 @@ async function rasterizePdfPage(pdf, pageNum) {
   // TRƯỚC ĐÂY dùng PNG (nén KHÔNG MẤT DỮ LIỆU) cho mỗi trang raster — với 1 trang scan văn bản
   // (nhiều chi tiết tần số cao), 1 ảnh PNG 1400px thường nặng 0.5-2MB. collectSourceImages() có
   // thể gửi tới 18 ảnh như vậy trong 1 request (~9-36MB base64) — vượt xa giới hạn body
-  // express.json({limit:'8mb'}) ở server/app.js, và còn vượt xa giới hạn payload cứng của nền
+  // ngân sách request dùng chung (payloadBudget.js), và còn vượt giới hạn payload cứng của nền
   // tảng hosting (Vercel Serverless Functions) vốn KHÔNG thể nới qua cấu hình app. Khi vượt, body-
   // parser trả lỗi 413 TRƯỚC KHI request chạm tới route /api/chat — client nhận lỗi không có
   // `code`/`error` nhận diện được, rơi về thông báo chung chung (xem errorNormalize.js/i18n.js).
@@ -1574,18 +1604,23 @@ function extractPageHints(query) {
 // 1 trần TỔNG DUNG LƯỢNG base64 — khi vượt, bớt dần ảnh từ CUỐI danh sách (ảnh ít ưu tiên nhất,
 // vì các ảnh người dùng chỉ đích danh qua pageHints luôn được xếp lên đầu ở bước `picked` bên dưới)
 // cho tới khi vừa trần, KHÔNG BAO GIỜ để 1 request 1 mình làm sập cả lượt hỏi.
-const SOURCE_IMAGES_BYTE_BUDGET = 3 * 1024 * 1024; // ~3MB base64 — an toàn dưới mọi trần body phổ biến
+// PHẦN A3/A6: ngân sách đến từ public/js/payloadBudget.js (khớp server). BỎ HẲN luật cũ "luôn giữ
+// ít nhất 1 ảnh dù ảnh đó vượt trần" — mảng vượt ngân sách chắc chắn tạo 413 ở tầng sau, giữ lại
+// không cứu được gì mà chỉ làm hỏng cả lượt hỏi.
+const SOURCE_IMAGES_BYTE_BUDGET = (window.PayloadBudget && window.PayloadBudget.MAX_SOURCE_IMAGES_TOTAL_BYTES) || 2.6 * 1024 * 1024;
+let lastSourceImageRejections = [];
 function capImagesToByteBudget(images, maxBytes) {
-  let total = 0;
-  const kept = [];
-  for (const img of images) {
-    const size = img.base64 ? img.base64.length : 0;
-    if (kept.length && total + size > maxBytes) break; // luôn giữ ít nhất 1 ảnh, dù nó đã vượt trần
-    kept.push(img);
-    total += size;
+  const PB = window.PayloadBudget;
+  if (!PB) return (images || []).slice(0, 1);
+  const res = PB.capImagesToByteBudget(images, { totalBytes: maxBytes || SOURCE_IMAGES_BYTE_BUDGET });
+  lastSourceImageRejections = res.rejected || [];
+  if (lastSourceImageRejections.length) {
+    console.warn('[payload] trang nguồn bị bỏ khỏi lượt hỏi này:',
+      lastSourceImageRejections.map((r) => ({ page: r.item && r.item.page, reason: r.reason })));
   }
-  return kept;
+  return res.kept;
 }
+
 function collectSourceImages(query = '') {
   const pageHints = extractPageHints(query);
   // PHẦN II.D/VIII (kiến trúc mới): TRƯỚC ĐÂY giới hạn vào isSourceReady() (100% verified) — nghĩa
@@ -1660,8 +1695,31 @@ const VISION_PAGE_MAX_ATTEMPTS = 2; // 1 lần đầu + tối đa 1 lần retry
 
 /** Gọi vision cho ĐÚNG danh sách trang truyền vào, theo batch. Trả về số trang đọc thành công. */
 async function runVisionBatches(doc, pages) {
-  for (let i = 0; i < pages.length; i += PDF_RASTER_BATCH_SIZE) {
-    const batch = pages.slice(i, i + PDF_RASTER_BATCH_SIZE);
+  // PHẦN D: gom batch theo BYTE THẬT thay vì hằng số 8 trang. 8 trang scan chữ dày đặc vẫn có thể
+  // vượt trần payload (413 cho cả batch), 8 trang nhẹ lại lãng phí lượt gọi. Trang tự nó vượt ngân
+  // sách được đánh dấu lỗi RIÊNG trang đó, không kéo cả tài liệu.
+  const PB = window.PayloadBudget;
+  const plan = PB
+    ? PB.planByteBatches(pages, {
+      budgetBytes: PB.MAX_SOURCE_IMAGES_TOTAL_BYTES,
+      maxPerBatch: PDF_RASTER_BATCH_SIZE,
+      sizeOf: (img) => PB.base64WireBytes(img.base64) + 256
+    })
+    : (function chunkFallback() {
+      // payloadBudget.js chưa nạp (rất hiếm): vẫn phải chia ĐỦ MỌI trang thành batch — bản fallback
+      // chỉ lấy batch đầu sẽ làm mất trắng các trang còn lại mà không báo lỗi.
+      const out = [];
+      for (let i = 0; i < pages.length; i += PDF_RASTER_BATCH_SIZE) out.push(pages.slice(i, i + PDF_RASTER_BATCH_SIZE));
+      return { batches: out, oversized: [] };
+    })();
+  plan.oversized.forEach((img) => {
+    doc.pageEvidence[img.page] = {
+      ok: false, page: img.page, attempts: VISION_PAGE_MAX_ATTEMPTS, reason: 'page_too_large'
+    };
+  });
+  if (plan.oversized.length) { syncVisionProgress(doc); persistDocs(); renderSources(); }
+
+  for (const batch of plan.batches) {
     try {
       const resp = await apiPost('/api/source/vision-extract', {
         pages: batch.map((img) => ({ page: img.page, mediaType: img.mediaType, base64: img.base64 }))
@@ -1677,6 +1735,13 @@ async function runVisionBatches(doc, pages) {
             extractionMethod: 'vision', extractionVersion: SOURCE_EXTRACTION_VERSION
           }
           : { ok: false, page: r.page, attempts, reason: r.reason || 'unknown' };
+      });
+      // PHẦN E: trang server TỪ CHỐI ở tầng validate — ghi đúng lý do, KHÔNG retry mù (retry cùng
+      // dữ liệu sẽ bị từ chối y hệt) và KHÔNG để trang đó nằm im như thể chưa xử lý.
+      (resp && Array.isArray(resp.rejected) ? resp.rejected : []).forEach((r) => {
+        const page = r.page != null ? r.page : (batch[r.index] && batch[r.index].page);
+        if (page == null) return;
+        doc.pageEvidence[page] = { ok: false, page, attempts: VISION_PAGE_MAX_ATTEMPTS, reason: r.reason || 'rejected' };
       });
       // Trang nằm trong batch nhưng server không trả kết quả nào -> vẫn phải đếm attempt, nếu không
       // vòng retry bên dưới sẽ lặp vô hạn.
@@ -2004,7 +2069,15 @@ async function loadImageFile(file) {
   if (!file) return;
   const guessedMediaType = guessImageMediaType(file);
   if (!guessedMediaType) { alert('Chỉ hỗ trợ dán/đính kèm file ảnh.'); return; }
-  if (file.size > 5 * 1024 * 1024) { alert('Ảnh vượt quá 5MB, vui lòng chọn ảnh nhỏ hơn.'); return; }
+  // PHẦN G: MỘT chính sách MIME duy nhất với server. TRƯỚC ĐÂY giao diện nhận cả BMP/HEIC/HEIF/SVG
+  // (bảng IMAGE_EXT_MEDIA_TYPE) rồi backend mới từ chối — người dùng chỉ thấy "lỗi" sau khi đã chờ.
+  const PB = window.PayloadBudget;
+  const kind = PB ? PB.classifyImageType(guessedMediaType) : 'accepted';
+  if (kind === 'rejected' && guessedMediaType === 'image/svg+xml') {
+    alert('Ảnh SVG không được hỗ trợ (không phải ảnh raster). Hãy xuất sang PNG/JPEG rồi đính kèm lại.');
+    return;
+  }
+  if (kind === 'rejected') { alert('Định dạng ảnh này không được hỗ trợ (chỉ nhận PNG/JPEG/WEBP/GIF).'); return; }
 
   // Ảnh pending trước đó (chưa gửi) bị thay thế bởi ảnh mới này — dọn preview URL + record IndexedDB
   // cũ ngay, tránh rác "orphan" (mục 9). Tăng seq để mọi Promise dở dang của ảnh cũ tự bỏ qua khi
@@ -2055,6 +2128,26 @@ async function loadImageFile(file) {
 
   const [base64Result, saveResult] = await Promise.all([base64Task, saveTask]);
 
+  // PHẦN A5: ảnh máy ảnh điện thoại thường 3-8MB — nếu gửi nguyên trạng thì request chắc chắn 413.
+  // Nén/thu nhỏ NGAY TRONG TRÌNH DUYỆT (hạ chất lượng trước, chỉ thu nhỏ khi buộc phải) cho tới khi
+  // vừa ngân sách; HEIC/HEIF/AVIF/TIFF trình duyệt không decode được -> báo rõ, không gửi mù.
+  if (PB && base64Result.ok) {
+    const wire = PB.base64WireBytes(base64Result.value.base64);
+    if (wire > PB.MAX_DIRECT_IMAGE_BYTES || kind === 'transcode_required') {
+      const shrunk = await PB.compressImageToBudget(file, PB.MAX_DIRECT_IMAGE_BYTES);
+      if (shrunk.ok) {
+        base64Result.value = { mediaType: shrunk.mediaType, base64: shrunk.base64 };
+      } else {
+        base64Result.ok = false;
+        base64Result.error = new Error(shrunk.reason === 'transcode_required'
+          ? 'Định dạng ảnh này (HEIC/HEIF) cần chuyển sang PNG/JPEG trước khi gửi.'
+          : 'Ảnh quá lớn và không thể nén đủ nhỏ. Hãy chụp/chọn ảnh nhỏ hơn.');
+        base64Result.explicitMessage = true;
+      }
+    }
+  }
+
+
   // save_timeout không có nghĩa là chatImageStore.save() đã thất bại thật — có thể nó chỉ chậm/từng
   // bị treo do bug WebKit rồi tự thông sau đó. Nếu sau này rawSavePromise VẪN resolve, gắn lại
   // imageId trễ cho đúng ảnh (theo seq) nếu còn đang pending, tránh mất khả năng khôi phục sau F5
@@ -2083,7 +2176,9 @@ async function loadImageFile(file) {
   if (!base64Result.ok) {
     console.error('[image] đọc base64 thất bại/timeout:', base64Result.error);
     state.pendingImage.status = 'error';
-    state.pendingImage.errorMessage = 'Không đọc được ảnh này (định dạng không được hỗ trợ hoặc file lỗi). Vui lòng chọn ảnh khác.';
+    state.pendingImage.errorMessage = base64Result.explicitMessage
+      ? base64Result.error.message
+      : 'Không đọc được ảnh này (định dạng không được hỗ trợ hoặc file lỗi). Vui lòng chọn ảnh khác.';
     if (saveResult.ok) window.chatImageStore && window.chatImageStore.delete(saveResult.value).catch(() => {});
     renderImagePreview();
     console.debug('[image] preview failed');
@@ -3738,6 +3833,14 @@ function visualDownloadName(v, mime) {
  */
 function visualProxySrc(v, disposition) {
   if (/^data:/i.test(v.url)) return v.url;
+  // PHẦN B: ảnh lớn không còn nhúng base64 vào response — server trả tham chiếu nội bộ
+  // `/api/visual/asset/<id>`. Đây là URL CÙNG-ORIGIN, không đi qua proxy download (proxy chỉ dành
+  // cho link https của provider bên ngoài).
+  if (/^\/api\/visual\/asset\//.test(String(v.url || ''))) {
+    const params = ['subject=' + encodeURIComponent(v.subject || '')];
+    if (disposition === 'inline') params.push('inline=1');
+    return v.url + '?' + params.join('&');
+  }
   return '/api/visual/download?url=' + encodeURIComponent(v.url)
     + '&subject=' + encodeURIComponent(v.subject || '')
     + '&visualId=' + encodeURIComponent(v.visualId || '')
@@ -3746,8 +3849,8 @@ function visualProxySrc(v, disposition) {
 
 /** @returns {boolean} v là ẢNH THẬT do image model sinh. */
 function isGeneratedImageVisual(v) {
-  return !!(v && (v.format === 'data_url' || v.format === 'image_url')
-    && typeof v.url === 'string' && /^(data:image\/|https:\/\/)/i.test(v.url));
+  return !!(v && (v.format === 'data_url' || v.format === 'image_url' || v.format === 'asset_url')
+    && typeof v.url === 'string' && /^(data:image\/|https:\/\/|\/api\/visual\/asset\/)/i.test(v.url));
 }
 
 /**

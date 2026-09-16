@@ -68,14 +68,31 @@ function scene3dWebGLAvailable() {
 }
 
 function scene3dRenderFallback(container, sceneSpec) {
+  // PHẦN Q (XSS): TRƯỚC ĐÂY dựng chuỗi HTML rồi gán innerHTML với `o.l` — nhãn này đến TỪ JSON DO AI
+  // SINH (và AI đọc nội dung tài liệu người dùng tải lên), tức là dữ liệu KHÔNG đáng tin đi thẳng
+  // vào HTML parser. Nay dựng bằng DOM API + textContent: nhãn luôn là VĂN BẢN, không bao giờ là thẻ.
   const objs = (sceneSpec && sceneSpec.objs) || [];
-  const lines = objs.map((o) => {
-    const t = window.t ? window.t('scene3d.obj.' + o.t, { defaultValue: o.t }) : o.t;
-    const label = o.l ? ` "${o.l}"` : '';
-    return `• ${t}${label}`;
-  });
   const title = window.t ? window.t('scene3d.fallbackTitle') : 'Mô tả hình học (không hỗ trợ WebGL trên thiết bị này)';
-  container.innerHTML = `<div class="scene3d-fallback"><p style="font-weight:600;margin:0 0 6px;">${title}</p><ul style="margin:0;padding-left:18px;font-size:13px;">${lines.map((l) => `<li>${l}</li>`).join('')}</ul></div>`;
+  container.textContent = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'scene3d-fallback';
+  const p = document.createElement('p');
+  p.style.fontWeight = '600';
+  p.style.margin = '0 0 6px';
+  p.textContent = title;
+  wrap.appendChild(p);
+  const ul = document.createElement('ul');
+  ul.style.margin = '0';
+  ul.style.paddingLeft = '18px';
+  ul.style.fontSize = '13px';
+  objs.forEach((o) => {
+    const typeLabel = window.t ? window.t('scene3d.obj.' + o.t, { defaultValue: o.t }) : o.t;
+    const li = document.createElement('li');
+    li.textContent = o.l ? `${typeLabel} "${o.l}"` : String(typeLabel == null ? '' : typeLabel);
+    ul.appendChild(li);
+  });
+  wrap.appendChild(ul);
+  container.appendChild(wrap);
 }
 
 function scene3dNum(v, def) { const n = Number(v); return isFinite(n) ? n : def; }
@@ -141,19 +158,14 @@ function scene3dBuildVector(group, THREE_, o, d, color, label) {
 }
 
 function scene3dSampleSurface(THREE_, eqStr, rangeArr, n) {
-  // eslint-disable-next-line no-new-func
-  let fn;
-  try {
-    // Chỉ cho phép biểu thức toán học đơn giản qua Math.* — không eval tuỳ ý mã người dùng gửi lên
-    // vì spec 'eq' luôn do backend/AI sinh (không phải input thô người dùng), nhưng vẫn giới hạn
-    // whitelist ký tự để phòng thủ theo chiều sâu.
-    if (!/^[\d\s.+\-*/^()xy,a-zA-Z]*$/.test(eqStr)) throw new Error('unsafe expr');
-    const safe = eqStr.replace(/\^/g, '**');
-    // eslint-disable-next-line no-new-func
-    fn = new Function('x', 'y', 'Math', `with(Math){ return (${safe}); }`);
-  } catch (e) {
-    return null;
-  }
+  // PHẦN C (P0): TRƯỚC ĐÂY dùng `new Function('x','y','Math', 'with(Math){...}')` — CSP production
+  // KHÔNG có 'unsafe-eval' nên lệnh này bị trình duyệt chặn, try/catch nuốt lỗi, mặt cong lặng lẽ
+  // biến mất. NAY biên dịch bằng trình phân tích cú pháp riêng (public/js/exprEval.js): không eval,
+  // không Function constructor, không truy cập thuộc tính, chỉ hàm/hằng trong danh sách trắng.
+  const compiler = window.ExprEval;
+  if (!compiler) return null; // exprEval.js chưa nạp -> không hình, KHÔNG rơi về eval
+  const fn = compiler.compileXY(eqStr);
+  if (!fn) return null;
   const [lo, hi] = Array.isArray(rangeArr) && rangeArr.length === 2 ? rangeArr : [-3, 3];
   const steps = Math.max(6, Math.min(64, n || 24));
   const geo = new THREE_.BufferGeometry();
@@ -165,7 +177,7 @@ function scene3dSampleSurface(THREE_, eqStr, rangeArr, n) {
       const x = lo + i * step;
       const y = lo + j * step;
       let z;
-      try { z = fn(x, y, Math); } catch (e) { z = 0; }
+      try { z = fn(x, y); } catch (e) { z = 0; }
       if (!isFinite(z)) z = 0;
       // toạ độ three: (x, z_math, y)
       positions.push(x, z, y);
