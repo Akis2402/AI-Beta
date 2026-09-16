@@ -54,6 +54,8 @@ const { routeIntent } = require('../utils/intentRouter');
 const aiBudget = require('../utils/aiCallBudget');
 const deterministicCaption = require('../utils/visual/deterministicCaption');
 const workingSetLib = require('../utils/source/sourceWorkingSet');
+const { planImages, imageMarker } = require('../utils/imageBudgetPlanner');
+const sourceBudgetPlanner = require('../utils/sourceBudgetPlanner');
 const { validateSolutionCompleteness, extractCoverageList } = require('../utils/completenessCheck');
 const { computeRecoveryBudget, appendContinuationTurn } = require('../utils/continuation');
 // PHẦN B/L: vòng RESUME/CONTINUATION dùng chung (checkpoint + resumable failover A->B->C->D).
@@ -524,11 +526,32 @@ router.post('/', async (req, res, next) => {
       throw err;
     }
 
+    // ============================================================================================
+    // PROMPT V5 — PHẦN T/U/V/X/Y/AC: NGÂN SÁCH ẢNH NGƯỜI DÙNG (imageBudgetPlanner)
+    // ============================================================================================
+    // Trước đây chỉ có `input.image` số ít — "nhiều ảnh" chưa thật sự tồn tại ở tầng server. Nay
+    // validators.js đã gộp `image` + `images[]` thành MỘT danh sách có thứ tự (PHẦN AC). Ở đây:
+    //   1. DEDUPE theo fingerprint thật (PHẦN V/FC-8) — ảnh trùng (vd người dùng dán lại cùng 1 ảnh)
+    //      không được gửi hai lần cho model.
+    //   2. GIỮ ĐÚNG THỨ TỰ người dùng đính kèm (PHẦN X), gắn marker cực ngắn [IMG1]/[IMG2]... khi có
+    //      từ 2 ảnh trở lên để model phân biệt được "ảnh 2" khi người dùng hỏi follow-up.
+    // KHÔNG hạ độ phân giải ở đây: server không có thư viện xử lý ảnh (PHẦN DP — không thêm
+    // dependency lớn chỉ cho việc này), nên `tokenBudget` được đặt vô hạn để planImages() chỉ làm
+    // đúng phần có thể THỰC THI THẬT (dedupe + thứ tự + tier/telemetry) — không báo "đã giảm token"
+    // cho một việc chưa từng xảy ra (PHẦN EO: không giả vờ số ước lượng là số thật).
+    const imagePlan = planImages(
+      (input.images || []).map((img, i) => ({ id: `img${i + 1}`, base64: img.base64, mediaType: img.mediaType })),
+      { maxImages: 8, tokenBudget: Number.MAX_SAFE_INTEGER }
+    );
     const userContent = [];
-    if (input.image) {
-      userContent.push({
-        type: 'image',
-        source: { type: 'base64', media_type: input.image.mediaType, data: input.image.base64 }
+    if (imagePlan.selected.length) {
+      const multi = imagePlan.selected.length > 1;
+      imagePlan.selected.forEach((img) => {
+        if (multi) userContent.push({ type: 'text', text: imageMarker(img.order) });
+        userContent.push({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.base64 }
+        });
       });
     }
     // PDF-chỉ-ảnh (scan, không trích được text): gửi thẳng từng trang cho model đọc bằng vision,
@@ -541,7 +564,17 @@ router.post('/', async (req, res, next) => {
         });
       });
     }
-    const hasAnyImage = !!input.image || (input.sourceImages && input.sourceImages.length > 0);
+    const hasAnyImage = imagePlan.selected.length > 0 || (input.sourceImages && input.sourceImages.length > 0);
+    if (imagePlan.duplicates.length || imagePlan.dropped.length) {
+      // PHẦN CX: không bao giờ âm thầm bỏ/gộp ảnh — mọi lần dedupe/drop đều có dòng log kèm lý do.
+      reqLogger.log({
+        stage: 'image_budget_plan',
+        imagesIn: (input.images || []).length,
+        imagesSent: imagePlan.selected.length,
+        duplicatesSkipped: imagePlan.duplicates.length,
+        dropped: imagePlan.dropped
+      });
+    }
     const problemText = input.query || 'Hãy đọc kỹ và giải chi tiết bài tập có trong hình ảnh này.';
     userContent.push({ type: 'text', text: problemText });
 
@@ -605,6 +638,39 @@ router.post('/', async (req, res, next) => {
     input.contexts = provenanceFilter.usable;
     const sourceReadiness = sourceProvenance.summarizeSourceReadiness(input.sourceStatus);
     input.sourceReadiness = sourceReadiness;
+
+    // ============================================================================================
+    // PROMPT V5 — PHẦN O/P/AS: ADAPTIVE SOURCE TOKEN BUDGET, TRƯỚC citeNo
+    // ============================================================================================
+    // Trước đây trần DUY NHẤT cho lượng context vào prompt là trần BẢO MẬT (chặn DoS, xem
+    // validators.js SECURITY_MAX_CONTEXTS/SECURITY_MAX_CONTEXT_LEN) — không phân biệt "Đáp án câu 1
+    // là gì?" với "Đối chiếu 1.9-1.20 giữa PDF/Web/YouTube". Ở ĐÂY, TRƯỚC buildCitationIndex (để
+    // citeNo luôn khớp đúng tập context thật sự gửi đi — không có citation trỏ vào chỗ đã bị cắt),
+    // ngân sách được co theo độ khó CÂU HỎI THẬT (không phải theo môn/độ dài context thô).
+    const sourceIdSet = new Set((input.contexts || []).map((c) => c.sourceId || c.doc).filter(Boolean));
+    const sourceDifficulty = sourceBudgetPlanner.classifyDifficulty({
+      query: input.query,
+      requirementLabels: input.requirementLabels,
+      unmatchedRequirementLabels: input.unmatchedRequirementLabels,
+      sourceCount: sourceIdSet.size || 1
+    });
+    const sourceBudgetPlan = sourceBudgetPlanner.planSourceContexts(input.contexts, {
+      charBudget: sourceDifficulty.charBudget,
+      requirementLabels: input.requirementLabels
+    });
+    if (!sourceBudgetPlan.withinBudgetAlready) {
+      // PHẦN CX: cắt CÓ KHAI BÁO — không bao giờ âm thầm.
+      reqLogger.log({
+        stage: 'source_budget_plan',
+        tier: sourceDifficulty.tier,
+        budgetChars: sourceDifficulty.charBudget,
+        totalCharsBefore: sourceBudgetPlan.totalChars,
+        contextsBefore: input.contexts.length,
+        contextsAfter: sourceBudgetPlan.contexts.length,
+        droppedCount: sourceBudgetPlan.dropped.length
+      });
+    }
+    input.contexts = sourceBudgetPlan.contexts;
 
     const citationIndex = buildCitationIndex(input.contexts);
     // ---------- Vấn đề #2: nén NỘI DUNG đoạn trích (header/footer trang lặp lại giữa các đoạn) ----------
@@ -870,11 +936,15 @@ router.post('/', async (req, res, next) => {
         // extractionVersion lẫn coverage thật của từng nguồn.
         sourceVersionFp: tokenEconomy.fingerprint(sourceProvenance.sourceVersionSignature(input.sourceStatus)),
         evidenceFp: tokenEconomy.fingerprint(effectiveContexts.map((c) => c.evidenceId || `${c.doc}#${c.page}#${c.id}`).join('|')),
-        // PHẦN 20 FIX: fingerprint THẬT (SHA-256) của đúng ảnh này khi có — cho phép cache an toàn
-        // theo từng ảnh cụ thể thay vì bypass hoàn toàn L1 (xem tokenEconomy.runTokenEconomyPipeline).
-        // sourceImages (PDF-chỉ-ảnh): gộp fingerprint từng trang theo thứ tự cố định để 2 PDF khác
-        // nhau (hoặc cùng PDF, trang khác nhau) không bao giờ đụng cache key của nhau.
-        ...(input.image ? { imageFp: tokenEconomy.imageFingerprint(input.image.base64, input.image.mediaType) } : {}),
+        // PHẦN 20 FIX + PHẦN I (query fingerprint): fingerprint THẬT (SHA-256) của TOÀN BỘ ảnh người
+        // dùng đính kèm, theo đúng thứ tự (PHẦN X) — trước đây chỉ hash `input.image` đầu tiên, nên
+        // 2 request khác nhau CHỈ ở ảnh thứ 2/3 trở đi vẫn trùng cache key (bug im lặng, trả nhầm
+        // câu trả lời của ảnh khác). sourceImages (PDF-chỉ-ảnh) gộp riêng, không lẫn với ảnh người dùng.
+        ...(input.images && input.images.length
+          ? { imageFp: tokenEconomy.fingerprint(
+              input.images.map((img) => tokenEconomy.imageFingerprint(img.base64, img.mediaType)).join('|')
+            ) }
+          : {}),
         ...(input.sourceImages && input.sourceImages.length
           ? { sourceImagesFp: tokenEconomy.fingerprint(
               input.sourceImages.map((img) => tokenEconomy.imageFingerprint(img.base64, img.mediaType)).join('|')
@@ -932,7 +1002,9 @@ router.post('/', async (req, res, next) => {
       cacheKeyExtra: {
         promptVersion: PROMPT_VERSION,
         sourceFingerprint: tokenEconomy.fingerprint(sourceIdsFp),
-        imageFingerprint: input.image ? tokenEconomy.imageFingerprint(input.image.base64, input.image.mediaType) : ''
+        imageFingerprint: (input.images && input.images.length)
+          ? tokenEconomy.fingerprint(input.images.map((img) => tokenEconomy.imageFingerprint(img.base64, img.mediaType)).join('|'))
+          : ''
       },
       // ---------- PHẦN 25 — TẦNG 3: model judge CHỈ cho case borderline ----------
       // visualPipeline tự gate: nó chỉ gọi `judge` khi decisionEngine.needsModelJudgement() true

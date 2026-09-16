@@ -43,6 +43,13 @@ const MAX_SOURCE_MANIFEST_LEN = 4000; // mục A3: manifest chỉ là vài dòng
 // "trang 12 đến 20") mà vẫn chặn được 1 request cố tình nhồi hàng trăm ảnh.
 const MAX_SOURCE_IMAGES = budget.MAX_SOURCE_IMAGES;
 const MAX_SOURCE_IMAGE_BYTES = budget.MAX_SOURCE_IMAGE_BYTES; // trần/trang, dùng chung với client
+// PROMPT V5 — PHẦN Y/AC: MULTI-IMAGE INPUT. `image` (số ít) là ảnh đề bài, giữ NGUYÊN cho tương
+// thích ngược (client cũ/gọi API trực tiếp chỉ biết field này). `images[]` là danh sách bổ sung —
+// server GỘP cả hai thành đúng MỘT danh sách `images` (PHẦN AC: "không duplicate image + images"),
+// với `image` luôn là phần tử đầu tiên khi có mặt. Không throw cứng cho từng ảnh lẻ trong mảng — ảnh
+// hỏng bị TỪ CHỐI CÓ KHAI BÁO (PHẦN CX) và trả về trong `imagesRejected`, các ảnh còn lại vẫn dùng
+// được thay vì làm hỏng cả request (khác với `image` số ít, vẫn throw để giữ hành vi cũ nguyên vẹn).
+const MAX_USER_IMAGES = 8;
 const MAX_APPROACH_LEN = 3000;
 const ALLOWED_STAGES = ['approach', 'detail'];
 // PHẦN 27: chế độ hình minh hoạ do người dùng chọn (đi vào cache key — xem routes/chat.js).
@@ -264,7 +271,30 @@ function validateChatBody(body) {
     image = { mediaType: verdict.image.mediaType, base64: verdict.image.base64 };
   }
 
-  if (!query && !image) {
+  // PHẦN Y/AC — ảnh bổ sung ngoài `image` số ít. Mỗi ảnh đi qua đúng luật MIME/base64/magic-bytes/
+  // dung lượng như `image` (KHÔNG nới lỏng chỉ vì đứng trong mảng), nhưng lỗi từng ảnh không làm
+  // hỏng cả request — chỉ ảnh đó bị loại, có lý do, người dùng vẫn dùng được các ảnh hợp lệ còn lại.
+  const imagesRejected = [];
+  const extraAccepted = [];
+  const extraRaw = Array.isArray(body.images) ? body.images : [];
+  extraRaw.forEach((img, i) => {
+    if ((image ? 1 : 0) + extraAccepted.length >= MAX_USER_IMAGES) {
+      imagesRejected.push({ index: i, reason: 'too_many_images' });
+      return;
+    }
+    const verdict = classifySourceImage({ ...img, page: null, doc: '' }, i);
+    if (!verdict.ok) { imagesRejected.push({ index: i, reason: verdict.reason }); return; }
+    if (verdict.bytes > MAX_IMAGE_BYTES) { imagesRejected.push({ index: i, reason: 'image_too_large' }); return; }
+    extraAccepted.push({ mediaType: verdict.image.mediaType, base64: verdict.image.base64 });
+  });
+  // PHẦN AC: server normalize thành MỘT danh sách duy nhất, `image` (nếu có) luôn ở vị trí đầu —
+  // giữ đúng thứ tự người dùng đính kèm (PHẦN X) và tránh gửi trùng cùng một ảnh hai lần.
+  const images = image ? [image, ...extraAccepted] : extraAccepted;
+  // Tương thích ngược: nếu client CHỈ gửi `images[]` (chưa có `image` số ít), code cũ đọc `input.image`
+  // vẫn phải thấy đúng ảnh đầu tiên — PHẦN AB: "imageId = first attachment nếu cần".
+  if (!image && images.length) image = images[0];
+
+  if (!query && !images.length) {
     throw new ValidationError('Vui lòng nhập câu hỏi hoặc đính kèm ảnh.');
   }
 
@@ -383,7 +413,7 @@ function validateChatBody(body) {
       })).filter((h) => h.content)
     : [];
 
-  const result = { query, deepThinking, crossCheck, image, sourceImages, sourceImagesRejected, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText };
+  const result = { query, deepThinking, crossCheck, image, images, imagesRejected, sourceImages, sourceImagesRejected, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText };
   // PHẦN A7: server dùng ĐÚNG chính sách mà client đã dùng để tự kiểm trước khi gửi. Nếu tới đây vẫn
   // vượt ngân sách (client cũ chưa cập nhật, hoặc gọi API trực tiếp) -> lỗi CÓ CẤU TRÚC, KHÔNG âm
   // thầm cắt bớt dữ liệu rồi trả lời như thể đã đọc đủ.
@@ -469,6 +499,17 @@ function validateSourceVisionBody(body) {
   return { pages, rejected };
 }
 
+// PHẦN AK/AO — /api/source/web và /api/source/youtube: client chỉ gửi 1 URL, mọi validate nội dung
+// (SSRF, protocol, transcript...) nằm bên trong webSource.js/youtubeSource.js — tầng này chỉ chặn
+// input rác/quá dài trước khi tốn 1 lệnh gọi mạng.
+const MAX_SOURCE_URL_LEN = 2000;
+function validateSourceUrlBody(body) {
+  if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
+  const url = clip(String(body.url || '').trim(), MAX_SOURCE_URL_LEN);
+  if (!url) throw new ValidationError('Thiếu URL.');
+  return { url };
+}
+
 module.exports = {
   ValidationError,
   validateChatBody,
@@ -477,6 +518,7 @@ module.exports = {
   validateSelfCheckBody,
   validateSimilarBody,
   validateSourceVisionBody,
+  validateSourceUrlBody,
   parseSourceImagesDetailed,
   assertWithinRequestBudget,
   normalizeRules,
@@ -486,7 +528,7 @@ module.exports = {
   LIMITS: {
     MAX_QUERY, MAX_RULE_LEN, MAX_RULES, MAX_CONTEXTS, MAX_CONTEXT_LEN,
     SECURITY_MAX_CONTEXTS, SECURITY_MAX_CONTEXT_LEN, MAX_SOURCE_IMAGES,
-    MAX_HISTORY, MAX_IMAGE_BYTES, MAX_GENERATE_CONTENT,
+    MAX_HISTORY, MAX_IMAGE_BYTES, MAX_GENERATE_CONTENT, MAX_USER_IMAGES,
     MAX_SOURCE_IMAGE_BYTES, MAX_VISION_BATCH_PAGES,
     SAFE_REQUEST_BYTES: budget.SAFE_REQUEST_BYTES,
     SAFE_RESPONSE_BYTES: budget.SAFE_RESPONSE_BYTES

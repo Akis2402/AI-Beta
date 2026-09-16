@@ -22,8 +22,12 @@
 const express = require('express');
 const router = express.Router();
 const { getActiveProviders, ensureProvidersReady, callWithFailover, mapWithConcurrency, createDeadline } = require('../utils/aiProviders');
-const { validateSourceVisionBody } = require('../utils/validators');
+const { validateSourceVisionBody, validateSourceUrlBody } = require('../utils/validators');
 const { VISION_EXTRACT_SYSTEM, parseVisionJson } = require('../utils/visionExtract');
+const { fetchWebSource } = require('../utils/source/webSource');
+const { fetchYoutubeSource } = require('../utils/source/youtubeSource');
+const singleFlight = require('../utils/singleFlight');
+const { contentFingerprint } = require('../utils/queryFingerprint');
 
 // Vision extraction là tác vụ PHỤ (chuẩn bị cache), không phải pipeline giải bài chính — ngân sách
 // thời gian ngắn hơn hẳn GLOBAL_REQUEST_DEADLINE_MS của /api/chat, và giới hạn concurrency để không
@@ -45,30 +49,34 @@ router.post('/vision-extract', async (req, res, next) => {
 
     const results = await mapWithConcurrency(input.pages, VISION_PAGE_CONCURRENCY, async (pageImg) => {
       try {
-        const resp = await callWithFailover(
-          activeProviders,
-          {
-            system: VISION_EXTRACT_SYSTEM,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'image', source: { type: 'base64', media_type: pageImg.mediaType, data: pageImg.base64 } },
-                { type: 'text', text: `Trích xuất nội dung trang ${pageImg.page != null ? pageImg.page : '(không rõ số)'} theo đúng định dạng JSON đã nêu.` }
-              ]
-            }],
-            maxTokens: 1500,
-            // PHẦN S: gắn nhãn stage để tokenTelemetry xếp token này vào sourceIndexing — chi phí
-            // đọc nguồn 1 lần lúc upload, KHÔNG được cộng vào token của các lượt chat sau đó.
-            stage: 'source_indexing_vision_extract',
-            requestId: req.requestId
-          },
-          { requireVision: true, deadline }
-        );
-        const parsed = parseVisionJson(resp && resp.text);
-        if (!parsed) {
-          return { page: pageImg.page, ok: false, reason: 'invalid_response_shape' };
-        }
-        return { page: pageImg.page, ok: true, ...parsed };
+        const visionKey = contentFingerprint(pageImg.base64);
+        // QUAN TRỌNG: giá trị dùng chung qua single-flight KHÔNG được chứa `page` — 2 caller có thể
+        // gán cùng 1 ảnh cho 2 SỐ TRANG khác nhau (2 tài liệu khác nhau), share `page` sẽ trả nhầm
+        // số trang cho caller thứ hai. `page` được gắn RIÊNG cho từng caller sau khi promise settle.
+        const evidence = await singleFlight.scoped('vision')(visionKey, async () => {
+          const resp = await callWithFailover(
+            activeProviders,
+            {
+              system: VISION_EXTRACT_SYSTEM,
+              messages: [{
+                role: 'user',
+                content: [
+                  { type: 'image', source: { type: 'base64', media_type: pageImg.mediaType, data: pageImg.base64 } },
+                  { type: 'text', text: `Trích xuất nội dung trang ${pageImg.page != null ? pageImg.page : '(không rõ số)'} theo đúng định dạng JSON đã nêu.` }
+                ]
+              }],
+              maxTokens: 1500,
+              // PHẦN S: gắn nhãn stage để tokenTelemetry xếp token này vào sourceIndexing — chi phí
+              // đọc nguồn 1 lần lúc upload, KHÔNG được cộng vào token của các lượt chat sau đó.
+              stage: 'source_indexing_vision_extract',
+              requestId: req.requestId
+            },
+            { requireVision: true, deadline }
+          );
+          const parsed = parseVisionJson(resp && resp.text);
+          return parsed ? { ok: true, ...parsed } : { ok: false, reason: 'invalid_response_shape' };
+        });
+        return { page: pageImg.page, ...evidence };
       } catch (e) {
         // 1 trang lỗi KHÔNG được làm hỏng cả batch (mục A10) — trả reason để client ghi vào
         // failedPages, retry theo đúng cơ chế retry-1-lần đã có ở parsePDF() nếu muốn.
@@ -84,4 +92,39 @@ router.post('/vision-extract', async (req, res, next) => {
   }
 });
 
+// ============================================================================================
+// PHẦN AK/AN — POST /api/source/web
+// ============================================================================================
+// Trước bản vá này, `webSource.js` (SSRF-safe fetch + HTML->text sạch + chunk + single-flight +
+// cache theo content-hash) đã có module + test riêng nhưng KHÔNG có đường vào từ request thật
+// (đúng như AUDIT-REPORT-V5-TOKEN-ECONOMY.md mục 5 đã nêu). Route này là đường vào đó: nhận 1 URL,
+// trả evidence ĐÃ SẠCH (không phải HTML thô) để client tự add vào `contexts[]` của /api/chat —
+// KHÔNG tự động chèn vào pipeline giải bài ở đây (giữ đúng ranh giới 1 route = 1 việc).
+router.post('/web', async (req, res, next) => {
+  try {
+    const { url } = validateSourceUrlBody(req.body);
+    const result = await fetchWebSource(url);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ============================================================================================
+// PHẦN AO/AP/AQ/FC-11 — POST /api/source/youtube
+// ============================================================================================
+// Không có transcript = `status: 'INCOMPLETE'` + `userMessage` nói thẳng chưa đọc được video —
+// KHÔNG suy ra nội dung từ tiêu đề (PHẦN FA cấm tuyệt đối việc này). Route chỉ chuyển tiếp đúng
+// nguyên trạng kết quả của youtubeSource.js, không tự "làm mềm" status.
+router.post('/youtube', async (req, res, next) => {
+  try {
+    const { url } = validateSourceUrlBody(req.body);
+    const result = await fetchYoutubeSource(url);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
+
