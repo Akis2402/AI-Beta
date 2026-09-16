@@ -1,5 +1,9 @@
 'use strict';
 
+// Cần server Express thật -> bỏ qua có thông báo nếu chưa npm install (xem test/_depGuard.js).
+require('./_depGuard').requireDeps(['express', 'dotenv'], 'vercel-header-parity.test.js');
+
+
 const fs = require('fs');
 const path = require('path');
 // ---------- REGRESSION: FINAL AUDIT section N — Vercel vs local Express header parity ----------

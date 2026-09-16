@@ -19,6 +19,10 @@ for (const f of files) {
 }
 
 console.log(`\n${files.length} test file(s) executed.`);
+// Một số file dựng server Express THẬT nên tự bỏ qua (in "SKIPPED") khi chưa `npm install` —
+// chúng thoát 0 để không làm nhiễu kết quả của các file còn lại. SKIPPED KHÔNG phải PASS: nếu
+// thấy dòng đó ở trên, hãy chạy `npm install` rồi `npm test` lại để chúng thực sự chạy.
+console.log('Lưu ý: dòng "SKIPPED — thiếu dependency" ở trên nghĩa là test đó CHƯA chạy (cần npm install).');
 if (anyFailed) {
   console.log('RESULT: FAIL');
   process.exitCode = 1;

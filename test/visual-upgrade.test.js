@@ -1,5 +1,9 @@
 'use strict';
 
+// Cần server Express thật -> bỏ qua có thông báo nếu chưa npm install (xem test/_depGuard.js).
+require('./_depGuard').requireDeps(['express', 'dotenv'], 'visual-upgrade.test.js');
+
+
 // ============================================================================================
 // TEST cho 5 lỗ hổng được vá ở đợt nâng cấp hệ thống hình minh hoạ (mục 1.1 -> 1.5)
 // ============================================================================================

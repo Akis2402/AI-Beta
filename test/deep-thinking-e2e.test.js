@@ -1,5 +1,9 @@
 'use strict';
 
+// Cần server Express thật -> bỏ qua có thông báo nếu chưa npm install (xem test/_depGuard.js).
+require('./_depGuard').requireDeps(['express', 'dotenv'], 'deep-thinking-e2e.test.js');
+
+
 // ============================================================================================
 // E2E — "Suy nghĩ sâu" phải HOÀN TẤT (PHẦN 33: deep thinking completion / long answer)
 // ============================================================================================
