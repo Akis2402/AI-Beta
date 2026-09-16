@@ -113,11 +113,20 @@ console.log('\n== TEST 13: placeholder KHÔNG BAO GIỜ được vào prompt =='
   const longReal = ctx({ id: 5, text: 'Bài toán về dây chuyền đang xử lý nguyên liệu. '.repeat(20) });
   ok(!sourceProvenance.isPlaceholderContext(longReal), 'TEST 13: KHÔNG loại oan đoạn dài chứa cụm từ trùng hợp');
 
-  // Evidence của nguồn chưa READY cũng bị chặn tại cổng vào.
+  // Evidence của nguồn chưa từng có evidence nào (usableNow=false hoặc fallback theo status cũ khi
+  // client chưa gửi usableNow) vẫn bị chặn tại cổng vào — nhưng nguồn PARTIAL đã CÓ evidence thật
+  // (usableNow=true) thì KHÔNG bị chặn nữa (PHẦN VII/VIII, sửa cùng đợt với client).
   const notReady = [Object.assign({}, READY_STATUS[0], { status: 'INCOMPLETE' })];
   const f2 = sourceProvenance.filterUsableContexts([ctx({ id: 4, text: 'nội dung thật' })], notReady);
-  ok(f2.usable.length === 0 && /source_not_ready/.test(f2.dropped[0].reason),
-    'TEST 13/PHẦN B: evidence của nguồn chưa READY không được xuất hiện như nguồn hoàn chỉnh');
+  ok(f2.usable.length === 0 && /source_not_usable/.test(f2.dropped[0].reason),
+    'TEST 13/PHẦN B: nguồn chưa từng có evidence (không usableNow) không được xuất hiện như nguồn hoàn chỉnh');
+
+  const partialUsable = [Object.assign({}, READY_STATUS[0], {
+    status: 'INCOMPLETE', verifiedPages: 100, availabilityStatus: 'PARTIAL', usableNow: true
+  })];
+  const f2b = sourceProvenance.filterUsableContexts([ctx({ id: 4, text: 'nội dung thật' })], partialUsable);
+  ok(f2b.usable.length === 1,
+    'TEST 13/PHẦN B (mới): nguồn INCOMPLETE nhưng usableNow=true -> evidence VẪN đi qua (progressive ingestion)');
 
   // Client cũ chưa gửi sourceStatus -> KHÔNG loại (tương thích ngược).
   const f3 = sourceProvenance.filterUsableContexts([ctx({ id: 4, text: 'nội dung thật' })], []);

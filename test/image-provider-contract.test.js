@@ -115,10 +115,18 @@ const FAIL_SHAPES = [
   });
 
   await test('MỤC 3/8 (đợt audit 2): URL https hợp lệ cú pháp nhưng nội dung là HTML -> invalid_image_bytes, KHÔNG coi là thành công', async () => {
+    // ROOT CAUSE của test FLAKY (pass/fail tuỳ máy/Node version): Buffer.from(str) với chuỗi ngắn
+    // được cấp phát từ POOL nội bộ dùng chung 8KB của Node (Buffer.poolSize) — `.buffer` KHÔNG
+    // sliced trả về CẢ pool 8KB đó, không chỉ đúng phần chuỗi này. File test này gọi
+    // Buffer.from(B64, 'base64') (bytes PNG thật) rất nhiều lần trước dòng này, cùng chia sẻ 1
+    // pool — nên `.buffer` thô ở đây có thể LỘ byte PNG còn sót lại từ lần cấp phát trước, khiến
+    // imageBinaryValidator tình cờ thấy magic bytes hợp lệ và trả ok:true SAI. Phải cắt đúng
+    // [byteOffset, byteOffset+byteLength) như mọi chỗ khác trong file này đã làm (xem respond()).
+    const htmlBuf = Buffer.from('<html>URL hết hạn</html>');
     respond('openai', { data: [{ url: 'https://cdn.example.com/expired.png' }] }, 200, {
       ok: true, status: 200,
       headers: { get: (k) => (k.toLowerCase() === 'content-type' ? 'text/html' : null) },
-      arrayBuffer: async () => Buffer.from('<html>URL hết hạn</html>').buffer
+      arrayBuffer: async () => htmlBuf.buffer.slice(htmlBuf.byteOffset, htmlBuf.byteOffset + htmlBuf.byteLength)
     });
     const r = await client.generateImage({ prompt: PROMPT });
     assert.strictEqual(r.ok, false);

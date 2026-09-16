@@ -220,13 +220,20 @@ function installFakeVisionApi(win, { failPages = [], confidenceFor = () => 0.9 }
     ok(calls.pages.length === before, 'hỏi thêm 5 lượt -> KHÔNG gọi lại vision (token indexing chỉ trả 1 lần)');
   }
 
-  console.log('\n== E2E 3: PDF scan có trang đọc hỏng -> INCOMPLETE, chặn gửi request ==');
+  console.log('\n== E2E 3: PDF scan có trang đọc hỏng -> INCOMPLETE nhưng 7 trang tốt vẫn USABLE (PHẦN VII/VIII) ==');
   {
+    // Kiến trúc mới (progressive ingestion, PHẦN VII "SOURCE READY VS SOURCE USABLE" + PHẦN VIII
+    // "RETRIEVAL PHẢI DÙNG PARTIAL EVIDENCE"): INCOMPLETE (chưa 100% verified) KHÔNG còn đồng nghĩa
+    // "không dùng được gì cả". 7/8 trang đã có evidence THẬT -> phải trả về được cho câu hỏi thuộc 7
+    // trang đó; chỉ trang 4 (đọc hỏng, trong failedPages) là không có evidence. isSourceFullyVerified
+    // vẫn đúng là false — không được nói dối là "đã đọc xong toàn bộ".
     const win = await bootApp();
     const state = vm.runInContext('state', win);
     const handleFiles = vm.runInContext('handleFiles', win);
     const waitForAllSourceProcessing = vm.runInContext('waitForAllSourceProcessing', win);
     const isSourceReady = vm.runInContext('isSourceReady', win);
+    const isSourceUsableNow = vm.runInContext('isSourceUsableNow', win);
+    const isSourceFullyVerified = vm.runInContext('isSourceFullyVerified', win);
     const retrieveContext = vm.runInContext('retrieveContext', win);
     const buildSourceStatusPayload = vm.runInContext('buildSourceStatusPayload', win);
     const el = vm.runInContext('el', win);
@@ -240,13 +247,20 @@ function installFakeVisionApi(win, { failPages = [], confidenceFor = () => 0.9 }
     const doc = state.docs[0];
     ok(!isSourceReady(doc) && doc.processing.status === 'INCOMPLETE',
       `1 trang không đọc được -> INCOMPLETE, không READY giả (nhận ${doc.processing.status})`);
+    ok(!isSourceFullyVerified(doc), 'isSourceFullyVerified() vẫn false — 1 trang lỗi thì KHÔNG full coverage');
     ok(doc.processing.failedPages.indexOf(4) !== -1, 'ghi đúng trang lỗi vào failedPages');
-    ok(retrieveContext('bài 1.2 nói gì').length === 0,
-      'nguồn INCOMPLETE -> KHÔNG được dùng làm nguồn cho câu hỏi');
+    ok(isSourceUsableNow(doc), 'isSourceUsableNow() TRUE — 7/8 trang đã có evidence thật, dùng được ngay');
+
+    const r1 = retrieveContext('trang 2 nói gì');
+    ok(r1.some((c) => c.page === 2), 'trang 2 (đọc tốt) PHẢI trả về được evidence dù source đang INCOMPLETE');
+    const r4 = retrieveContext('trang 4 nói gì');
+    ok(!r4.some((c) => c.page === 4), 'trang 4 (đọc hỏng, KHÔNG có evidence) không được bịa ra evidence giả');
 
     const payload = buildSourceStatusPayload();
     ok(payload.length === 1 && payload[0].status === 'INCOMPLETE' && payload[0].verifiedPages === 7,
       'payload gửi server khai đúng trạng thái thật (7/8 trang, INCOMPLETE)');
+    ok(payload[0].availabilityStatus === 'PARTIAL' && payload[0].usableNow === true,
+      'payload khai đúng 3 trục mới: PARTIAL + usableNow=true (không phải false-ready, không phải false-blocked)');
     void el;
   }
 
