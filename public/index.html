@@ -127,7 +127,7 @@
         <div id="chatBar">
           <textarea id="qInput" rows="1" data-i18n-placeholder="input.placeholder" placeholder="Nhập câu hỏi, dán đề bài, dán ảnh (Ctrl+V), kéo-thả ảnh hoặc tải ảnh từ máy…"></textarea>
           <div id="chatBarTools">
-            <input type="file" id="imageInput" accept="image/*" style="display:none;">
+            <input type="file" id="imageInput" accept="image/*" multiple style="display:none;">
             <button id="attachBtn" type="button" class="tool-btn icon-only" data-i18n-title="upload.imageBtnTitle" data-i18n-aria-label="upload.imageBtn" title="Tải ảnh đề bài từ máy (hoặc kéo-thả / dán ảnh bằng Ctrl+V)" aria-label="Tải ảnh đề bài"></button>
             <button id="micBtn" type="button" class="tool-btn icon-only" data-i18n-title="voice.micTitle" data-i18n-aria-label="voice.micAria" title="Nhập câu hỏi bằng giọng nói" aria-label="Nhập câu hỏi bằng giọng nói" aria-pressed="false"></button>
             <div id="subjectBtnWrap">
@@ -250,6 +250,17 @@
         <b data-i18n="sources.dropTitle">Thả tài liệu vào đây</b><br>
         <span class="drop-sub" data-i18n="sources.dropSub">PDF, DOCX hoặc TXT — hoặc bấm "Thêm nguồn"</span>
       </div>
+    </div>
+    <!-- PHẦN AK/AO: thêm nguồn Web/YouTube qua URL — gọi thẳng /api/source/web|/youtube (SSRF-safe ở
+         server), KHÔNG qua state machine file (xem app.js: addUrlSource()). -->
+    <div class="set-section" id="urlSourceSection">
+      <h3>Thêm nguồn từ URL</h3>
+      <div class="url-source-row">
+        <input type="url" id="urlSourceInput" placeholder="Dán URL bài viết hoặc video YouTube..." autocomplete="off">
+        <button id="urlSourceAddBtn" type="button">Thêm</button>
+      </div>
+      <p class="set-empty" id="urlSourceStatus" style="display:none"></p>
+      <ul id="urlSourcesList" aria-label="Nguồn URL đã thêm"></ul>
     </div>
     <div class="set-section" id="recentSourcesSection">
       <h3 data-i18n="recentSources.title">Nguồn gần đây</h3>

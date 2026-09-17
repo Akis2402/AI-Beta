@@ -96,7 +96,7 @@ const state = {
   conversations: [],       // {id, title, createdAt, updatedAt, messages:[...]}
   currentConvId: null,
   history: [],             // {role, content:string} — ngữ cảnh gửi API cho cuộc trò chuyện hiện tại
-  pendingImage: null,      // {seq, file, previewUrl(blob:), mediaType, base64, imageId, status:'loading'|'ready'|'error'}
+  pendingImages: [],       // [{seq, file, previewUrl(blob:), mediaType, base64, imageId, status:'loading'|'ready'|'error'}] — PHẦN Y/AC: nhiều ảnh, giữ đúng thứ tự đính kèm
   deepThinking: false,     // "Suy nghĩ sâu" — AI tự phản biện/kiểm tra lại trong khối <thinking> nội bộ
   crossCheck: false,       // "Đối chiếu đa hướng" — giải 2 hướng độc lập rồi tổng hợp (chỉ áp dụng ở bước giải chi tiết)
   formulaSubject: 'toan',
@@ -109,7 +109,12 @@ const state = {
   // commitActiveFlashcardSet().
   flashcardSets: [],
   activeFlashcardSet: null,
-  flashcardLibraryPage: 0
+  flashcardLibraryPage: 0,
+  // PHẦN AK/AO — nguồn Web/YouTube thêm qua URL (KHÁC HẲN state.docs: không qua state machine
+  // UPLOADING->PARSING->... của file, vì đã nhận evidence SẠCH XONG XUÔI ngay từ 1 lệnh gọi API —
+  // không có bước "đang xử lý nền" để theo dõi). {id, url, sourceType:'WEB'|'YOUTUBE', title,
+  // fingerprint, chunks:[{chunkIndex,totalChunks,text,locator?}], addedAt}
+  urlSources: []
 };
 // Expose cho devtools/console và cho test harness (vm sandbox không thấy được top-level const nếu
 // không gắn vào global) — không đổi hành vi runtime, chỉ thêm 1 tham chiếu debug.
@@ -394,7 +399,7 @@ const LS_KEYS = {
   rules: 'tro-giai:rules', theme: 'tro-giai:theme', think: 'tro-giai:think-mode',
   deepThinking: 'tro-giai:deep-thinking', crossCheck: 'tro-giai:cross-check', settings: 'tro-giai:settings',
   notes: 'tro-giai:notes', conversations: 'tro-giai:conversations', currentConv: 'tro-giai:current-conv',
-  flashcardSets: 'tro-giai:flashcard-sets', docs: 'tro-giai:docs'
+  flashcardSets: 'tro-giai:flashcard-sets', docs: 'tro-giai:docs', urlSources: 'tro-giai:url-sources'
 };
 const MAX_STORED_CONVERSATIONS = 40;
 const MAX_STORED_FLASHCARD_SETS = 40;
@@ -448,6 +453,10 @@ function loadAll() {
   renderFormulaSubjectTabs();
   renderFormulaList();
   state.flashcardSets = lsGet(LS_KEYS.flashcardSets, []);
+  // PHẦN AK/AO: nguồn URL (Web/YouTube) — localStorage riêng (KHÔNG dùng IndexedDB như state.docs)
+  // vì chỉ lưu text đã trích xuất sẵn, không phải file nhị phân lớn; MAX_URL_SOURCES chặn phình vô hạn.
+  state.urlSources = lsGet(LS_KEYS.urlSources, []).slice(0, MAX_URL_SOURCES);
+  renderUrlSources();
 
   // Khôi phục các nguồn (file PDF/DOCX/TXT) đã tải lên trước đó từ IndexedDB (mục 13). Nếu
   // đây là lần đầu chạy sau khi nâng cấp, migrateFromLegacyIfNeeded() sẽ tự chuyển dữ liệu cũ
@@ -1995,6 +2004,46 @@ if (el('addSourceOverlay')) {
   el('addSourceOverlay').addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAddSourcePanel(); });
 }
 
+// PHẦN AK/AO — nút "Thêm" + Enter trong ô URL. Vô hiệu hoá nút trong lúc chờ fetch (PHẦN CB: tránh
+// bấm nhiều lần tạo nhiều request trùng cho cùng 1 URL trong lúc lệnh gọi đầu chưa xong).
+async function handleAddUrlSourceClick() {
+  const input = el('urlSourceInput');
+  const btn = el('urlSourceAddBtn');
+  const statusEl = el('urlSourceStatus');
+  if (!input || !btn) return;
+  const url = input.value.trim();
+  if (!url) return;
+  btn.disabled = true;
+  if (statusEl) { statusEl.style.display = 'none'; statusEl.classList.remove('is-error'); }
+  const result = await addUrlSource(url);
+  btn.disabled = false;
+  if (result.ok) {
+    input.value = '';
+    if (statusEl) statusEl.style.display = 'none';
+    return;
+  }
+  if (statusEl) {
+    const REASON_MESSAGES = {
+      duplicate_url: 'Nguồn này đã được thêm rồi.',
+      too_many_sources: `Chỉ thêm tối đa ${MAX_URL_SOURCES} nguồn URL.`,
+      network_error: 'Không kết nối được mạng, thử lại sau.',
+      invalid_url: 'URL không hợp lệ.',
+      invalid_youtube_url: 'URL YouTube không hợp lệ.',
+      transcript_unavailable: result.userMessage || 'Video này không có phụ đề nên chưa đọc được nội dung.',
+      no_readable_text: 'Không đọc được nội dung văn bản từ trang này.',
+      unsupported_protocol: 'Chỉ hỗ trợ URL http/https.',
+      https_required: 'Chỉ hỗ trợ URL https.'
+    };
+    statusEl.textContent = REASON_MESSAGES[result.reason] || 'Không thêm được nguồn này, thử lại sau.';
+    statusEl.classList.add('is-error');
+    statusEl.style.display = 'block';
+  }
+}
+if (el('urlSourceAddBtn')) el('urlSourceAddBtn').onclick = handleAddUrlSourceClick;
+if (el('urlSourceInput')) {
+  el('urlSourceInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddUrlSourceClick(); } });
+}
+
 /* ================= Ảnh đính kèm ================= */
 /**
  * ROOT CAUSE (preview ảnh không hiện trên mobile): bản cũ dựng preview bằng
@@ -2061,9 +2110,26 @@ function guessImageMediaType(file) {
 
 el('attachBtn').onclick = () => el('imageInput').click();
 el('imageInput').onchange = (e) => {
-  loadImageFile(e.target.files[0]);
+  loadImageFiles(e.target.files);
   e.target.value = '';
 };
+
+// PHẦN Y: trần số ảnh người dùng gắn 1 lượt — khớp MAX_USER_IMAGES ở server (validators.js), tránh
+// client cho gắn quá số server sẽ nhận rồi báo lỗi bất ngờ lúc gửi.
+const MAX_PENDING_IMAGES = 8;
+
+/** PHẦN Y/Z: nhận nhiều file 1 lúc (chọn multiple, kéo-thả nhiều file) — mỗi ảnh 1 slot độc lập
+ * trong state.pendingImages, KHÔNG thay thế ảnh đã có (khác hành vi cũ: trước đây ảnh mới luôn ghi
+ * đè ảnh cũ). Vượt trần -> báo rõ số bị bỏ qua, không âm thầm cắt (PHẦN CX). */
+function loadImageFiles(fileList) {
+  const files = Array.from(fileList || []).filter((f) => f);
+  if (!files.length) return;
+  const remaining = MAX_PENDING_IMAGES - state.pendingImages.length;
+  if (remaining <= 0) { alert(`Chỉ đính kèm tối đa ${MAX_PENDING_IMAGES} ảnh mỗi lượt.`); return; }
+  const toLoad = files.slice(0, remaining);
+  if (files.length > toLoad.length) alert(`Chỉ đính kèm tối đa ${MAX_PENDING_IMAGES} ảnh mỗi lượt — ${files.length - toLoad.length} ảnh cuối bị bỏ qua.`);
+  toLoad.forEach((f) => loadImageFile(f));
+}
 
 async function loadImageFile(file) {
   if (!file) return;
@@ -2079,15 +2145,11 @@ async function loadImageFile(file) {
   }
   if (kind === 'rejected') { alert('Định dạng ảnh này không được hỗ trợ (chỉ nhận PNG/JPEG/WEBP/GIF).'); return; }
 
-  // Ảnh pending trước đó (chưa gửi) bị thay thế bởi ảnh mới này — dọn preview URL + record IndexedDB
-  // cũ ngay, tránh rác "orphan" (mục 9). Tăng seq để mọi Promise dở dang của ảnh cũ tự bỏ qua khi
-  // resolve trễ (mục 11).
-  const oldPending = state.pendingImage;
+  // PHẦN Y: ảnh MỚI được THÊM vào danh sách (KHÔNG thay ảnh cũ nữa — đây chính là khác biệt so với
+  // hành vi trước). seq vẫn duy nhất TOÀN CỤC (đếm chung, không phải theo slot) — mọi nơi tra cứu
+  // "đúng slot nào" bằng cách tìm phần tử có seq này trong state.pendingImages, KHÔNG còn giả định
+  // "chỉ có 1 pending duy nhất" như logic cũ.
   const seq = ++imageLoadSeq;
-  if (oldPending) {
-    revokeImagePreviewUrl(oldPending.previewUrl);
-    if (oldPending.imageId) window.chatImageStore && window.chatImageStore.delete(oldPending.imageId).catch(() => {});
-  }
 
   // BƯỚC 1 — PREVIEW: đồng bộ, tức thì, không chờ gì cả. Đây là fix chính cho bug mobile.
   let previewUrl;
@@ -2098,13 +2160,14 @@ async function loadImageFile(file) {
     alert('Không thể xem trước ảnh này, vui lòng thử ảnh khác.');
     return;
   }
-  state.pendingImage = {
+  const slot = {
     seq, file, previewUrl,
     mediaType: guessedMediaType,
     base64: null,
     imageId: null,
     status: 'loading', // 'loading' -> 'ready' | 'error'
   };
+  state.pendingImages.push(slot);
   renderImagePreview();
   console.debug('[image] file selected', { type: file.type, size: file.size });
 
@@ -2157,8 +2220,9 @@ async function loadImageFile(file) {
   // image" nằm vĩnh viễn trong IndexedDB (mục 9).
   if (!saveResult.ok) {
     rawSavePromise.then((lateId) => {
-      if (state.pendingImage && state.pendingImage.seq === seq && !state.pendingImage.imageId) {
-        state.pendingImage.imageId = lateId;
+      const stillPending = state.pendingImages.find((p) => p.seq === seq);
+      if (stillPending && !stillPending.imageId) {
+        stillPending.imageId = lateId;
         console.debug('[image] IndexedDB saved (late, sau khi đã timeout)');
       } else if (window.chatImageStore) {
         window.chatImageStore.delete(lateId).catch(() => {});
@@ -2166,17 +2230,18 @@ async function loadImageFile(file) {
     }).catch(() => { /* thật sự lỗi/không bao giờ resolve — đã soft-fail từ trước, không còn gì để làm thêm */ });
   }
 
-  // Ảnh này đã bị thay/xoá trong lúc đang xử lý — bỏ kết quả trễ, dọn dẹp record IndexedDB vừa lỡ
-  // lưu (nếu có) để không rò rỉ dữ liệu không còn được tham chiếu (mục 11 + mục 9).
-  if (state.pendingImage === null || state.pendingImage.seq !== seq) {
+  // Ảnh này đã bị xoá (người dùng bấm ✕) trong lúc đang xử lý — bỏ kết quả trễ, dọn dẹp record
+  // IndexedDB vừa lỡ lưu (nếu có) để không rò rỉ dữ liệu không còn được tham chiếu (mục 11 + mục 9).
+  const current = state.pendingImages.find((p) => p.seq === seq);
+  if (!current) {
     if (saveResult.ok) window.chatImageStore && window.chatImageStore.delete(saveResult.value).catch(() => {});
     return;
   }
 
   if (!base64Result.ok) {
     console.error('[image] đọc base64 thất bại/timeout:', base64Result.error);
-    state.pendingImage.status = 'error';
-    state.pendingImage.errorMessage = base64Result.explicitMessage
+    current.status = 'error';
+    current.errorMessage = base64Result.explicitMessage
       ? base64Result.error.message
       : 'Không đọc được ảnh này (định dạng không được hỗ trợ hoặc file lỗi). Vui lòng chọn ảnh khác.';
     if (saveResult.ok) window.chatImageStore && window.chatImageStore.delete(saveResult.value).catch(() => {});
@@ -2185,19 +2250,36 @@ async function loadImageFile(file) {
     return;
   }
 
-  state.pendingImage.base64 = base64Result.value.base64;
-  state.pendingImage.mediaType = base64Result.value.mediaType || guessedMediaType;
+  current.base64 = base64Result.value.base64;
+  current.mediaType = base64Result.value.mediaType || guessedMediaType;
 
   if (saveResult.ok) {
-    state.pendingImage.imageId = saveResult.value;
+    current.imageId = saveResult.value;
     console.debug('[image] IndexedDB saved');
   } else {
     console.warn('[image] lưu IndexedDB thất bại/timeout — ảnh vẫn gửi được ở lượt này, chỉ không khôi phục được sau F5:', saveResult.error);
   }
 
-  state.pendingImage.status = 'ready';
+  current.status = 'ready';
   renderImagePreview();
   console.debug('[image] preview ready');
+}
+
+/** PHẦN V/BX: xoá 1 ảnh cụ thể theo seq (nút ✕ trên đúng chip đó) — không đụng các ảnh khác. */
+function removePendingImage(seq) {
+  const idx = state.pendingImages.findIndex((p) => p.seq === seq);
+  if (idx === -1) return;
+  const [removed] = state.pendingImages.splice(idx, 1);
+  revokeImagePreviewUrl(removed.previewUrl);
+  if (removed.imageId && window.chatImageStore) window.chatImageStore.delete(removed.imageId).catch(() => {});
+  renderImagePreview();
+}
+
+/** Xoá TOÀN BỘ ảnh đang chờ gửi (dùng sau khi sendMessage() đã đóng gói xong, hoặc nút "Xoá tất cả"). */
+function clearPendingImages() {
+  state.pendingImages.forEach((p) => revokeImagePreviewUrl(p.previewUrl));
+  state.pendingImages = [];
+  renderImagePreview();
 }
 
 // ---------- Kéo-thả ảnh (drag & drop) từ máy thẳng vào khung soạn tin nhắn ----------
@@ -2228,8 +2310,8 @@ composerEl.addEventListener('drop', (e) => {
   dragDepth = 0;
   composerEl.classList.remove('composer-dragover');
   const files = Array.from(e.dataTransfer.files || []);
-  const imgFile = files.find((f) => f.type && f.type.startsWith('image/'));
-  if (imgFile) loadImageFile(imgFile);
+  const imgFiles = files.filter((f) => f.type && f.type.startsWith('image/'));
+  if (imgFiles.length) loadImageFiles(imgFiles);
   else if (files.length) alert('Chỉ hỗ trợ kéo-thả file ảnh vào đây (muốn nạp PDF/DOCX/TXT làm nguồn tài liệu, dùng mục "Nguồn" ở thanh bên).');
 });
 
@@ -2241,14 +2323,15 @@ composerEl.addEventListener('drop', (e) => {
 function handlePasteImage(e) {
   const items = (e.clipboardData || window.clipboardData) && (e.clipboardData || window.clipboardData).items;
   if (!items) return;
+  const imgFiles = [];
   for (const item of items) {
     if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
       e.preventDefault(); // tránh trình duyệt dán kèm tên file ngẫu nhiên vào ô văn bản
-      loadImageFile(item.getAsFile());
-      el('qInput').focus();
-      break;
+      const f = item.getAsFile();
+      if (f) imgFiles.push(f);
     }
   }
+  if (imgFiles.length) { loadImageFiles(imgFiles); el('qInput').focus(); }
 }
 el('qInput').addEventListener('paste', handlePasteImage);
 // Cũng lắng nghe trên toàn bộ khung soạn tin (không chỉ riêng textarea) — để dán ảnh vẫn hoạt động
@@ -2260,54 +2343,49 @@ el('composer').addEventListener('paste', handlePasteImage);
 // giả định blob: URL luôn decode được (ảnh HEIC/định dạng lạ trên 1 số trình duyệt có thể không).
 function renderImagePreview() {
   const wrap = el('imgPreviewWrap');
-  const pending = state.pendingImage;
-  el('attachBtn').classList.toggle('has-image', !!pending);
+  const pendings = state.pendingImages;
+  el('attachBtn').classList.toggle('has-image', pendings.length > 0);
   wrap.innerHTML = '';
-  if (!pending) return;
+  if (!pendings.length) return;
 
-  const chip = document.createElement('div');
-  chip.className = 'img-chip show' + (pending.status === 'loading' ? ' loading' : '') + (pending.status === 'error' ? ' error' : '');
+  pendings.forEach((pending) => {
+    const chip = document.createElement('div');
+    chip.className = 'img-chip show' + (pending.status === 'loading' ? ' loading' : '') + (pending.status === 'error' ? ' error' : '');
 
-  const img = document.createElement('img');
-  img.alt = 'Ảnh đề bài';
-  img.onload = () => { console.debug('[image] preview loaded'); };
-  img.onerror = () => {
-    // Blob URL không decode được (định dạng ảnh trình duyệt không hỗ trợ hiển thị, vd 1 số HEIC) —
-    // không crash app, báo lỗi thân thiện, KHÔNG xoá pendingImage để người dùng còn thấy trạng thái
-    // lỗi, và cho phép bấm ✕ chọn lại ảnh khác (mục 3 + mục 4).
-    console.error('[image] preview render failed (không decode được ảnh)');
-    if (state.pendingImage === pending) {
-      pending.status = 'error';
-      pending.errorMessage = pending.errorMessage || 'Trình duyệt không hiển thị được ảnh này (có thể do định dạng không được hỗ trợ). Vui lòng chọn ảnh khác.';
-      renderImagePreview();
-    }
-  };
-  img.src = pending.previewUrl;
-  chip.appendChild(img);
+    const img = document.createElement('img');
+    img.alt = 'Ảnh đề bài';
+    img.onload = () => { console.debug('[image] preview loaded'); };
+    img.onerror = () => {
+      // Blob URL không decode được (định dạng ảnh trình duyệt không hỗ trợ hiển thị, vd 1 số HEIC) —
+      // không crash app, báo lỗi thân thiện, KHÔNG xoá slot này để người dùng còn thấy trạng thái
+      // lỗi, và cho phép bấm ✕ chọn lại ảnh khác (mục 3 + mục 4).
+      console.error('[image] preview render failed (không decode được ảnh)');
+      if (state.pendingImages.includes(pending)) {
+        pending.status = 'error';
+        pending.errorMessage = pending.errorMessage || 'Trình duyệt không hiển thị được ảnh này (có thể do định dạng không được hỗ trợ). Vui lòng chọn ảnh khác.';
+        renderImagePreview();
+      }
+    };
+    img.src = pending.previewUrl;
+    chip.appendChild(img);
 
-  const label = document.createElement('span');
-  label.className = 'chip-label';
-  if (pending.status === 'error') label.textContent = pending.errorMessage || 'Không thể xem trước ảnh này.';
-  else if (pending.status === 'loading') label.textContent = 'Đang xử lý ảnh…';
-  else label.textContent = 'Ảnh đề bài đã đính kèm';
-  chip.appendChild(label);
+    const label = document.createElement('span');
+    label.className = 'chip-label';
+    if (pending.status === 'error') label.textContent = pending.errorMessage || 'Không thể xem trước ảnh này.';
+    else if (pending.status === 'loading') label.textContent = 'Đang xử lý ảnh…';
+    else label.textContent = 'Ảnh đề bài đã đính kèm';
+    chip.appendChild(label);
 
-  const rmBtn = document.createElement('button');
-  rmBtn.type = 'button';
-  rmBtn.className = 'rm';
-  rmBtn.textContent = '✕';
-  rmBtn.onclick = () => {
-    // Tăng seq để loại bỏ mọi kết quả FileReader/IndexedDB đang xử lý dở của ảnh này (mục 11), rồi
-    // dọn preview URL + record IndexedDB (nếu đã lỡ lưu) — tránh rác "orphan image" (mục 9).
-    imageLoadSeq++;
-    revokeImagePreviewUrl(pending.previewUrl);
-    if (pending.imageId && window.chatImageStore) window.chatImageStore.delete(pending.imageId).catch(() => {});
-    state.pendingImage = null;
-    renderImagePreview();
-  };
-  chip.appendChild(rmBtn);
+    const rmBtn = document.createElement('button');
+    rmBtn.type = 'button';
+    rmBtn.className = 'rm';
+    rmBtn.textContent = '✕';
+    // PHẦN V/BX: chỉ xoá ĐÚNG slot này (theo seq) — không đụng các ảnh khác đang chờ.
+    rmBtn.onclick = () => removePendingImage(pending.seq);
+    chip.appendChild(rmBtn);
 
-  wrap.appendChild(chip);
+    wrap.appendChild(chip);
+  });
 }
 
 /* ================= Truy hồi ngữ cảnh từ nguồn (SOURCE-COMPLETE / RETRIEVAL-COMPLETE — PHẦN A) =================
@@ -2407,6 +2485,96 @@ function requirementRegex(label) {
  * `filter(isSourceReady)` đơn thuần — đó chính là root cause làm mất lợi thế evidence đã có trong
  * lúc nguồn còn processing nền (mục II.C). Vẫn loại TUYỆT ĐỐI chunk placeholder và chunk có
  * extractionStatus lỗi — evidence phải THẬT, không được suy đoán/giả vờ (TEST 13). */
+/* ============================================================================================
+ * PROMPT V5 — PHẦN AK/AO/AN/AQ: NGUỒN WEB/YOUTUBE QUA URL
+ * ============================================================================================
+ * Gọi thẳng 2 route server đã có (POST /api/source/web, POST /api/source/youtube — SSRF-safe,
+ * single-flight, trả evidence SẠCH chứ không phải HTML/transcript thô). CỐ Ý KHÔNG đi qua state
+ * machine SOURCE_STATUS của file (UPLOADING->PARSING->...->READY) ở trên: nguồn URL nhận evidence
+ * XONG NGAY trong 1 lệnh gọi (không có giai đoạn "đang xử lý nền" cần theo dõi qua nhiều bước), nên
+ * dùng chung state machine đó chỉ thêm độ phức tạp mà không thêm giá trị thật.
+ * ============================================================================================ */
+const MAX_URL_SOURCES = 8;
+
+function persistUrlSources() { lsSet(LS_KEYS.urlSources, state.urlSources); }
+
+function detectUrlSourceKind(url) {
+  return /(^|\.)youtube\.com\/|youtu\.be\//i.test(url) ? 'YOUTUBE' : 'WEB';
+}
+
+/** PHẦN AS: mỗi nguồn URL có 1 sourceId ổn định (không đổi giữa các lần render) để adaptiveBudget
+ * (server/utils/sourceBudgetPlanner.js) nhóm đúng theo nguồn khi chia công bằng ngân sách. */
+function urlSourceId(entry) { return `url:${entry.sourceType}:${entry.videoId || entry.url}`; }
+
+async function addUrlSource(rawUrl) {
+  const url = String(rawUrl || '').trim();
+  if (!url) return { ok: false, reason: 'empty_url' };
+  if (state.urlSources.length >= MAX_URL_SOURCES) return { ok: false, reason: 'too_many_sources' };
+  // PHẦN CB: không thêm trùng 1 URL hai lần (request-local + persisted dedupe).
+  if (state.urlSources.some((s) => s.url === url)) return { ok: false, reason: 'duplicate_url' };
+
+  const kind = detectUrlSourceKind(url);
+  const endpoint = kind === 'YOUTUBE' ? '/api/source/youtube' : '/api/source/web';
+  let data;
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url })
+    });
+    data = await resp.json();
+  } catch (e) {
+    return { ok: false, reason: 'network_error' };
+  }
+  // PHẦN AP/DM/FC-11: không có transcript/không đọc được nội dung -> nói rõ, KHÔNG bịa (server đã
+  // trả đúng `status:'INCOMPLETE'`/`reason` — client chỉ chuyển tiếp thông điệp đó, không diễn giải
+  // lại thành "đã thêm thành công").
+  if (!data || !data.ok) {
+    return { ok: false, reason: (data && data.reason) || 'fetch_failed', userMessage: data && data.userMessage };
+  }
+
+  const entry = {
+    id: uid(),
+    url: data.url || url,
+    sourceType: kind,
+    videoId: data.videoId || null,
+    title: data.title || (kind === 'YOUTUBE' ? data.videoId : url),
+    fingerprint: data.fingerprint || null,
+    chunks: Array.isArray(data.chunks) ? data.chunks : [],
+    addedAt: Date.now()
+  };
+  state.urlSources.push(entry);
+  persistUrlSources();
+  renderUrlSources();
+  return { ok: true, entry };
+}
+
+function removeUrlSource(id) {
+  state.urlSources = state.urlSources.filter((s) => s.id !== id);
+  persistUrlSources();
+  renderUrlSources();
+}
+
+/** PHẦN Y/Z UI tối giản: danh sách chip nguồn URL đã thêm, có nút xoá — không tái dùng UI file-source
+ * (trạng thái RENDER/EXTRACT/VERIFY không áp dụng cho nguồn đã nhận evidence xong ngay). */
+function renderUrlSources() {
+  const listEl = el('urlSourcesList');
+  if (!listEl) return; // panel có thể chưa render trên bản HTML cũ hơn — không throw
+  listEl.innerHTML = '';
+  (state.urlSources || []).forEach((s) => {
+    const li = document.createElement('li');
+    li.className = 'recent-src-item';
+    const kindLabel = s.sourceType === 'YOUTUBE' ? 'YouTube' : 'Web';
+    li.innerHTML = `
+      <div class="recent-src-info">
+        <span class="recent-src-name">${escapeHtml(s.title || s.url)}</span>
+        <span class="recent-src-meta">${escapeHtml(kindLabel)} · ${(s.chunks || []).length} đoạn</span>
+      </div>
+      <button class="recent-src-remove" aria-label="Xoá nguồn">✕</button>
+    `;
+    li.querySelector('.recent-src-remove').onclick = () => removeUrlSource(s.id);
+    listEl.appendChild(li);
+  });
+}
+
 function collectAvailableEvidence(query) {
   const qWords = (normalizeForMatch(query).match(/[\p{L}\p{N}.]+/gu) || []).filter((w) => w.length > 2);
   const usableDocs = (state.docs || []).filter(isSourceUsableNow);
@@ -2428,6 +2596,29 @@ function collectAvailableEvidence(query) {
         sourceId: doc.id,
         evidenceId: ch.evidenceId || `${doc.id}:c${ch.id}`,
         extractionMethod: ch.extractionMethod || ps.extractionMethod || 'text',
+        extractionStatus: 'ok',
+        _norm: norm
+      });
+    });
+  });
+  // PHẦN AK/AO: nguồn URL (Web/YouTube) gộp vào ĐÚNG cùng pipeline retrieval — cùng cách chấm điểm
+  // theo từ khoá, cùng đi qua sourceBudgetPlanner.js ở server theo `sourceId` riêng từng nguồn.
+  (state.urlSources || []).forEach((s) => {
+    (s.chunks || []).forEach((ch, i) => {
+      const norm = normalizeForMatch(ch.text);
+      let score = 0;
+      qWords.forEach((w) => { if (norm.includes(w)) score += 1; });
+      // PHẦN BV (source provenance): locator (mốc thời gian YouTube) gắn kèm trong text để citation
+      // truy nguyên được TỚI ĐÚNG ĐOẠN, không chỉ tới cả video — timestamp không có ô riêng trong
+      // schema context (page/startPage/endPage là ngữ nghĩa PDF), nên đi kèm ngay đầu đoạn trích.
+      const text = ch.locator ? `[${ch.locator}] ${ch.text}` : ch.text;
+      out.push({
+        doc: s.title || s.url, id: ch.chunkIndex || (i + 1), text, garbled: false, score,
+        page: null, startPage: null, endPage: null,
+        chunkIndex: ch.chunkIndex || null, totalChunks: ch.totalChunks || null,
+        sourceId: urlSourceId(s),
+        evidenceId: `${urlSourceId(s)}:c${ch.chunkIndex || (i + 1)}`,
+        extractionMethod: 'text',
         extractionStatus: 'ok',
         _norm: norm
       });
@@ -2563,7 +2754,8 @@ function retrieveContext(query, limit) {
  * NAY mọi con số lấy từ doc.processing và trạng thái in ra đúng như máy trạng thái đang giữ. */
 function buildSourceManifest() {
   const docs = state.docs || [];
-  if (!docs.length) return '';
+  const urlSources = state.urlSources || [];
+  if (!docs.length && !urlSources.length) return '';
   const lines = ['SOURCE MANIFEST'];
   docs.forEach((d) => {
     const ps = ensureSourceProcessingState(d);
@@ -2592,6 +2784,14 @@ function buildSourceManifest() {
     lines.push(`  chunks: ${(d.chunks || []).filter((c) => !c[SOURCE_PLACEHOLDER_FLAG]).length}`);
     if (ps.failedPages.length) lines.push(`  failedPages: ${ps.failedPages.slice(0, 20).join(',')}`);
     lines.push(`  status: ${ps.status}`);
+  });
+  // PHẦN AK/AO: nguồn URL luôn READY ngay khi thêm (không có giai đoạn xử lý nền) — manifest chỉ
+  // cần khai đúng loại + số đoạn, không cần các trục coverage dành riêng cho file.
+  urlSources.forEach((s) => {
+    lines.push(`- ${s.title || s.url}`);
+    lines.push(`  type: ${s.sourceType === 'YOUTUBE' ? 'youtube' : 'web'}  sourceId: ${urlSourceId(s)}`);
+    lines.push(`  chunks: ${(s.chunks || []).length}`);
+    lines.push('  status: READY');
   });
   return lines.join('\n');
 }
@@ -2966,7 +3166,12 @@ function addUserMsg(text, imageUrl, imageState) {
   row.className = 'msg-row msg-user';
   row.innerHTML = '<div class="bubble"></div>';
   const bubble = row.querySelector('.bubble');
-  if (imageUrl) { const img = document.createElement('img'); img.src = imageUrl; bubble.appendChild(img); }
+  // PHẦN Y/AC: `imageUrl` có thể là 1 URL (tương thích ngược) hoặc mảng nhiều URL (nhiều ảnh đính
+  // kèm cùng lượt) — hiển thị lần lượt theo đúng thứ tự người dùng đã đính kèm (PHẦN X).
+  if (imageUrl) {
+    const urls = Array.isArray(imageUrl) ? imageUrl : [imageUrl];
+    urls.forEach((u) => { const img = document.createElement('img'); img.src = u; bubble.appendChild(img); });
+  }
   else if (imageState === 'legacy' || imageState === 'missing') {
     const span = document.createElement('span');
     span.className = 'img-restore-warn';
@@ -4748,12 +4953,18 @@ function finalizePendingTurnIfAny() {
 async function sendMessage() {
   const input = el('qInput');
   const query = input.value.trim();
-  const image = state.pendingImage;
-  if (!query && !image) return;
-  // Race condition (mục 11): người dùng bấm gửi ngay khi ảnh vừa chọn còn đang xử lý (FileReader/
-  // IndexedDB chưa xong) hoặc ảnh bị lỗi (không decode được) — KHÔNG được gửi thiếu base64.
-  if (image && image.status === 'loading') { alert(t('error.imageProcessing')); return; }
-  if (image && image.status === 'error') { alert(image.errorMessage || t('error.imageUnusable')); return; }
+  // PHẦN Y/AC: nhiều ảnh — `image` (số ít) giữ lại = ẢNH ĐẦU TIÊN, dùng cho mọi chỗ bên dưới vẫn chỉ
+  // cần biết "có ảnh hay không" / lưu 1 imageId để khôi phục sau F5 (PHẦN AB: fallback hợp lý, tránh
+  // phải đổi luôn cả schema lưu trữ message — xem AUDIT-REPORT mục 9 phần "CHƯA làm" để biết rõ đây
+  // là 1 giới hạn CÓ CHỦ ĐÍCH, không phải thiếu sót).
+  const images = state.pendingImages;
+  const image = images[0] || null;
+  if (!query && !images.length) return;
+  // Race condition (mục 11): người dùng bấm gửi ngay khi ẢNH BẤT KỲ (không chỉ ảnh đầu) còn đang xử
+  // lý (FileReader/IndexedDB chưa xong) hoặc bị lỗi (không decode được) — KHÔNG được gửi thiếu base64.
+  if (images.some((img) => img.status === 'loading')) { alert(t('error.imageProcessing')); return; }
+  const erroredImage = images.find((img) => img.status === 'error');
+  if (erroredImage) { alert(erroredImage.errorMessage || t('error.imageUnusable')); return; }
   // PHẦN F: chặn double-submit CHỈ khi CHÍNH conversation đang mở đã có task chạy — KHÔNG còn chặn
   // toàn app (trước đây sendBtn.disabled là cờ TOÀN CỤC, chặn gửi ở MỌI conversation cùng lúc).
   const activeConvForGuard = currentConversation();
@@ -4787,8 +4998,8 @@ async function sendMessage() {
 
   finalizePendingTurnIfAny();
 
-  addUserMsg(query, image ? image.previewUrl : null);
-  state.pendingImage = null; renderImagePreview();
+  addUserMsg(query, images.length ? images.map((img) => img.previewUrl) : null);
+  state.pendingImages = []; renderImagePreview();
 
   const conv = currentConversation();
   // FIX ROOT CAUSE #1: lưu imageId (tham chiếu tới IndexedDB) thay vì chỉ hadImage:true — đây là
@@ -4873,6 +5084,10 @@ async function sendMessage() {
     const data = await streamViaProviderRouter('/api/chat', {
       query, deepThinking: state.deepThinking, crossCheck: state.crossCheck, stage: 'approach',
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
+      // PHẦN Y/AC: ảnh thứ 2 trở đi (nếu có) — server gộp lại đúng thứ tự với `image` ở trên
+      // (validators.js: `images = image ? [image, ...body.images] : body.images`). KHÔNG lặp lại
+      // images[0] ở đây (đã gửi qua field `image` riêng) để tránh server nhận trùng 1 ảnh 2 lần.
+      images: images.slice(1).map((img) => ({ mediaType: img.mediaType, base64: img.base64 })),
       sourceImages: collectSourceImages(query),
       rules: state.rules, contexts, settings: settingsSnapshot,
       // PHẦN K/L: chỉ gửi history THỰC SỰ liên quan (query độc lập -> gần như 0 lượt), và báo số

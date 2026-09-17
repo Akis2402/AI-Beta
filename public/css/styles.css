@@ -1177,6 +1177,23 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 .recent-src-remove{background:none;border:none;color:var(--muted);cursor:pointer;flex-shrink:0;font-size:13px;padding:4px;}
 .recent-src-remove:hover{color:var(--danger);}
 #recentSourcesEmpty{margin:0;}
+/* PHẦN AK/AO: thêm nguồn URL — hàng input+nút tối giản, tái dùng đúng token màu/spacing hiện có. */
+.url-source-row{display:flex;gap:8px;margin-bottom:10px;}
+.url-source-row input{
+  flex:1;min-width:0;border:1px solid var(--rule);border-radius:var(--r-sm);padding:8px 10px;
+  font-size:12.5px;font-family:var(--font-body);background:var(--paper);color:var(--text);
+}
+.url-source-row input:focus-visible{outline:2px solid var(--primary);outline-offset:1px;}
+.url-source-row button{
+  background:var(--primary);border:none;color:#fff;font-weight:600;font-size:11.5px;
+  padding:8px 14px;border-radius:var(--r-sm);cursor:pointer;flex-shrink:0;font-family:var(--font-body);
+  transition:background-color .15s;
+}
+.url-source-row button:hover{background:var(--primary-dark);}
+.url-source-row button:disabled{opacity:.6;cursor:default;}
+#urlSourceStatus{margin:0 0 10px;font-size:11.5px;}
+#urlSourceStatus.is-error{color:var(--danger);}
+#urlSourcesList{list-style:none;margin:0 0 10px;padding:0;display:flex;flex-direction:column;gap:8px;}
 @media (max-width:600px){
   #addSourceModal{max-height:92vh;border-radius:var(--r-lg) var(--r-lg) 0 0;position:fixed;bottom:0;left:0;right:0;max-width:100%;}
   #addSourceOverlay.show{align-items:flex-end;padding:0;}
