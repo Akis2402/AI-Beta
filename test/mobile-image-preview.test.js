@@ -48,9 +48,12 @@ ok(
 );
 
 ok(
+  // PHẦN Y (multi-image): seq vẫn là cơ chế chống race condition CHÍNH, nhưng nay tra theo
+  // `state.pendingImages.find(p => p.seq === seq)` thay vì so sánh trực tiếp 1 biến duy nhất —
+  // vì có thể có NHIỀU ảnh pending cùng lúc, mỗi ảnh cần tự nhận diện đúng slot của mình.
   /let imageLoadSeq = 0;/.test(appJs) && /const seq = \+\+imageLoadSeq;/.test(appJs)
-    && /state\.pendingImage\.seq !== seq/.test(appJs),
-  'có cơ chế sequence token (imageLoadSeq) chống race condition khi thay/xoá ảnh giữa chừng'
+    && /state\.pendingImages\.find\(\(p\) => p\.seq === seq\)/.test(appJs),
+  'có cơ chế sequence token (imageLoadSeq) chống race condition khi thay/xoá ảnh giữa chừng (PHẦN Y: tra theo slot, không còn 1 biến duy nhất)'
 );
 
 ok(
@@ -61,7 +64,7 @@ ok(
 ok(
   (() => {
     const fnStart = appJs.indexOf('function renderImagePreview()');
-    const fnBody = appJs.slice(fnStart, fnStart + 1800);
+    const fnBody = appJs.slice(fnStart, fnStart + 2200);
     return fnStart !== -1
       && /document\.createElement\('img'\)/.test(fnBody)
       && !/wrap\.innerHTML = `<div class="img-chip/.test(fnBody);
@@ -75,8 +78,11 @@ ok(
 );
 
 ok(
-  /if \(image && image\.status === 'loading'\)/.test(appJs) && /if \(image && image\.status === 'error'\)/.test(appJs),
-  'sendMessage() chặn gửi khi ảnh còn đang xử lý hoặc bị lỗi — không gửi thiếu base64 (race condition mục 11)'
+  // PHẦN Y: kiểm tra TẤT CẢ ảnh pending (không chỉ 1 ảnh duy nhất) — bất kỳ ảnh nào đang loading
+  // hoặc lỗi đều chặn gửi, đúng tinh thần bảo vệ gốc (race condition mục 11) mở rộng cho nhiều ảnh.
+  /if \(images\.some\(\(img\) => img\.status === 'loading'\)\)/.test(appJs)
+    && /const erroredImage = images\.find\(\(img\) => img\.status === 'error'\);/.test(appJs),
+  'sendMessage() chặn gửi khi BẤT KỲ ảnh nào còn đang xử lý hoặc bị lỗi — không gửi thiếu base64 (race condition mục 11, mở rộng PHẦN Y cho nhiều ảnh)'
 );
 
 ok(
@@ -86,8 +92,10 @@ ok(
 );
 
 ok(
-  /rawSavePromise\.then\(\(lateId\) => \{/.test(appJs) && /state\.pendingImage\.imageId = lateId;/.test(appJs),
-  'save_timeout không làm mất persistence oan — nếu IndexedDB save chỉ chậm rồi tự resolve trễ, imageId vẫn được gắn lại cho ảnh đang pending (thay vì luôn coi là thất bại vĩnh viễn)'
+  // PHẦN Y: late-save reattach nay gắn vào ĐÚNG slot tìm được qua seq (`stillPending`), không còn
+  // giả định "chỉ có 1 pendingImage toàn cục" — cùng bảo vệ, khác chỗ lưu.
+  /rawSavePromise\.then\(\(lateId\) => \{/.test(appJs) && /stillPending\.imageId = lateId;/.test(appJs),
+  'save_timeout không làm mất persistence oan — nếu IndexedDB save chỉ chậm rồi tự resolve trễ, imageId vẫn được gắn lại cho ĐÚNG ảnh đang pending (thay vì luôn coi là thất bại vĩnh viễn)'
 );
 
 ok(
