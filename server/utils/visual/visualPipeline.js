@@ -25,7 +25,16 @@ const specBuilder = require('./visualSpecBuilder');
 const router = require('./visualRendererRouter');
 const validator = require('./visualValidator');
 const cache = require('./visualCache');
-const imageClient = require('./imageGenerationClient');
+// ============================================================================================
+// IMAGE STUDIO V2 WIRING — CHỈ 1 DÒNG NÀY THAY ĐỔI trong toàn bộ pipeline (xem
+// CHANGELOG-IMAGE-STUDIO-V2-CHAT-WIRING.md). Mặc định tự động vẽ hình trong chat nay dùng đúng cỗ
+// máy Gemini Imagen3 (Primary) + OpenAI DALL-E3 (Fallback) của Image Studio V2
+// (imageGenerationClientV2Adapter.js), giữ NGUYÊN mọi logic khác của pipeline (decision engine,
+// spec, validator, repair, cache, cost-gate, degrade). Đặt CHAT_IMAGE_ENGINE=legacy trong .env để
+// quay lại hệ thống đa-provider gốc (imageGenerationClient.js) mà không cần sửa code.
+const imageClient = String(process.env.CHAT_IMAGE_ENGINE || 'v2').toLowerCase() === 'legacy'
+  ? require('./imageGenerationClient')
+  : require('./imageGenerationClientV2Adapter');
 const hqStore = require('./visualHqStore');
 const responseGuard = require('./visualResponseGuard');
 
