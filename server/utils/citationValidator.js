@@ -1,0 +1,137 @@
+'use strict';
+
+// ---------- CITATION VALIDATION Ở BACKEND (mục 7) ----------
+// TRƯỚC ĐÂY: không có validator nào — citation kiểu [n] do model tự sinh được tin tưởng tuyệt đối,
+// kể cả khi n vượt quá số lượng context thực sự có (model "bịa" 1 nguồn không tồn tại). Frontend chỉ
+// hiển thị nguyên văn, không đối chiếu ngược lại số lượng context đã gửi.
+//
+// validateCitations() là NGUỒN SỰ THẬT DUY NHẤT cho việc 1 citation có hợp lệ hay không — chỉ dựa
+// trên 1 quy tắc xác định (deterministic), KHÔNG dùng heuristic/LLM để "đoán" — đúng tinh thần ưu
+// tiên kiến trúc deterministic của yêu cầu gốc.
+
+const CITATION_RE = /\[(\d{1,3})\]/g;
+const { isSourceUsableFromStatus } = require('./sourceProvenance');
+
+/**
+ * @param {string} text Response text (đã strip <thinking>).
+ * @param {Array} contexts Danh sách context đã gửi cho model (1-indexed trong prompt — context thứ
+ *   i tương ứng citation [i]). Chỉ cần `contexts.length`, không cần nội dung.
+ * @returns {{valid:boolean, invalidCitations:number[], usedContextIds:number[], allCitations:number[]}}
+ */
+function validateCitations(text, contexts, opts = {}) {
+  const list = Array.isArray(contexts) ? contexts : [];
+  const n = list.length;
+  // FIX (Vấn đề #1 — bật được context dedupe): citation KHÔNG còn được validate theo KHOẢNG
+  // `1..contexts.length`. Sau khi gộp đoạn trùng, tập số hợp lệ có thể KHÔNG liên tục (vd [1],[2],[4])
+  // — validate theo khoảng sẽ vừa coi [3] (đã bị gộp) là hợp lệ, vừa coi [4] (thật) là bịa. Nay dùng
+  // đúng TẬP citeNo do citationIndex.js gán, kèm alias của các số đã bị gộp.
+  const validSet = new Set(
+    Array.isArray(opts.validCiteNos) && opts.validCiteNos.length
+      ? opts.validCiteNos
+      : list.map((c, i) => (c && c.citeNo != null ? c.citeNo : i + 1))
+  );
+  const aliasOf = opts.aliasOf || {};
+  const clean = String(text || '');
+  const all = new Set();
+  let m;
+  CITATION_RE.lastIndex = 0;
+  while ((m = CITATION_RE.exec(clean))) {
+    all.add(Number(m[1]));
+    if (all.size > 200) break; // pathological guard
+  }
+
+  const isValid = (id) => validSet.has(id) || (aliasOf[id] != null && validSet.has(aliasOf[id]));
+  const allCitations = [...all].sort((a, b) => a - b);
+  const usedContextIds = allCitations.filter(isValid);
+  const invalidCitations = allCitations.filter((id) => !isValid(id));
+
+  return { valid: invalidCitations.length === 0, invalidCitations, usedContextIds, allCitations };
+}
+
+/**
+ * Không cho AI tự bịa tên tài liệu/URL/domain không có trong contexts thật — phát hiện các mẫu URL/
+ * domain xuất hiện trong response mà KHÔNG khớp bất kỳ context nào đã cấp (mục 7 cuối). Đây là
+ * heuristic BỔ SUNG (không thay thế validateCitations) — chỉ áp dụng khi response thực sự chứa
+ * dạng URL, tránh false-positive với văn bản toán học thông thường.
+ * @param {string} text
+ * @param {Array<{text?:string, url?:string, sourceId?:string, doc?:string}>} contexts
+ * @returns {{fabricatedUrls:string[]}}
+ */
+function detectFabricatedSources(text, contexts) {
+  const clean = String(text || '');
+  const urlRe = /https?:\/\/[^\s)"'\]]+/g;
+  const knownUrls = new Set((contexts || []).map((c) => c.url).filter(Boolean));
+  const found = clean.match(urlRe) || [];
+  const fabricatedUrls = [...new Set(found)].filter((u) => !knownUrls.has(u));
+  return { fabricatedUrls };
+}
+
+/**
+ * PHẦN F — VALIDATE PROVENANCE, không chỉ validate con số.
+ * validateCitations() trả lời "số [n] này có nằm trong tập hợp lệ không". Câu hỏi còn lại quan
+ * trọng không kém: "đoạn mà [n] trỏ tới có PHẢI bằng chứng thật không" — nó có tồn tại trong
+ * evidence map, có thuộc nguồn đã READY, có số trang hợp lệ, có phải placeholder/chunk lỗi không.
+ * Hàm này deterministic hoàn toàn: chỉ đối chiếu metadata, không đoán nội dung.
+ *
+ * @param {string} text
+ * @param {{contexts:Array, validCiteNos?:number[], aliasOf?:object, sourceStatus?:Array}} opts
+ * @returns {{valid:boolean, invalidCitations:number[], unresolved:number[],
+ *   notReadySources:number[], placeholderCitations:number[], resolved:Array}}
+ */
+function validateCitationProvenance(text, opts = {}) {
+  const contexts = Array.isArray(opts.contexts) ? opts.contexts : [];
+  const base = validateCitations(text, contexts, { validCiteNos: opts.validCiteNos, aliasOf: opts.aliasOf });
+  const aliasOf = opts.aliasOf || {};
+  const byCiteNo = new Map();
+  contexts.forEach((c, i) => byCiteNo.set(c && c.citeNo != null ? c.citeNo : i + 1, c));
+
+  const statusByKey = new Map();
+  (Array.isArray(opts.sourceStatus) ? opts.sourceStatus : []).forEach((s) => {
+    if (s && s.sourceId) statusByKey.set(String(s.sourceId), s);
+    if (s && s.name) statusByKey.set(`name:${s.name}`, s);
+  });
+
+  const unresolved = [];
+  const notReadySources = [];
+  const placeholderCitations = [];
+  const resolved = [];
+
+  base.usedContextIds.forEach((n) => {
+    const citeNo = byCiteNo.has(n) ? n : aliasOf[n];
+    const c = byCiteNo.get(citeNo);
+    if (!c) { unresolved.push(n); return; }
+    if (c.extractionStatus && c.extractionStatus !== 'ok') { placeholderCitations.push(n); return; }
+    const st = statusByKey.get(String(c.sourceId)) || statusByKey.get(`name:${c.doc}`);
+    // PHẦN VII/VIII (đồng bộ với sourceProvenance.filterUsableContexts): citation trỏ tới evidence
+    // của nguồn ĐANG xử lý nền vẫn HỢP LỆ miễn evidence đó thật (usableNow) — không còn đòi status
+    // === 'READY' tuyệt đối, đó chính là bug cùng bản chất với mục II.C ở phía client.
+    if (!isSourceUsableFromStatus(st)) { notReadySources.push(n); return; }
+    // Trang phải là số dương và (khi biết tổng số trang) không vượt quá số trang thật của nguồn.
+    if (c.page != null) {
+      const page = Number(c.page);
+      if (!Number.isFinite(page) || page < 1 || (st && st.totalPages && page > st.totalPages)) {
+        unresolved.push(n);
+        return;
+      }
+    }
+    resolved.push({
+      citeNo, doc: c.doc, sourceId: c.sourceId != null ? c.sourceId : null,
+      page: c.page != null ? c.page : null, evidenceId: c.evidenceId || null,
+      chunkIndex: c.chunkIndex != null ? c.chunkIndex : null,
+      extractionMethod: c.extractionMethod || 'unknown'
+    });
+  });
+
+  return {
+    valid: base.valid && !unresolved.length && !notReadySources.length && !placeholderCitations.length,
+    invalidCitations: base.invalidCitations,
+    unresolved,
+    notReadySources,
+    placeholderCitations,
+    resolved,
+    allCitations: base.allCitations,
+    usedContextIds: base.usedContextIds
+  };
+}
+
+module.exports = { validateCitations, validateCitationProvenance, detectFabricatedSources, CITATION_RE };

@@ -1,0 +1,8 @@
+{
+  "name": "node-domexception",
+  "version": "1.0.0",
+  "description": "Local shim redirecting to platform-native DOMException (Node 18+). Silences 'npm warn deprecated node-domexception@1.0.0'. See scripts/shims/node-domexception/index.js for behavior.",
+  "main": "index.js",
+  "license": "MIT",
+  "private": true
+}
