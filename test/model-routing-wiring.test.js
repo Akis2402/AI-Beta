@@ -66,7 +66,12 @@ test('cả 4 lệnh gọi model ở nhánh direct (không cross-check) dùng use
   // (không còn "fast: callMode.fast") là điều kiện thực sự chống hồi quy, giữ nguyên độ mạnh.
   const useFastModelUsages = (codeSrc.match(/fast:\s*useFastModel/g) || []).length;
   assert.strictEqual(useFastModelUsages, 3, `phải có đúng 3 điểm khai "fast: useFastModel" sau refactor (thấy ${useFastModelUsages})`);
-  assert.ok(/buildArgs: \(\{ messages: msgs, maxTokens \}\) => \(\{[\s\S]*?fast: useFastModel/.test(codeSrc),
+  // CẬP NHẬT (audit đợt 2, mục 10): hình dạng destructuring của buildArgs đã đổi một cách HỢP LỆ —
+  // nó nhận thêm `mode` và `completeness` để lượt tiếp nối biết phần còn thiếu là ĐỊNH DẠNG hay NỘI
+  // DUNG (deficit-aware reasoning). Khớp cứng danh sách tham số là khoá nhầm vào chi tiết cú pháp,
+  // không phải vào bất biến. Bất biến cần giữ: buildArgs của nhánh streaming direct vẫn truyền
+  // `fast: useFastModel` cho CẢ lượt đầu lẫn lượt tiếp nối (vì cả hai dùng CHUNG factory này).
+  assert.ok(/buildArgs: \(\{ messages: msgs, maxTokens[^)]*\}\) => \(\{[\s\S]*?fast: useFastModel/.test(codeSrc),
     'buildArgs của nhánh streaming direct phải truyền fast: useFastModel cho CẢ lượt đầu và lượt tiếp nối');
 });
 

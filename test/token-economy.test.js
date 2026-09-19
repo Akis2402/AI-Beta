@@ -155,10 +155,27 @@ test('Guardrail: suggestBudgetOverride returns null before enough samples', () =
   assert.strictEqual(suggestion, null);
 });
 
-test('Guardrail: recordOutcome + suggestBudgetOverride stays within min/max ratio', () => {
-  for (let i = 0; i < 5; i++) te.recordOutcome('TEST_CLASS', 'detail', 100); // way below default
-  const suggestion = te.suggestBudgetOverride('TEST_CLASS', 'detail', 3000);
+// CẬP NHẬT (audit đợt 2, mục 5/47): chữ ký CŨ `recordOutcome(class, stage, tokens)` nay được coi là
+// mẫu ƯỚC LƯỢNG (`estimated: true`) — vì gọi kiểu đó thì không có cách nào biết con số đến từ usage
+// thật của provider hay từ `text.length / 3.2`. Mẫu ước lượng KHÔNG BAO GIỜ được tự mình điều khiển
+// ngân sách của request sau, nên ở đây suggestBudgetOverride() trả null: đó là hành vi ĐÚNG mới,
+// không phải hồi quy. Bất biến guardrail (không bao giờ tụt dưới 50% budget mặc định) được kiểm
+// bằng mẫu ĐO THẬT ở test ngay dưới.
+test('Guardrail: mẫu ƯỚC LƯỢNG không được tự điều khiển budget', () => {
+  for (let i = 0; i < 5; i++) te.recordOutcome('TEST_CLASS', 'detail', 100); // chữ ký cũ -> estimated
+  assert.strictEqual(te.suggestBudgetOverride('TEST_CLASS', 'detail', 3000), null);
+});
+
+test('Guardrail: recordOutcome (đo thật) + suggestBudgetOverride stays within min/max ratio', () => {
+  const key = { problemClass: 'TEST_CLASS_MEASURED', stage: 'detail', provider: 'p', model: 'm' };
+  // 100 token là thấp hơn hẳn default 3000 — guardrail phải chặn ở 50%, không cho tụt tự do.
+  for (let i = 0; i < te.MIN_MEASURED_SAMPLES; i++) {
+    te.recordOutcome({ ...key, actualTokens: 100, estimated: false });
+  }
+  const suggestion = te.suggestBudgetOverride({ ...key, defaultTarget: 3000 });
+  assert.ok(typeof suggestion === 'number', 'đủ mẫu đo thật thì phải có đề xuất');
   assert.ok(suggestion >= 3000 * 0.5, 'must not drop below guardrail min');
+  assert.ok(suggestion <= 3000 * 1.5, 'must not exceed guardrail max');
 });
 
 test('Core/reserve allocation sums back to target and respects 70/30 split', () => {
