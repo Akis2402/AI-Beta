@@ -13,5 +13,7 @@ module.exports = {
   cache: require('./visualCache'),
   imageClient: require('./imageGenerationClient'),
   judge: require('./visualJudge'),
+  // MỤC 33: canonical visual state phía server — Approach ghi, Detail đọc (không bao giờ sinh lại).
+  stateStore: require('./visualStateStore'),
   scoringConfig: require('./visualScoringConfig')
 };

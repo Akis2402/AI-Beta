@@ -38,7 +38,8 @@ const { buildMinimalContinuationContext, createSeamDedupe, joinContinuation, com
  * @param {Array} cfg.providers Danh sách execution target đang hoạt động.
  * @param {Function} cfg.streamFn (providers, args, onDelta, opts) => Promise<result>. Thường là
  *   aiProviders.streamWithFailover; tách ra tham số để test inject stub không cần mạng.
- * @param {Function} cfg.buildArgs ({mode, messages, maxTokens}) => args truyền cho streamFn.
+ * @param {Function} cfg.buildArgs ({mode, messages, maxTokens, completeness}) => args truyền cho
+ *   streamFn. `completeness` là kết quả đánh giá của lượt TRƯỚC (undefined ở lượt INITIAL) — mục 10.
  *   chat.js sở hữu hàm này (nó biết system prompt/webSearch/fast/deepThinking/signal của stage đó)
  *   — module này KHÔNG tự dựng args để không phải biết gì về prompt.
  * @param {Array} cfg.messages messages gốc của lượt đầu (đề bài + history đã nén).
@@ -144,7 +145,9 @@ async function runResumableStream(cfg) {
     try {
       stepResult = await streamFn(
         providers,
-        buildArgs({ mode, messages: ctx.messages, maxTokens: decision.amount }),
+        // MỤC 10: lý do INCOMPLETE được truyền xuống buildArgs để caller quyết định lượt này có cần
+        // reasoning hay không (thiếu định dạng -> 0, thiếu nội dung -> cấp bình thường).
+        buildArgs({ mode, messages: ctx.messages, maxTokens: decision.amount, completeness }),
         (piece) => seam.feed(piece),
         { ...streamOpts, deadline }
       );
@@ -266,7 +269,7 @@ async function runResumableNonStream(cfg) {
 
     let step;
     try {
-      step = await callFn(buildArgs({ mode, messages: ctx.messages, maxTokens: decision.amount }));
+      step = await callFn(buildArgs({ mode, messages: ctx.messages, maxTokens: decision.amount, completeness }));
     } catch (e) {
       session.recoveryReason = e && e.cancelled ? 'cancelled' : 'continuation_provider_error';
       break;

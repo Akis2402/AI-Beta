@@ -246,6 +246,11 @@ function validateChatBody(body) {
   const crossCheck = typeof body.crossCheck === 'boolean' ? body.crossCheck : legacyDeep;
   const stage = ALLOWED_STAGES.includes(body.stage) ? body.stage : 'detail';
   const approachText = clip(String(body.approachText || '').trim(), MAX_APPROACH_LEN);
+  // MỤC 33/43: Detail chỉ được gửi THAM CHIẾU hình (visualId do server cấp ở lượt Approach), KHÔNG
+  // phải URL ảnh ngoài do client tự dựng — server không bao giờ tin URL client gửi làm nguồn sự thật.
+  // Giới hạn 64 ký tự + bảng chữ cái an toàn: visualId server sinh có dạng `vz_<base36>_<seq>`.
+  const rawVisualId = String((body.visualId == null ? '' : body.visualId)).trim();
+  const visualId = /^[A-Za-z0-9_-]{1,64}$/.test(rawVisualId) ? rawVisualId : '';
 
   let image = null;
   if (body.image) {
@@ -413,7 +418,7 @@ function validateChatBody(body) {
       })).filter((h) => h.content)
     : [];
 
-  const result = { query, deepThinking, crossCheck, image, images, imagesRejected, sourceImages, sourceImagesRejected, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText };
+  const result = { query, deepThinking, crossCheck, image, images, imagesRejected, sourceImages, sourceImagesRejected, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText, visualId };
   // PHẦN A7: server dùng ĐÚNG chính sách mà client đã dùng để tự kiểm trước khi gửi. Nếu tới đây vẫn
   // vượt ngân sách (client cũ chưa cập nhật, hoặc gọi API trực tiếp) -> lỗi CÓ CẤU TRÚC, KHÔNG âm
   // thầm cắt bớt dữ liệu rồi trả lời như thể đã đọc đủ.

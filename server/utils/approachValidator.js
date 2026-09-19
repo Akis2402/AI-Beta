@@ -9,6 +9,11 @@
 const MAX_BULLETS = 5;
 const MAX_LINES_SOFT = 14; // approach có thể có heading + bullet + hình vẽ JSON -> nới hơn số bullet thuần
 const MAX_CHARS = 1400; // bullet 4-5 câu ngắn hiếm khi vượt mốc này trừ khi đã lẫn sang lời giải
+// ---------- MỤC 7: HARD CONTRACT CỦA APPROACH ----------
+// Approach KHÔNG phải một Detail thu nhỏ, nên nó cũng không được hưởng chính sách recovery của
+// Detail. Một approach bị cắt cần thêm vài dòng để đóng ý, không cần vài nghìn token để "giải tiếp".
+const MAX_CONTINUATION_TOKENS = Number(process.env.APPROACH_MAX_CONTINUATION_TOKENS) || 400;
+const MAX_REPAIR_CALLS = 1;
 
 // Dấu hiệu approach đã "leak" sang lời giải chi tiết: chuỗi biến đổi nhiều dòng liên tiếp có dấu "="
 // hoặc phép tính cụ thể, hoặc đáp số cuối được đóng khung/in đậm.
@@ -77,4 +82,29 @@ function extractApproachSection(fullText) {
   return nextHeading === -1 ? rest : rest.slice(0, nextHeading);
 }
 
-module.exports = { validateApproachCompactness, buildApproachRepairPrompt, extractApproachSection, MAX_BULLETS };
+/**
+ * MỤC 7 — PHÁT HIỆN APPROACH ĐÃ "RƠI" THÀNH DETAIL.
+ *
+ * Bất biến sản phẩm: approach lỗi thì giữ BẢN APPROACH TỐT NHẤT, TUYỆT ĐỐI không được lặng lẽ trả
+ * về một lời giải chi tiết thay thế — người dùng bấm "Hướng giải" mà nhận nguyên lời giải thì hai
+ * giai đoạn của sản phẩm sụp thành một, và lượt Detail sau đó là token trả cho nội dung đã có.
+ *
+ * @param {string} text output của stage 'approach'
+ * @returns {{fellBack:boolean, signals:string[]}}
+ */
+function detectDetailFallback(text) {
+  const body = stripDrawingBlocks(text || '');
+  const signals = [];
+  if (FINAL_ANSWER_RE.test(body)) signals.push('final_answer_present');
+  if (LONG_CALC_CHAIN_RE.test(body)) signals.push('long_calculation_chain');
+  if (DETAILED_STEP_RE.test(body)) signals.push('detail_step_numbering');
+  if (body.length > MAX_CHARS * 2) signals.push('detail_length');
+  // Cần ít nhất HAI dấu hiệu độc lập: một mình "có đáp số" có thể chỉ là approach lỡ nêu kết quả
+  // trung gian, chưa đủ để kết luận đã thành lời giải chi tiết (tránh dương tính giả).
+  return { fellBack: signals.length >= 2, signals };
+}
+
+module.exports = {
+  validateApproachCompactness, buildApproachRepairPrompt, extractApproachSection,
+  detectDetailFallback, MAX_BULLETS, MAX_CHARS, MAX_CONTINUATION_TOKENS, MAX_REPAIR_CALLS
+};

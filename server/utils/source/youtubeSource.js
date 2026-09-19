@@ -13,6 +13,7 @@
 
 const safeHttp = require('../safeHttp');
 const { contentFingerprint } = require('../queryFingerprint');
+const contentCache = require('./sourceContentCache');
 const singleFlight = require('../singleFlight');
 
 const EXTRACTOR_VERSION = 'yt-transcript-v1';
@@ -106,6 +107,17 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
 
   return singleFlight.run(`youtube::${videoId}`, async () => {
     const langs = opts.languages || ['vi', 'en'];
+    // ---------- MỤC 27: CACHE TRANSCRIPT ----------
+    // key = videoId + language + transcriptVersion. Transcript của một video gần như không đổi, nên
+    // đây là loại nội dung đáng cache lâu nhất trong hệ thống. Trước bản này, cùng một video đi qua
+    // Approach -> Detail -> cross-check là 3 lần tải lại đúng file phụ đề đó.
+    const cacheParts = {
+      url: `yt:${videoId}:${langs.join(',')}`,
+      extractorVersion: EXTRACTOR_VERSION
+    };
+    const cached = opts.noCache ? null : await contentCache.get(cacheParts);
+    if (cached && cached.value) return { ...cached.value, fromCache: true };
+
     for (const lang of langs) {
       const url = new URL(`https://www.youtube.com/api/timedtext?v=${encodeURIComponent(videoId)}&lang=${encodeURIComponent(lang)}`);
       let res;
@@ -118,7 +130,7 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
       const cues = parseTranscriptXml(res.body.toString('utf8'));
       if (!cues.length) continue;
       const chunks = chunkTranscript(cues, opts);
-      return {
+      const payload = {
         ok: true,
         status: 'READY',
         videoId,
@@ -130,6 +142,8 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
         extractorVersion: EXTRACTOR_VERSION,
         chunks
       };
+      await contentCache.set(cacheParts, payload, {});
+      return payload;
     }
     // PHẦN AP/DM/FC-11: KHÔNG có transcript = KHÔNG có nội dung. Trả INCOMPLETE và dừng ở đó.
     return {

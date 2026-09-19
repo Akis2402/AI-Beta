@@ -49,6 +49,22 @@ const DEGRADE_LOW_MS = Number(process.env.VISUAL_DEGRADE_LOW_MS) || 5000;
 // Số lần repair TỐI ĐA bằng image AI khi validate trượt (yêu cầu sản phẩm: đúng 1 lần).
 const MAX_IMAGE_REPAIR = 1;
 
+// ============================================================================================
+// MỤC 31/32/34 — HARD LOCK VÒNG ĐỜI HÌNH THEO STAGE
+// ============================================================================================
+// Bất biến: MỘT request = MỘT vòng đời hình, và vòng đời đó thuộc về stage 'approach' (hoặc nhánh
+// \"chỉ lấy hình\"). Trước bản này, `stage` KHÔNG hề tồn tại trong chữ ký runVisualPipeline(): stage
+// 'detail' đi qua ĐÚNG cùng một đường — decisionEngine -> judge -> specBuilder -> imageClient — nên
+// mỗi lần người dùng bấm \"Giải chi tiết\" là một lần sinh ảnh nữa (và có thể thêm một lệnh gọi judge).
+//
+// Khoá được đặt ở ĐÂY chứ không phải chỉ ở route: đây là điểm vào DUY NHẤT của hệ thống hình, nên
+// mọi đường gọi (streaming, JSON, cross-check, continuation, retry) đều bị chặn cùng một chỗ, không
+// phụ thuộc người sửa route sau này có nhớ thêm guard hay không (mục 77: không vá bằng 1 câu `if`).
+const GENERATING_STAGES = new Set(['approach', 'image_only']);
+function stageMayGenerate(stage) {
+  return GENERATING_STAGES.has(String(stage == null ? 'approach' : stage).toLowerCase());
+}
+
 /**
  * resolveVisualDegradeLevel() — mức hạ cấp theo thời gian còn lại của request.
  * @param {number} remainingMs Infinity khi không có deadline (chạy ngoài request thật/test).
@@ -115,7 +131,12 @@ async function runVisualPipeline(args) {
     candidates = null, deadline, signal, onEvent = () => {}, cacheKeyExtra = {}, judge,
     // Nội dung stage 'approach' — CHỈ dùng làm nguồn trích xuất thực thể cho spec, không bao giờ
     // được coi là câu trả lời.
-    approachText = ''
+    approachText = '',
+    // MỤC 31/32: stage của request. Mặc định 'approach' để mọi call-site/test cũ giữ NGUYÊN hành vi.
+    stage = 'approach',
+    // MỤC 33: visual đã có từ vòng đời Approach (server load qua visualStateStore) — Detail chỉ
+    // được DÙNG LẠI đúng tập này.
+    existingVisuals = null
   } = args || {};
 
   const telemetry = {
@@ -126,10 +147,40 @@ async function runVisualPipeline(args) {
     visualDegradeLevel: 'high', visualCostClass: null, visualProvidersTried: [],
     visualNecessity: 'NONE',
     visualFidelity: 'ai_generated', visualRealismRequired: false, visualUpgradeHint: null,
-    visualHighPrecision: false
+    visualHighPrecision: false,
+    // ---------- MỤC 34: đếm ĐÚNG những thứ tốn tiền, tách khỏi nhau ----------
+    // visualGenerationLifecycleCount: số VÒNG ĐỜI sinh hình (0 hoặc 1 cho mỗi request).
+    // visualProviderAttempts: số lệnh gọi API THẬT tới image provider (có thể > 1 khi failover) —
+    // hai con số này KHÁC NHAU và không bao giờ được gộp làm một (mục 35).
+    visualStage: stage,
+    visualLifecycleLocked: false,
+    visualGenerationLifecycleCount: 0,
+    visualProviderAttempts: 0,
+    visualProviderFailures: 0,
+    visualRetryCount: 0,
+    visualJudgeCalls: 0,
+    visualReused: false
   };
 
   try {
+    // ---------- MỤC 31/32: STAGE KHÔNG ĐƯỢC SINH HÌNH -> DÙNG LẠI, KHÔNG ĐI TIẾP ----------
+    // Trả về TRƯỚC decisionEngine/judge/specBuilder/imageClient. Không phải \"guard thêm\" mà là một
+    // nhánh trả về riêng: mọi lệnh gọi tốn token/tiền nằm SAU điểm này nên không thể lọt qua.
+    if (!stageMayGenerate(stage)) {
+      telemetry.visualLifecycleLocked = true;
+      const reuse = Array.isArray(existingVisuals) ? existingVisuals.filter(Boolean) : [];
+      if (reuse.length) {
+        telemetry.visualReused = true;
+        telemetry.visualType = reuse[0].type || telemetry.visualType;
+        telemetry.visualRenderer = reuse[0].renderer || 'generated_image';
+        reuse.forEach((v) => onEvent({ ...v, type: 'visual:ready', reused: true }));
+        return { status: 'reused', decision: null, visuals: reuse, telemetry };
+      }
+      // Approach chưa từng sinh hình (hoặc state không còn) -> Detail KHÔNG được tự bù vào.
+      telemetry.visualError = 'lifecycle_locked_no_existing_visual';
+      return { status: 'skipped', decision: null, visuals: [], telemetry };
+    }
+
     // ---------- Kiểm tra ngân sách thời gian TRƯỚC KHI làm bất cứ gì ----------
     const remaining = deadline && typeof deadline.remaining === 'function' ? deadline.remaining() : Infinity;
     const degrade = resolveVisualDegradeLevel(remaining);
@@ -147,6 +198,7 @@ async function runVisualPipeline(args) {
     // ---------- TẦNG 3: chỉ borderline mới hỏi model ----------
     if (typeof judge === 'function' && decisionEngine.needsModelJudgement(decision)) {
       telemetry.visualJudgeUsed = true;
+      telemetry.visualJudgeCalls += 1;
       try {
         const verdict = await judge({ question, subject, decision });
         if (verdict) decision = decisionEngine.applyModelJudgement(decision, verdict);
@@ -276,14 +328,22 @@ async function runVisualPipeline(args) {
       if (signal && signal.aborted) { telemetry.visualError = 'aborted'; break; }
       if (Date.now() > visualDeadlineAt) { telemetry.visualError = 'visual_deadline'; break; }
 
+      telemetry.visualGenerationLifecycleCount = 1; // vòng đời sinh hình đã BẮT ĐẦU (mục 34)
       const img = await imageClient.generateImage({
         prompt, signal, size: sizing.size, aspectRatio: sizing.aspectRatio, quality: sizing.quality,
         timeoutMs: Math.max(2000, visualDeadlineAt - Date.now()),
         deadlineAt: visualDeadlineAt
       });
       telemetry.visualProvidersTried = img.providersTried || telemetry.visualProvidersTried;
+      // MỤC 35: SỐ LỆNH GỌI API tới provider ảnh — cộng dồn qua cả các lượt repair, tách hẳn với
+      // visualGenerationLifecycleCount (vẫn luôn <= 1).
+      telemetry.visualProviderAttempts += (img.providersTried || []).length || 1;
       if (img.costClass) telemetry.visualCostClass = img.costClass;
-      if (!img.ok) { telemetry.visualError = img.reason; break; }
+      if (!img.ok) {
+        telemetry.visualProviderFailures += (img.providersTried || []).length || 1;
+        telemetry.visualError = img.reason;
+        break;
+      }
 
       const out = {
         format: img.format, url: img.url, renderer: 'generated_image', origin: 'ai_generated',
@@ -297,6 +357,7 @@ async function runVisualPipeline(args) {
       // dừng hẳn. Không có nhánh nào rơi về SVG.
       if (attempt >= MAX_IMAGE_REPAIR) { telemetry.visualError = 'validation_failed'; break; }
       telemetry.visualRepairCount++;
+      telemetry.visualRetryCount++;
       prompt = `${basePrompt}\n${validator.buildVisualRepairPrompt(spec, validation.issues)}`;
     }
 
@@ -361,7 +422,7 @@ async function runVisualPipeline(args) {
 }
 
 module.exports = {
-  runVisualPipeline, detectVisualFactConflicts, resolveVisualDegradeLevel,
+  runVisualPipeline, detectVisualFactConflicts, resolveVisualDegradeLevel, stageMayGenerate,
   VISUAL_DEADLINE_MS, MIN_REMAINING_FOR_VISUAL_MS, DEGRADE_MEDIUM_MS, DEGRADE_LOW_MS,
   MAX_IMAGE_REPAIR
 };

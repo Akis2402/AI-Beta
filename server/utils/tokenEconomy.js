@@ -524,6 +524,39 @@ class TokenEconomyCache {
 // Singleton — dùng chung cho cả tiến trình server (không tạo cache riêng mỗi request).
 const globalCache = new TokenEconomyCache();
 
+// ============================================================================================
+// MỤC 28 — L1/L2 PHẢI RÕ RÀNG: NỐI THẬT HOẶC KHAI BÁO TẮT, KHÔNG TUYÊN BỐ SUÔNG
+// ============================================================================================
+// CacheAdapter đã có sẵn `setL2()` từ lâu nhưng KHÔNG NƠI NÀO gọi — tức hệ thống mô tả mình là
+// "multi-level cache" trong khi mọi request chỉ chạm L1 trong RAM của một instance. Trên serverless,
+// hit-rate giữa các instance gần như bằng 0.
+//
+// Nay L2 được nối THẬT khi môi trường có KV, và `cacheLevelsStatus()` nói thẳng trạng thái để
+// telemetry không bao giờ báo "L2 hit" cho một tầng chưa tồn tại.
+function makeRequestCacheL2() {
+  const kvStore = require('./kvStore');
+  if (!kvStore.isEnabled()) return null;
+  return {
+    async get(key) {
+      const raw = await kvStore.get(`reqcache:${key}`);
+      if (raw == null) return null;
+      try { return JSON.parse(raw); } catch (e) { return null; }
+    },
+    async set(key, value, ttlMs) {
+      await kvStore.set(`reqcache:${key}`, JSON.stringify(value), Math.max(1, Math.round((ttlMs || 600000) / 1000)));
+    },
+    async delete(key) { await kvStore.del(`reqcache:${key}`); }
+  };
+}
+try { globalCache.setL2(makeRequestCacheL2()); } catch (e) { /* KV lỗi -> chạy thuần L1, không chặn boot */ }
+
+/** @returns {{l1:boolean, l2:boolean, reason:string}} trạng thái THẬT của từng tầng. */
+function cacheLevelsStatus() {
+  const adapter = globalCache.adapters ? globalCache.adapters.get('L1') : null;
+  const l2 = !!(adapter && adapter.hasL2());
+  return { l1: true, l2, reason: l2 ? 'kv_configured' : 'l2_disabled_no_kv' };
+}
+
 // ================= 21.19/21.20 CROSS-CHECK TOKEN ECONOMY =================
 const RISK = { LOW: 'LOW', MEDIUM: 'MEDIUM', HIGH: 'HIGH' };
 
@@ -652,119 +685,157 @@ class TelemetryRecorder {
 }
 
 // ================= 21.31 AUTOMATIC TOKEN OPTIMIZATION LOOP =================
-/* ============================================================================================
-   MỤC 5 — HISTORICAL ADAPTIVE BUDGET PHẢI AN TOÀN
-   ============================================================================================
-   Yêu cầu: ưu tiên usage THẬT từ provider; chỉ dùng estimator khi provider không trả usage (và ghi
-   estimated=true); min sample count; moving average; outlier rejection; maximum adjustment;
-   rollback; theo (provider, model, stage, problemClass) — KHÔNG để 1 request bất thường làm hỏng
-   budget của hàng loạt request sau.
-
-   Bản cũ (trước bản vá này): recordOutcome() LUÔN nhận `text.length/3.2` (char-count) làm
-   actualTokensUsed — chưa từng có nhánh dùng usage thật dù usage thật (requestUsage.outputTokens,
-   provider trả về) đã có sẵn ở chat.js. Không outlier rejection, không rollback, không tách theo
-   provider/model — 1 câu trả lời dài bất thường (hoặc usage bị log sai) kéo avg lệch mãi mãi cho
-   MỌI request cùng problemClass/stage sau đó, không có đường quay lại.
-   ============================================================================================ */
-const budgetByProblemClass = new Map(); // key `${problemClass}:${stage}:${provider}:${model}` -> HistoryStat
+// ============================================================================================
+// MỤC 5 — ADAPTIVE BUDGET PHẢI AN TOÀN: MỘT REQUEST BẤT THƯỜNG KHÔNG ĐƯỢC LÀM HỎNG HÀNG LOẠT
+// ============================================================================================
+// Bản trước: `recordOutcome(problemClass, stage, actualTokensUsed)` với EMA 0.8/0.2, ngưỡng 3 mẫu,
+// KHÔNG phân biệt token THẬT (provider trả về usage) với token ƯỚC LƯỢNG (`text.length / 3.2`), và
+// không có outlier rejection/rollback. Ba hệ quả có thật:
+//   1. Toàn bộ dữ liệu học được đến từ ƯỚC LƯỢNG (mọi call-site đều truyền `length/3.2`), nên hệ
+//      thống đang "học" chính sai số của chính nó — đúng điều mục 47 cấm.
+//   2. Một request dài bất thường (1 bài 12 ý) kéo avg lên 20% ngay lập tức, và mọi request cùng lớp
+//      sau đó được cấp budget sai.
+//   3. Không phân biệt provider/model: một model dài dòng làm lệch budget của model súc tích.
+//
+// Bản này:
+//   - Khoá theo (problemClass, stage, provider, model) — mục 5 "per-provider/model, per-stage,
+//     per-problem-class".
+//   - `estimated=true` được GHI LẠI và KHÔNG BAO GIỜ đủ để tự mình điều khiển budget: cần
+//     MIN_MEASURED_SAMPLES mẫu ĐO THẬT thì suggestBudgetOverride() mới trả về số khác null.
+//   - Outlier rejection: mẫu lệch quá OUTLIER_RATIO lần so với trung bình hiện tại bị ghi nhận
+//     (`rejected`) nhưng KHÔNG đưa vào trung bình.
+//   - Maximum adjustment: mỗi lần cập nhật, trung bình chỉ được dịch tối đa MAX_STEP_RATIO.
+//   - Rollback: giữ `prevAvg`; rollbackLastOutcome() phục hồi đúng trạng thái trước mẫu gần nhất.
+const budgetByProblemClass = new Map(); // key -> {avg, prevAvg, samples, measuredSamples, estimatedSamples, rejected, lastKey}
 const GUARDRAIL_MIN_RATIO = 0.5; // không hạ dưới 50% budget mặc định của adaptiveBudget
 const GUARDRAIL_MAX_RATIO = 1.5; // không nâng quá 150%
-const MIN_SAMPLES_FOR_OVERRIDE = 3;
-// Outlier: mẫu lệch quá xa avg hiện tại (chỉ áp dụng SAU khi đã có avg ổn định từ đủ mẫu) — không
-// cho 1 request bất thường (lỗi log, câu trả lời bị lặp, model đi lạc đề) kéo lệch avg ngay lập tức.
-const OUTLIER_MIN_SAMPLES = 3;
-const OUTLIER_LOW_RATIO = 0.25;  // mẫu < 25% avg hiện tại
-const OUTLIER_HIGH_RATIO = 3.0;  // mẫu > 300% avg hiện tại
-// Maximum adjustment: MỘT lần cập nhật không được kéo avg đi quá xa trong 1 bước (rollback nếu vượt).
-const MAX_STEP_ADJUST_RATIO = 0.35; // avg mới lệch avg cũ tối đa 35%/lần, phần dư bị bỏ qua (không rollback cứng)
-const EMA_ALPHA = 0.2;
+/** Số mẫu ĐO THẬT tối thiểu trước khi lịch sử được phép tác động tới budget. */
+const MIN_MEASURED_SAMPLES = Number(process.env.ADAPTIVE_MIN_SAMPLES) || 5;
+/** Mẫu lệch hơn bấy nhiêu lần so với trung bình hiện tại -> outlier, không học. */
+const OUTLIER_RATIO = Number(process.env.ADAPTIVE_OUTLIER_RATIO) || 3;
+/** Mỗi lần cập nhật, trung bình chỉ được dịch tối đa bấy nhiêu phần. */
+const MAX_STEP_RATIO = Number(process.env.ADAPTIVE_MAX_STEP_RATIO) || 0.2;
 
-function historyKey(problemClass, stage, provider, model) {
-  return `${problemClass}:${stage}:${provider || 'any'}:${model || 'any'}`;
+function outcomeKey({ problemClass, stage, provider, model }) {
+  return [problemClass || 'UNKNOWN', stage || 'detail', provider || 'any', model || 'any'].join(':');
 }
 
 /**
- * recordOutcome() gọi sau mỗi request COMPLETE để cập nhật lịch sử ước lượng (mục 21.31 + mục 5).
- * @param {string} problemClass
- * @param {string} stage
- * @param {number} fallbackCharEstimate  ước lượng char/3.2 — CHỈ dùng khi không có usage thật.
- * @param {{actualTokens?:number, provider?:string, model?:string}} [meta]
- *   `actualTokens` = usage THẬT từ provider (vd requestUsage.outputTokens khi requestUsage.calls>0).
- *   Có mặt và > 0 -> dùng nó, estimated=false. Vắng mặt/0 -> dùng fallbackCharEstimate, estimated=true.
- * @returns {{key:string, estimated:boolean, accepted:boolean, rejectedReason?:string}}
+ * recordOutcome() — ghi kết quả THẬT của 1 request đã COMPLETE.
+ *
+ * Chữ ký CŨ `(problemClass, stage, actualTokensUsed)` vẫn được chấp nhận nguyên vẹn (mọi call-site/
+ * test cũ không phải đổi) — khi gọi kiểu cũ, mẫu được đánh dấu `estimated: true` vì không có cách nào
+ * biết con số đó đến từ provider hay từ `length/3.2`.
+ *
+ * @param {string|object} problemClassOrOpts Kiểu mới: {problemClass, stage, provider, model,
+ *   actualTokens, estimated}.
+ * @returns {{accepted:boolean, reason:string, avg:number, measuredSamples:number}}
  */
-function recordOutcome(problemClass, stage, fallbackCharEstimate, meta = {}) {
-  const provider = meta.provider || null;
-  const model = meta.model || null;
-  const hasReal = Number.isFinite(meta.actualTokens) && meta.actualTokens > 0;
-  const value = hasReal ? meta.actualTokens : fallbackCharEstimate;
-  const estimated = !hasReal;
-  if (!Number.isFinite(value) || value <= 0) return { key: null, estimated, accepted: false, rejectedReason: 'invalid_value' };
+function recordOutcome(problemClassOrOpts, stage, actualTokensUsed) {
+  const opts = (problemClassOrOpts && typeof problemClassOrOpts === 'object')
+    ? problemClassOrOpts
+    : { problemClass: problemClassOrOpts, stage, actualTokens: actualTokensUsed, estimated: true };
 
-  const key = historyKey(problemClass, stage, provider, model);
-  const prev = budgetByProblemClass.get(key)
-    || { avg: value, samples: 0, estimatedSamples: 0, actualSamples: 0, rejected: 0, lastAvgBeforeReject: null };
+  const value = Number(opts.actualTokens);
+  const key = outcomeKey(opts);
+  if (!Number.isFinite(value) || value <= 0) {
+    return { accepted: false, reason: 'invalid_sample', avg: 0, measuredSamples: 0 };
+  }
+  const estimated = opts.estimated !== false;
 
-  // Outlier rejection: chỉ SAU khi đã có avg ổn định (đủ mẫu) — mẫu đầu tiên luôn được chấp nhận
-  // (không có gì để so sánh), tránh false-positive khi lịch sử còn trống.
-  if (prev.samples >= OUTLIER_MIN_SAMPLES) {
-    const ratio = value / prev.avg;
-    if (ratio < OUTLIER_LOW_RATIO || ratio > OUTLIER_HIGH_RATIO) {
-      // KHÔNG cập nhật avg/samples — chỉ đếm để lộ ra trong telemetry (mục "log rõ lý do").
-      budgetByProblemClass.set(key, { ...prev, rejected: prev.rejected + 1 });
-      return { key, estimated, accepted: false, rejectedReason: 'outlier', ratio };
+  const prev = budgetByProblemClass.get(key) || {
+    avg: value, prevAvg: value, samples: 0, measuredSamples: 0, estimatedSamples: 0, rejected: 0
+  };
+
+  // ---------- OUTLIER REJECTION ----------
+  // Chỉ áp dụng khi đã có nền so sánh (>=2 mẫu) — nếu không, mẫu đầu tiên nào cũng "lệch" so với chính nó.
+  if (prev.samples >= 2) {
+    const ratio = value / (prev.avg || value);
+    if (ratio > OUTLIER_RATIO || ratio < 1 / OUTLIER_RATIO) {
+      const next = { ...prev, rejected: prev.rejected + 1, lastRejectedValue: value };
+      budgetByProblemClass.set(key, next);
+      return { accepted: false, reason: 'outlier_rejected', avg: next.avg, measuredSamples: next.measuredSamples };
     }
   }
 
-  // Exponential moving average — thích ứng dần, không bị lệch mạnh vì 1 mẫu.
-  let avg = prev.samples === 0 ? value : prev.avg * (1 - EMA_ALPHA) + value * EMA_ALPHA;
+  // ---------- MOVING AVERAGE + MAX ADJUSTMENT ----------
+  // Mẫu ước lượng có trọng số THẤP HƠN hẳn mẫu đo thật: nó vẫn hữu ích để phát hiện xu hướng, nhưng
+  // không được kéo budget nhanh như số liệu do chính provider báo về.
+  const weight = estimated ? 0.08 : 0.2;
+  const rawNext = prev.samples === 0 ? value : prev.avg * (1 - weight) + value * weight;
+  const maxStep = prev.avg * MAX_STEP_RATIO;
+  const bounded = prev.samples === 0
+    ? rawNext
+    : Math.min(prev.avg + maxStep, Math.max(prev.avg - maxStep, rawNext));
 
-  // Maximum adjustment + rollback: nếu MỘT bước cập nhật (đã qua outlier filter) vẫn kéo avg đi quá
-  // xa so với avg cũ, GHÌM lại ở biên cho phép thay vì áp dụng toàn bộ bước nhảy — hiệu ứng tương tự
-  // rollback (không để 1 bước làm hỏng lịch sử) nhưng vẫn cho phép trend thật sự dịch chuyển dần.
-  if (prev.samples > 0) {
-    const maxAvg = prev.avg * (1 + MAX_STEP_ADJUST_RATIO);
-    const minAvg = prev.avg * (1 - MAX_STEP_ADJUST_RATIO);
-    avg = Math.min(maxAvg, Math.max(minAvg, avg));
-  }
-
-  const samples = prev.samples + 1;
-  const stat = {
-    avg,
-    samples,
+  budgetByProblemClass.set(key, {
+    avg: bounded,
+    prevAvg: prev.avg,
+    samples: prev.samples + 1,
+    measuredSamples: prev.measuredSamples + (estimated ? 0 : 1),
     estimatedSamples: prev.estimatedSamples + (estimated ? 1 : 0),
-    actualSamples: prev.actualSamples + (estimated ? 0 : 1),
     rejected: prev.rejected,
-    lastAvgBeforeReject: prev.avg
-  };
-  budgetByProblemClass.set(key, stat);
-  return { key, estimated, accepted: true, avg };
+    lastValue: value,
+    lastEstimated: estimated
+  });
+  const nowStat = budgetByProblemClass.get(key);
+  return { accepted: true, reason: 'ok', avg: nowStat.avg, measuredSamples: nowStat.measuredSamples };
 }
 
 /**
- * suggestBudgetOverride() trả về budget đề xuất dựa trên lịch sử, đã áp guardrail so với budget mặc
- * định của calculateAdaptiveBudget — trả null nếu chưa đủ dữ liệu lịch sử (< MIN_SAMPLES_FOR_OVERRIDE).
- * Ưu tiên khớp đúng (problemClass, stage, provider, model); nếu chưa đủ mẫu ở cấp đó thì fallback
- * xuống mức "any provider/model" (ít đặc hiệu hơn nhưng còn hơn không có lịch sử).
+ * ROLLBACK (mục 5) — hoàn tác đúng mẫu gần nhất của một khoá. Dùng khi phát hiện request vừa ghi
+ * nhận thực ra không hợp lệ (bị huỷ giữa chừng, provider báo usage sai, response bị đánh dấu partial
+ * sau khi đã ghi). Không có mẫu nào để hoàn tác -> no-op, trả false.
  */
-function suggestBudgetOverride(problemClass, stage, defaultTarget, meta = {}) {
-  const specific = budgetByProblemClass.get(historyKey(problemClass, stage, meta.provider, meta.model));
-  const generic = budgetByProblemClass.get(historyKey(problemClass, stage, null, null));
-  const stat = (specific && specific.samples >= MIN_SAMPLES_FOR_OVERRIDE) ? specific
-    : ((generic && generic.samples >= MIN_SAMPLES_FOR_OVERRIDE) ? generic : null);
+function rollbackLastOutcome(opts) {
+  const key = outcomeKey(opts && typeof opts === 'object' ? opts : { problemClass: opts });
+  const stat = budgetByProblemClass.get(key);
+  if (!stat || !stat.samples) return false;
+  budgetByProblemClass.set(key, {
+    ...stat,
+    avg: stat.prevAvg != null ? stat.prevAvg : stat.avg,
+    samples: stat.samples - 1,
+    measuredSamples: Math.max(0, stat.measuredSamples - (stat.lastEstimated ? 0 : 1)),
+    estimatedSamples: Math.max(0, stat.estimatedSamples - (stat.lastEstimated ? 1 : 0))
+  });
+  return true;
+}
+
+/**
+ * suggestBudgetOverride() — budget đề xuất từ lịch sử, đã áp guardrail so với budget mặc định.
+ *
+ * Trả null (KHÔNG can thiệp) khi chưa đủ MIN_MEASURED_SAMPLES mẫu ĐO THẬT — ước lượng
+ * (`text.length / 3.2`) không bao giờ được tự mình điều khiển ngân sách của request sau (mục 5/47).
+ *
+ * Chữ ký CŨ `(problemClass, stage, defaultTarget)` được giữ nguyên; kiểu mới nhận object để phân biệt
+ * provider/model.
+ */
+function suggestBudgetOverride(problemClassOrOpts, stage, defaultTarget) {
+  const opts = (problemClassOrOpts && typeof problemClassOrOpts === 'object')
+    ? problemClassOrOpts
+    : { problemClass: problemClassOrOpts, stage, defaultTarget };
+  const target = Number(opts.defaultTarget != null ? opts.defaultTarget : defaultTarget);
+  if (!Number.isFinite(target) || target <= 0) return null;
+  const stat = budgetByProblemClass.get(outcomeKey(opts));
   if (!stat) return null;
-  const clamped = Math.min(defaultTarget * GUARDRAIL_MAX_RATIO, Math.max(defaultTarget * GUARDRAIL_MIN_RATIO, stat.avg * 1.1));
+  if (stat.measuredSamples < MIN_MEASURED_SAMPLES) return null;
+  const clamped = Math.min(target * GUARDRAIL_MAX_RATIO, Math.max(target * GUARDRAIL_MIN_RATIO, stat.avg * 1.1));
   return Math.round(clamped);
 }
 
-/** Chỉ dùng cho test/observability — soi trạng thái lịch sử hiện tại của 1 khoá. */
-function getBudgetHistoryStat(problemClass, stage, provider, model) {
-  const stat = budgetByProblemClass.get(historyKey(problemClass, stage, provider, model));
-  return stat ? { ...stat } : null;
+/** Ảnh chụp trạng thái học — cho telemetry/test, KHÔNG dùng để điều khiển request. */
+function adaptiveBudgetSnapshot() {
+  const out = {};
+  budgetByProblemClass.forEach((v, k) => {
+    out[k] = {
+      avg: Math.round(v.avg), samples: v.samples, measuredSamples: v.measuredSamples,
+      estimatedSamples: v.estimatedSamples, rejected: v.rejected
+    };
+  });
+  return out;
 }
 
-/** Chỉ dùng cho test — reset toàn bộ lịch sử adaptive budget giữa các test case. */
-function __resetBudgetHistoryForTest() { budgetByProblemClass.clear(); }
+function _resetAdaptiveBudgetForTest() { budgetByProblemClass.clear(); }
 
 // ================= 21.33 TOKEN ECONOMY DECISION PIPELINE =================
 /**
@@ -913,6 +984,7 @@ module.exports = {
   buildConversationState,
   TokenEconomyCache,
   globalCache,
+  cacheLevelsStatus,
   RISK,
   crossCheckPolicy,
   detectGeometryProofHint,
@@ -923,8 +995,10 @@ module.exports = {
   mapErrorToRecovery,
   TelemetryRecorder,
   recordOutcome,
-  getBudgetHistoryStat,
-  __resetBudgetHistoryForTest,
+  rollbackLastOutcome,
   suggestBudgetOverride,
+  adaptiveBudgetSnapshot,
+  MIN_MEASURED_SAMPLES,
+  _resetAdaptiveBudgetForTest,
   runTokenEconomyPipeline
 };

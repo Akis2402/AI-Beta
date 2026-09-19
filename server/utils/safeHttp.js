@@ -107,7 +107,10 @@ async function fetchPinned(url, opts) {
       servername: url.hostname, // SNI + xác thực chứng chỉ vẫn theo TÊN, không theo IP
       path: url.pathname + url.search,
       method: 'GET',
-      headers: { 'Accept-Encoding': 'identity', Accept: 'image/*' },
+      // MỤC 26: cho phép caller thêm header ĐIỀU KIỆN (If-None-Match / If-Modified-Since) để
+      // revalidate bản đã cache — 304 thì không tải lại body. Chỉ nhận đúng các header an toàn,
+      // không để caller ghi đè Accept-Encoding (identity là bắt buộc cho trần byte trên luồng).
+      headers: { Accept: 'image/*', ...(opts.headers || {}), 'Accept-Encoding': 'identity' },
       timeout: opts.timeoutMs,
       // GHIM IP: mọi lần Node hỏi DNS trong request này đều nhận đúng địa chỉ đã được kiểm ở trên.
       lookup: (host, options, cb) => cb(null, resolved.address, resolved.family)

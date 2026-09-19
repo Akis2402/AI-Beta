@@ -61,6 +61,33 @@ const HARD_REASONS = new Set([
 ]);
 const SOFT_REASONS = new Set(['missing_coverage', 'missing_conclusion', 'source_absence_claim_while_incomplete', 'requirement_without_evidence']);
 
+// ============================================================================================
+// MỤC 8 — HỢP ĐỒNG COMPLETENESS RIÊNG CHO TỪNG STAGE
+// ============================================================================================
+// Trước bản này `stage` chỉ được dùng ĐÚNG một chỗ (bật/tắt kiểm tra 'missing_conclusion'), nên
+// Approach và Candidate bị đo bằng đúng cây thước của Detail:
+//   - Approach là ĐỊNH HƯỚNG: nó KHÔNG được phép chứa đáp số cuối (xem approachValidator.js), vậy mà
+//     completeness lại trừ điểm vì "thiếu kết luận" và vì "chưa trả lời đủ ý (a)(b)(c)" — hai thứ
+//     đúng ra thuộc về Detail. Hệ quả thật: một approach HOÀN TOÀN ĐÚNG vẫn sinh SOFT reason, và ở
+//     các nhánh coi SOFT là tín hiệu để nới reserve thì đó là token đốt cho việc không cần sửa.
+//   - Candidate là bản nháp nội bộ để reconcile đọc, người dùng không bao giờ thấy: bắt nó có kết
+//     luận/định dạng như câu trả lời cuối là bắt model viết thừa.
+//
+// Bảng dưới liệt kê những reason KHÔNG áp dụng cho từng stage. Cấu trúc hỏng (fence/LaTeX chưa đóng,
+// finish_reason=length, stream_interrupted) là HARD ở MỌI stage — không stage nào được miễn.
+const STAGE_IGNORED_REASONS = {
+  approach: new Set(['missing_coverage', 'missing_conclusion', 'requirement_without_evidence']),
+  candidate: new Set(['missing_conclusion', 'requirement_without_evidence']),
+  detail: new Set(),
+  reconcile: new Set(),
+  reconcileLight: new Set()
+};
+
+/** @returns {Set<string>} reason bị bỏ qua cho stage này (stage lạ -> hợp đồng của 'detail'). */
+function ignoredReasonsForStage(stage) {
+  return STAGE_IGNORED_REASONS[String(stage || 'detail')] || STAGE_IGNORED_REASONS.detail;
+}
+
 // PHẦN F BỔ SUNG — LỖI THẬT ĐÃ XẢY RA: model được hỏi "giải bài 1.9 đến 1.11", retrieval không có
 // evidence đúng nhãn "1.9", model tự bịa 1 đề khác rồi trình bày dưới đúng cái tên "Bài 1.9" như
 // thể đó là nguyên văn sách. Đây là lỗi SỰ THẬT (gắn nhãn thật lên nội dung sai), không phải lỗi
@@ -363,7 +390,10 @@ function validateSolutionCompleteness(text, opts = {}) {
   const hasConclusionMarker = /(vậy|kết luận|đáp số|đáp án|do đó,?\s*$)/i.test(clean.slice(-400));
   if (stage === 'detail' && !hasConclusionMarker) reasons.push('missing_conclusion');
 
-  const { hard, soft } = classifyReasons(reasons);
+  // MỤC 8: lọc theo hợp đồng của ĐÚNG stage này TRƯỚC khi phân loại HARD/SOFT.
+  const ignored = ignoredReasonsForStage(stage);
+  const contractReasons = reasons.filter((r) => !ignored.has(r));
+  const { hard, soft } = classifyReasons(contractReasons);
 
   // mục 1 (completion-first): model CHỦ ĐỘNG kết thúc (finishReason==='stop') VÀ không có HARD reason
   // nào -> ép COMPLETE ngay dù còn bao nhiêu SOFT reason (thiếu coverage/kết luận theo đúng từ khoá
@@ -409,5 +439,7 @@ module.exports = {
   looksTruncated,
   classifyReasons,
   HARD_REASONS,
-  SOFT_REASONS
+  SOFT_REASONS,
+  STAGE_IGNORED_REASONS,
+  ignoredReasonsForStage
 };

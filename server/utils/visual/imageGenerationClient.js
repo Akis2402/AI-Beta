@@ -452,7 +452,17 @@ async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, siz
   const providersTried = [];
   let last = { ok: false, reason: 'no_image_provider' };
 
+  // MỤC 35 — CHI PHÍ PHẢI ĐOÁN TRƯỚC ĐƯỢC: tổng số lệnh gọi API ảnh của MỘT lượt generateImage()
+  // bị chặn cứng, không phụ thuộc vào việc cấu hình có bao nhiêu provider. Trước đây vòng lặp chạy
+  // hết `providers.length` — thêm provider thứ 6 vào .env là âm thầm nhân 6 chi phí xấu nhất của
+  // mỗi lần tạo hình. Vòng đời (lifecycle) vẫn là 1; đây là trần cho SỐ LỆNH GỌI, hai thứ khác nhau.
+  const maxAttempts = Math.max(1, Number(process.env.IMAGE_MAX_PROVIDER_ATTEMPTS) || 3);
+
   for (let i = 0; i < providers.length; i++) {
+    if (providersTried.length >= maxAttempts) {
+      last = { ok: false, reason: last.reason && last.reason !== 'no_image_provider' ? last.reason : 'provider_attempt_cap' };
+      break;
+    }
     const p = providers[i];
     if (signal && signal.aborted) { last = { ok: false, reason: 'cancelled' }; break; }
     // Còn đủ thời gian trong deadline còn lại mới được thử provider kế tiếp (A4.1).

@@ -13,6 +13,9 @@
 const safeHttp = require('../safeHttp');
 const { normalizeUrl, contentFingerprint } = require('../queryFingerprint');
 const singleFlight = require('../singleFlight');
+// MỤC 26: cache NỘI DUNG (không phải HTML thô), bền qua nhiều request — singleFlight chỉ chống
+// trùng ĐỒNG THỜI, không thay thế được cache.
+const contentCache = require('./sourceContentCache');
 
 const EXTRACTOR_VERSION = 'web-extract-v1';
 const MAX_BYTES = 2 * 1024 * 1024;   // trang tin bình thường < 500KB; đây là trần chống bomb
@@ -43,7 +46,15 @@ function extractReadableText(html) {
 
   let body = raw.replace(DROP_BLOCKS, ' ');
   const main = /<(article|main)\b[^>]*>([\s\S]*?)<\/\1>/i.exec(body);
-  if (main) body = main[2]; // ưu tiên vùng nội dung thật nếu trang khai báo rõ
+  // MỤC 53: chỉ ưu tiên <article>/<main> khi vùng đó THỰC SỰ chứa nội dung. Nhiều trang khai báo
+  // <main> chỉ để bọc một thanh điều hướng, hoặc nội dung thật được nạp bằng JS vào chỗ khác — khi
+  // đó bản cũ gửi cho model một nguồn gần như trống rồi vẫn báo READY. So sánh độ dài trước/sau:
+  // vùng "nội dung chính" mà nhỏ hơn 30% toàn thân (hoặc dưới 400 ký tự) thì không đáng tin.
+  if (main) {
+    const candidate = main[2];
+    const bodyLen = body.length;
+    if (candidate.length >= 400 && candidate.length >= bodyLen * 0.3) body = candidate;
+  }
 
   const text = decodeEntities(
     body
@@ -90,10 +101,28 @@ async function fetchWebSource(rawUrl, opts = {}) {
 
   // PHẦN BH/CC: hai code path (hoặc hai request đồng thời) cùng một URL -> đúng MỘT lần fetch.
   return singleFlight.run(`web::${url}`, async () => {
+    // ---------- MỤC 26: CACHE TRƯỚC, MẠNG SAU ----------
+    const cacheParts = { url, extractorVersion: EXTRACTOR_VERSION };
+    const cached = opts.noCache ? null : await contentCache.get(cacheParts);
+    if (cached && cached.value) {
+      return { ...cached.value, fromCache: true, cacheLayer: contentCache.hasPersistentLayer() ? 'L1/L2' : 'L1' };
+    }
+
     let current = parsed;
     for (let hop = 0; hop < 3; hop++) {
-      const res = await safeHttp.fetchPinned(current, { maxBytes: opts.maxBytes || MAX_BYTES, timeoutMs: opts.timeoutMs || TIMEOUT_MS });
+      const res = await safeHttp.fetchPinned(current, {
+        maxBytes: opts.maxBytes || MAX_BYTES,
+        timeoutMs: opts.timeoutMs || TIMEOUT_MS,
+        // Revalidate nếu lần trước server có trả ETag/Last-Modified (bản cache đã hết TTL nhưng
+        // nội dung có thể chưa đổi -> 304, không tốn băng thông lẫn thời gian phân tích lại).
+        headers: contentCache.conditionalHeaders(cached)
+      });
       if (!res.ok) return { ok: false, status: 'ERROR', reason: res.reason || 'fetch_failed', url };
+      // 304 Not Modified: bản đã trích trước đó vẫn đúng.
+      if (res.status === 304 && cached && cached.value) {
+        await contentCache.set(cacheParts, cached.value, { etag: cached.etag, lastModified: cached.lastModified });
+        return { ...cached.value, fromCache: true, revalidated: true };
+      }
       if (res.location) {
         let next;
         try { next = new URL(res.location, current); } catch (e) { return { ok: false, status: 'ERROR', reason: 'bad_redirect', url }; }
@@ -109,7 +138,7 @@ async function fetchWebSource(rawUrl, opts = {}) {
       const html = res.body.toString('utf8');
       const { title, text } = extractReadableText(html);
       if (!text || text.length < 80) return { ok: false, status: 'INCOMPLETE', reason: 'no_readable_text', url, title };
-      return {
+      const payload = {
         ok: true,
         status: 'READY',
         url: normalizeUrl(current.toString()),
@@ -120,9 +149,14 @@ async function fetchWebSource(rawUrl, opts = {}) {
         extractorVersion: EXTRACTOR_VERSION,
         chunks: chunkText(text, opts)
       };
+      await contentCache.set(cacheParts, payload, {
+        etag: res.headers && res.headers.etag,
+        lastModified: res.headers && res.headers['last-modified']
+      });
+      return payload;
     }
     return { ok: false, status: 'ERROR', reason: 'too_many_redirects', url };
   });
 }
 
-module.exports = { fetchWebSource, extractReadableText, chunkText, decodeEntities, EXTRACTOR_VERSION, MAX_BYTES };
+module.exports = { fetchWebSource, extractReadableText, chunkText, decodeEntities, EXTRACTOR_VERSION, MAX_BYTES, contentCache };

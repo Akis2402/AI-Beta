@@ -490,6 +490,38 @@ async function gatherCrossCheckCandidates(providers, { system, variantSystem, me
 // CHỈ dùng làm fallback khi KHÔNG có deadline của caller (mục 4) — xem opts.deadline ở trên.
 const FAILOVER_BUDGET_MS = Number(process.env.FAILOVER_BUDGET_MS) || 65000;
 
+
+// ============================================================================================
+// MỤC 13 — NGÂN SÁCH PHẢI ĐƯỢC TÍNH LẠI CHO ĐÚNG TARGET SẼ GỌI, KỂ CẢ KHI FAILOVER
+// ============================================================================================
+// Bug kiến trúc: route tính MỘT con số budget từ capability của CẢ POOL (`pool.some(supportsThinking)`)
+// rồi truyền y nguyên cho mọi target. Nếu target A có native thinking còn target B thì không, B vẫn
+// nhận đúng `maxTokens`/`reasoningBudget` đã tính cho A — hoặc thừa (B không dùng reasoning nhưng
+// maxTokens đã cộng chỗ cho nó), hoặc thiếu (B có trần output nhỏ hơn). Mỗi client tự gate được
+// FIELD nào gửi đi, nhưng CON SỐ thì không ai tính lại.
+//
+// Nay: caller có thể truyền `args.recomputeForTarget(target)` — một hàm thuần trả về phần args cần
+// GHI ĐÈ cho đúng target đó (thường là {maxTokens, reasoningBudget}). Gọi ở MỌI điểm ngay trước
+// `p.call()`: lượt đầu, mọi lượt failover, mọi nhánh đua tốc độ. Không truyền -> hành vi cũ y nguyên.
+/**
+ * @param {object} args
+ * @param {object} target execution target sắp được gọi
+ * @returns {object} args đã hiệu chỉnh cho target này
+ */
+function argsForTarget(args, target) {
+  if (!args || typeof args.recomputeForTarget !== 'function' || !target) return args;
+  let override;
+  try {
+    override = args.recomputeForTarget(target);
+  } catch (e) {
+    return args; // tính lại hỏng KHÔNG được làm chết lượt gọi — rơi về con số của pool như cũ
+  }
+  if (!override || typeof override !== 'object') return args;
+  // `recomputeForTarget` không bao giờ được đi tiếp xuống client (không phải tham số API).
+  const { recomputeForTarget, ...rest } = { ...args, ...override };
+  return rest;
+}
+
 async function callWithFailover(providers, args, { preferWebSearch = false, requireVision = false, deadline: parentDeadline } = {}) {
   if (!providers || !providers.length) {
     const err = new Error('Chưa có nhà cung cấp AI nào được cấu hình (thiếu API key trong .env).');
@@ -522,9 +554,10 @@ async function callWithFailover(providers, args, { preferWebSearch = false, requ
       // trả finish_reason/stop_reason THẬT ra ngoài mà KHÔNG đổi kiểu trả về (vẫn Promise<string>) —
       // tránh phải sửa mọi nơi đang destructure kết quả p.call() như 1 chuỗi.
       const meta = {};
-      const text = stripThinkingTags(await p.call({ ...args, timeoutMs: callTimeout, meta }));
+      const targetArgs = argsForTarget(args, p);
+      const text = stripThinkingTags(await p.call({ ...targetArgs, timeoutMs: callTimeout, meta }));
       const failoverLatency = Date.now() - attemptStartedAt;
-      logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'failover', target: p, latency: failoverLatency, status: text ? 'success' : 'empty', usage: meta.usage, answerBudget: args.maxTokens, reasoningBudget: args.reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, recovery: !!args.telemetryRecovery, estimatedOutputTokens: estimateTokens(text || '') });
+      logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'failover', target: p, latency: failoverLatency, status: text ? 'success' : 'empty', usage: meta.usage, answerBudget: targetArgs.maxTokens, reasoningBudget: targetArgs.reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, recovery: !!args.telemetryRecovery, estimatedOutputTokens: estimateTokens(text || '') });
       if (text) {
         markSuccess(p, failoverLatency);
         const realOutNs = meta.usage && Number(meta.usage.outputTokens);
@@ -590,7 +623,9 @@ function _resetFastModeStatsForTest() {
  * Gọi 1 target, trả {text, provider} hoặc throw — dùng chung cho single-call và race attempts.
  * Ghi nhận latency thật vào rotationManager (markSuccess(p, latencyMs)) để nuôi isTargetSlow().
  */
-function attemptTarget(p, raceArgs, tried, requestId) {
+function attemptTarget(p, rawRaceArgs, tried, requestId) {
+  // MỤC 13: mỗi nhánh đua cũng phải dùng ngân sách của ĐÚNG target nó gọi.
+  const raceArgs = argsForTarget(rawRaceArgs, p);
   const startedAt = Date.now();
   const meta = {};
   return p.call({ ...raceArgs, meta })
@@ -821,8 +856,11 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
     const attemptStartedAt = Date.now();
     try {
       const meta = {};
+      // MỤC 13: ngân sách của ĐÚNG target này (native thinking? trần output bao nhiêu?), không phải
+      // con số tính từ `pool.some(...)` ở route.
+      const streamTargetArgs = argsForTarget(args, p);
       const text = await p.callStream({
-        ...args,
+        ...streamTargetArgs,
         meta,
         onDelta: (piece) => filter.feed(piece)
       });
@@ -832,7 +870,7 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
       const visibleText = stripThinkingTags(text);
       if (visibleText || committed) {
         const latency = Date.now() - attemptStartedAt;
-        logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'stream', target: p, latency, status: 'success', usage: meta.usage, answerBudget: args.maxTokens, reasoningBudget: args.reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, recovery: !!args.telemetryRecovery, estimatedOutputTokens: estimateTokens(visibleText || '') });
+        logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'stream', target: p, latency, status: 'success', usage: meta.usage, answerBudget: streamTargetArgs.maxTokens, reasoningBudget: streamTargetArgs.reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, recovery: !!args.telemetryRecovery, estimatedOutputTokens: estimateTokens(visibleText || '') });
         // PHẦN J FIX: TRƯỚC ĐÂY đường streaming gọi `markSuccess(p)` KHÔNG kèm latency, nên toàn bộ
         // telemetry latency/throughput không bao giờ học được gì từ đường code chạy NHIỀU NHẤT
         // (mọi request thật đều là streaming). Nay ghi cả latency (cho isTargetSlow) và throughput
@@ -914,7 +952,7 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
 }
 
 module.exports = {
-  getActiveProviders, ensureProvidersReady, getRotationHealth, callWithFailover, callFastest, streamWithFailover, shuffle,
+  getActiveProviders, ensureProvidersReady, getRotationHealth, callWithFailover, callFastest, streamWithFailover, shuffle, argsForTarget,
   createDeadline, gatherCrossCheckCandidates, CROSS_CHECK_BUDGET_MS, CROSS_CHECK_MAX_CANDIDATES, pickDiverseCandidates,
   // FIX (audit cross-check): tách participant count (adaptive, toàn bộ pool) khỏi concurrency window.
   CROSS_CHECK_SAFETY_CAP, CROSS_CHECK_CONCURRENCY, resolveParticipantCount, mapWithConcurrency,

@@ -60,6 +60,42 @@ function computeRecoveryBudget({ remainingMs = Infinity, reserveRemaining = Infi
   return { allowed: true, reason: 'ok' };
 }
 
+// ============================================================================================
+// MỤC 10 — CONTINUATION PHẢI DEFICIT-AWARE: KHÔNG PHẢI LƯỢT NÀO CŨNG CẦN SUY LUẬN
+// ============================================================================================
+// Trước bản này mọi lượt continuation đều được cấp reasoning = 40% mức ban đầu (phase='recovery').
+// Nhưng một lượt chỉ thiếu ĐÚNG câu "Vậy x = 3" hoặc thiếu một tiêu đề thì không có gì để suy luận
+// cả — 40% của một ngân sách reasoning hàng nghìn token là tiền trả cho việc model nghĩ lại một thứ
+// nó đã nghĩ xong. Ngược lại, thiếu một phép biến đổi/chứng minh thì PHẢI có reasoning, và chỉ cho
+// đúng phần còn thiếu (không "suy luận từ đầu").
+//
+// Đây KHÔNG phải "cắt reasoning để tiết kiệm token" (mục 0 cấm): phân loại dựa trên CHÍNH lý do
+// incomplete do completenessCheck trả về, chứ không dựa trên áp lực chi phí.
+const FORMAT_ONLY_REASONS = new Set([
+  'missing_conclusion',          // thiếu từ khoá kết luận/1 câu kết
+  'invalid_citation',            // đặt sai số trích dẫn — sửa số, không suy luận lại
+  'source_absence_claim_while_incomplete'
+]);
+
+/**
+ * classifyDeficit() — phần còn thiếu thuộc loại nào.
+ * @param {{reasons?:string[], hardReasons?:string[], missingCoverage?:string[]}} completeness
+ * @returns {{kind:'format'|'content', needsReasoning:boolean, reasons:string[]}}
+ */
+function classifyDeficit(completeness) {
+  const reasons = [
+    ...((completeness && completeness.hardReasons) || []),
+    ...((completeness && completeness.reasons) || [])
+  ];
+  const unique = [...new Set(reasons.filter(Boolean))];
+  const missing = (completeness && completeness.missingCoverage) || [];
+  // Còn ý chưa trả lời = còn NỘI DUNG phải nghĩ, bất kể reason nào khác.
+  if (missing.length) return { kind: 'content', needsReasoning: true, reasons: unique };
+  if (!unique.length) return { kind: 'format', needsReasoning: false, reasons: unique };
+  const allFormat = unique.every((r) => FORMAT_ONLY_REASONS.has(r));
+  return { kind: allFormat ? 'format' : 'content', needsReasoning: !allFormat, reasons: unique };
+}
+
 /**
  * @param {{priorText:string, reasons:string[], missingCoverage:string[]}} args
  * @returns {string} Nội dung message user bổ sung, nối tiếp vào cuối mảng `messages` gửi cho provider.
@@ -464,6 +500,7 @@ function joinContinuation(prior, next) {
 
 module.exports = {
   MAX_CONTINUATIONS, computeRecoveryBudget, buildContinuationPrompt, appendContinuationTurn,
+  classifyDeficit, FORMAT_ONLY_REASONS,
   buildMinimalContinuationContext, buildResumePrompt, compactPriorText, findSafeCutIndex, hasConclusionSection,
   createSeamDedupe, joinContinuation, isStructuralOrDataLine,
   CONTINUATION_TAIL_CHARS
