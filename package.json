@@ -2,15 +2,17 @@
   "name": "tro-giai-ai",
   "version": "1.0.0",
   "private": true,
-  "description": "Trợ Giải — AI học tập (full-stack): frontend tĩnh + backend Node/Express proxy bảo mật cho Anthropic API",
+  "description": "Trợ Giải — AI học tập (full-stack): Next.js App Router bridge sang Express business logic, giữ nguyên toàn bộ engine legacy public/js/app.js làm source of truth cho behavior.",
   "main": "server/index.js",
   "engines": {
     "node": ">=22.11.0 <25",
     "npm": ">=10"
   },
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node --watch server/index.js",
+    "dev": "next dev",
+    "start": "next start",
+    "start:legacy-express": "node server/index.js",
+    "dev:legacy-express": "node --watch server/index.js",
     "build:assets": "node scripts/build.js",
     "build": "npm run build:assets && next build",
     "lint": "tsc --noEmit",
@@ -47,5 +49,8 @@
   "allowScripts": {
     "@google/genai": true,
     "protobufjs": true
+  },
+  "overrides": {
+    "node-domexception": "file:./scripts/shims/node-domexception"
   }
 }
