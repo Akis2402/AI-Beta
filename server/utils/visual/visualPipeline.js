@@ -25,16 +25,7 @@ const specBuilder = require('./visualSpecBuilder');
 const router = require('./visualRendererRouter');
 const validator = require('./visualValidator');
 const cache = require('./visualCache');
-// ============================================================================================
-// IMAGE STUDIO V2 WIRING — CHỈ 1 DÒNG NÀY THAY ĐỔI trong toàn bộ pipeline (xem
-// CHANGELOG-IMAGE-STUDIO-V2-CHAT-WIRING.md). Mặc định tự động vẽ hình trong chat nay dùng đúng cỗ
-// máy Gemini Imagen3 (Primary) + OpenAI DALL-E3 (Fallback) của Image Studio V2
-// (imageGenerationClientV2Adapter.js), giữ NGUYÊN mọi logic khác của pipeline (decision engine,
-// spec, validator, repair, cache, cost-gate, degrade). Đặt CHAT_IMAGE_ENGINE=legacy trong .env để
-// quay lại hệ thống đa-provider gốc (imageGenerationClient.js) mà không cần sửa code.
-const imageClient = String(process.env.CHAT_IMAGE_ENGINE || 'v2').toLowerCase() === 'legacy'
-  ? require('./imageGenerationClient')
-  : require('./imageGenerationClientV2Adapter');
+const imageClient = require('./imageGenerationClient');
 const hqStore = require('./visualHqStore');
 const responseGuard = require('./visualResponseGuard');
 
@@ -323,6 +314,15 @@ async function runVisualPipeline(args) {
       format: produced.format,
       url: produced.url,
       model: produced.model,
+      // MỤC XXXVIII/LXIII (master prompt 09/2026) — PROVIDER TRANSPARENCY: frontend không được
+      // đoán/hard-code provider, phải hiển thị đúng provider THẬT đã tạo ra ảnh này. `providersTried`
+      // là danh sách các provider đã thử ĐÚNG THEO THỨ TỰ (xem generateImage() trong
+      // imageGenerationClient.js) — phần tử CUỐI CÙNG luôn là provider đã trả ok:true (mọi phần tử
+      // trước đó, nếu có, là provider đã thất bại rồi failover qua). Ví dụ ['gemini-image',
+      // 'openai-image'] nghĩa là Gemini lỗi, OpenAI đã tạo thành công ảnh này.
+      provider: (telemetry.visualProvidersTried && telemetry.visualProvidersTried.length)
+        ? telemetry.visualProvidersTried[telemetry.visualProvidersTried.length - 1]
+        : null,
       title: spec.title,
       caption: ((spec.purpose || '').trim() === (spec.title || '').trim() ? '' : (spec.purpose || '')),
       fidelity: 'ai_generated',
@@ -339,8 +339,7 @@ async function runVisualPipeline(args) {
     // Chỉ cache khi VALIDATED + COMPLETED, và payload phải là ảnh AI thật.
     await cache.setAsync(keyParts, {
       type: visual.type, subject: visual.subject, renderer: visual.renderer, origin: visual.origin,
-      format: visual.format, url: visual.url, model: visual.model,
-      provider: imageClient.activeProviderName() || '',
+      format: visual.format, url: visual.url, model: visual.model, provider: visual.provider,
       title: visual.title, caption: visual.caption, placement: visual.placement,
       fidelity: visual.fidelity, necessity: visual.necessity, overrodeNever: visual.overrodeNever,
       overlay: visual.overlay

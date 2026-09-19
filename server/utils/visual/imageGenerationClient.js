@@ -14,6 +14,63 @@
 // renderer (PHẦN 19) hoặc bỏ hình. KHÔNG có provider ảnh KHÔNG PHẢI là lỗi.
 
 const { createLinkedAbort, makeCancelledError } = require('../abortLink');
+
+// ============================================================================================
+// SDK CHÍNH CHỦ CHO GEMINI + OPENAI (thay REST thuần) — theo yêu cầu 09/2026.
+// ============================================================================================
+// CHỈ 2 provider này đổi sang SDK ('@google/genai' cho Gemini, 'openai' cho OpenAI). Grok/xAI và
+// OpenRouter KHÔNG có SDK chính chủ cho ảnh (chúng dùng endpoint tương thích OpenAI) nên GIỮ NGUYÊN
+// đường REST qua callOpenAICompatibleImage() — không có lý do kỹ thuật để đổi, và đổi sẽ chỉ tăng
+// bề mặt lỗi không cần thiết (B9.5/mục IV của master prompt: không đổi chỉ vì "cho giống").
+//
+// require() ĐƯỢC GỌI TRỄ (bên trong hàm, bọc try/catch) — TUYỆT ĐỐI không require ở top-level:
+//   - Nếu package chưa `npm install` (vd trong CI/sandbox không có mạng), module này vẫn phải
+//     require() được bình thường — mọi provider KHÁC (Grok/OpenRouter/gemini-interactions) và toàn
+//     bộ phần còn lại của app KHÔNG được phép sập theo chỉ vì thiếu 1 optional dependency.
+//   - Khi thiếu SDK, provider tương ứng trả {ok:false, reason:'sdk_not_installed'} — RETRYABLE (đúng
+//     nghĩa "lỗi kỹ thuật riêng của 1 provider", xem NON_RETRYABLE_REASONS bên dưới) -> failover sang
+//     provider kế tiếp, không làm hỏng cả request.
+function loadGeminiSdk() {
+  try { return require('@google/genai'); } catch (e) { return null; }
+}
+function loadOpenAiSdk() {
+  try {
+    const mod = require('openai');
+    return mod && mod.default ? mod.default : mod;
+  } catch (e) { return null; }
+}
+
+/**
+ * raceAbort() — reject ngay khi `signal` abort (timeout nội bộ HOẶC huỷ từ bên ngoài), BẤT KỂ SDK
+ * của Google/OpenAI có thật sự lắng nghe AbortSignal truyền vào request options hay không. Đây là
+ * lưới an toàn ĐỘC LẬP với việc SDK có hỗ trợ đúng chuẩn không — timeout/cancel LUÔN được tôn trọng.
+ */
+function raceAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(Object.assign(new Error('aborted'), { aborted: true }));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(Object.assign(new Error('aborted'), { aborted: true }));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+      (e) => { signal.removeEventListener('abort', onAbort); reject(e); }
+    );
+  });
+}
+
+/** Rút status HTTP từ lỗi SDK (cả @google/genai lẫn openai đều có thể đặt ở vị trí khác nhau tuỳ
+ *  version) — khoan dung nhiều field thay vì tin đúng 1 tên field. */
+function statusFromSdkError(e) {
+  return (e && (e.status || e.statusCode || e.httpStatus || (e.response && e.response.status))) || 0;
+}
+/** Nhận diện lỗi bị chặn vì nội dung (safety/policy) từ exception của SDK — dùng chung logic đã có
+ *  ở nhánh REST (content_blocked = KHÔNG retryable, mọi provider sẽ chặn y hệt). */
+function isSdkContentBlockedError(e) {
+  const msg = String((e && (e.code || e.type || e.message)) || '');
+  return /safety|policy|content_polic|blocked|moderation/i.test(msg);
+}
 // MỤC 1/2 (đợt audit 2) — 1 NGUỒN SỰ THẬT DUY NHẤT cho việc "binary này có phải ảnh thật không".
 // Trước đây verifyImageBytes() ở file này tự viết bảng magic-bytes RIÊNG và có 1 nhánh thoát hiểm
 // tin claimedMime khi không nhận diện được chữ ký — nay xoá hẳn nhánh đó, dùng validator dùng
@@ -89,12 +146,13 @@ const IMAGE_PROVIDER_DEFS = [
     // CỐ Ý không kế thừa GEMINI_API_KEY — tránh tự bật ké, gọi trùng 2 lần vào cùng 1 tài khoản
     // Gemini khi chỉ có 1 khoá text.
     //
-    // MỤC (đợt audit 3) — TOÀN BỘ provider ảnh nay đều REST THUẦN, không phụ thuộc SDK nào:
-    // 'gemini-sdk-image' (dùng @google/genai) đã bị GỠ. Nó vốn chỉ để minh hoạ cách gọi qua SDK
-    // chính chủ, nhưng có cùng 1 backend/response shape với provider REST này (cả hai đều nhắm
-    // /v1beta/interactions), nên là bản trùng lặp không cần thiết một khi bản REST đã chạy đúng —
-    // giữ cả hai chỉ tăng bề mặt bảo trì (thêm 1 dependency npm, thêm 1 nhánh lazy-require) mà
-    // KHÔNG tăng độ tin cậy thật (cùng fail giống hệt nhau khi Interactions API lỗi).
+    // CẬP NHẬT (09/2026) — provider 'gemini-image' (generateContent, phần tử ngay phía trên) nay
+    // dùng SDK chính chủ '@google/genai' thay vì REST thuần (xem callGeminiImage()). Provider
+    // 'gemini-interactions-image' ở NGAY DƯỚI ĐÂY vẫn CỐ Ý giữ REST thuần: endpoint
+    // /v1beta/interactions còn rất mới (GA 06/2026) và chưa chắc đã có trong mọi version SDK đã
+    // publish — REST trực tiếp là lựa chọn an toàn hơn cho riêng endpoint này. Đây KHÔNG phải
+    // duplicate: 2 phần tử registry nhắm 2 endpoint Google khác nhau (generateContent vs
+    // interactions), mỗi phần tử chỉ nên đổi phương tiện gọi khi CHÍNH endpoint đó có SDK ổn định.
     name: 'gemini-interactions-image', order: 12,
     imageKeyEnv: 'GEMINI_INTERACTIONS_IMAGE_API_KEY', textKeyEnvs: [],
     modelEnv: 'GEMINI_INTERACTIONS_IMAGE_MODEL', defaultModel: 'gemini-3.1-flash-image',
@@ -111,7 +169,9 @@ const IMAGE_PROVIDER_DEFS = [
     modelEnv: 'OPENAI_IMAGE_MODEL', defaultModel: 'gpt-image-1',
     maxPromptTokens: 4000, costClass: 'IMAGE_COST_HIGH', qualityClass: 'high', latencyClass: 'slow',
     extraBody: (model) => (/^dall-e-2$/i.test(model) ? {} : { quality: 'high' }),
-    call: (opts) => callOpenAICompatibleImage(opts, 'https://api.openai.com/v1/images/generations')
+    // Đổi sang SDK chính chủ 'openai' (yêu cầu 09/2026) — Grok/OpenRouter bên dưới VẪN dùng
+    // callOpenAICompatibleImage() (REST) vì không có SDK chính chủ cho ảnh.
+    call: (opts) => callOpenAIImageSdk(opts)
   },
   {
     // xAI phục vụ sinh ảnh qua endpoint TƯƠNG THÍCH OpenAI (/v1/images/generations) nên dùng chung
@@ -513,42 +573,50 @@ function geminiBlockReason(data) {
   return null;
 }
 
+/**
+ * callGeminiImage() — SDK chính chủ '@google/genai' (thay REST thuần trước đây).
+ *
+ * ROOT CAUSE giữ nguyên như bản REST cũ (mục 34): model image-preview của Gemini
+ * (gemini-2.5-flash-image và họ *-image-generation) ĐÒI HỎI `responseModalities` tường minh trong
+ * config, thiếu trường này model có xu hướng trả TEXT (từ chối/giải thích) thay vì sinh ảnh. SDK
+ * dùng ĐÚNG payload đó qua tham số `config` của `ai.models.generateContent()` — không đổi ý định
+ * kiến trúc, chỉ đổi phương tiện gửi request (SDK tự lo header/auth/serialize thay vì tự tay
+ * fetch()). Luôn xin CẢ 'TEXT' lẫn 'IMAGE' vì một số version model bắt buộc phải có TEXT trong
+ * danh sách modality (parser extractGeminiInline() đã bỏ qua phần TEXT nên không ảnh hưởng output).
+ *
+ * Response object của SDK giữ NGUYÊN shape camelCase `candidates[].content.parts[].inlineData` như
+ * JSON REST gốc (SDK chỉ là lớp mỏng auth+serialize, không đổi contract dữ liệu) — nên tái dùng được
+ * y nguyên extractGeminiInline()/geminiBlockReason() đã viết cho nhánh REST, không cần viết lại
+ * parser riêng cho SDK (1 nguồn sự thật duy nhất cho việc đọc response Gemini).
+ */
 async function callGeminiImage({ prompt, timeoutMs, signal, apiKey, model, aspectRatio }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const linked = createLinkedAbort(timeoutMs, signal);
   try {
-    // ==========================================================================================
-    // ROOT CAUSE (mục 34) — request CŨ gửi ĐÚNG NHƯ một lệnh gọi TEXT-GENERATION bình thường rồi
-    // chờ một field ảnh xuất hiện "may ra". Model image-preview của Gemini (gemini-2.5-flash-image
-    // và họ *-image-generation) đòi hỏi contract yêu cầu IMAGE MODALITY tường minh trong
-    // `generationConfig.responseModalities`; thiếu trường này, model có xu hướng trả lời bằng TEXT
-    // (từ chối/giải thích) thay vì sinh ảnh — đúng triệu chứng người dùng báo: "UI có khung, có nút
-    // Tải PNG, nhưng không có ảnh thật". Đây LÀ request payload bug, không phải lỗi parser.
-    //
-    // Luôn xin CẢ 'TEXT' lẫn 'IMAGE': một số version model bắt buộc phải có TEXT trong danh sách
-    // modality được yêu cầu (chỉ xin IMAGE đơn độc bị model từ chối ở một số backend), và code parser
-    // (extractGeminiInline) đã bỏ qua mọi phần TEXT để chỉ lấy phần ảnh nên không ảnh hưởng output.
-    // MỤC XI: yêu cầu tỉ lệ khung hình TƯỜNG MINH qua imageConfig.aspectRatio thay vì luôn mặc định
-    // vuông — field ADDITIVE (không thay contract cũ), model bỏ qua an toàn nếu không hỗ trợ giá trị.
-    const body = {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        responseModalities: ['TEXT', 'IMAGE'],
-        ...(aspectRatio ? { imageConfig: { aspectRatio } } : {})
-      }
+    const genaiModule = loadGeminiSdk();
+    if (!genaiModule || !genaiModule.GoogleGenAI) return { ok: false, reason: 'sdk_not_installed' };
+    const { GoogleGenAI } = genaiModule;
+    const ai = new GoogleGenAI({ apiKey });
+    const config = {
+      responseModalities: ['TEXT', 'IMAGE'],
+      ...(aspectRatio ? { imageConfig: { aspectRatio } } : {})
     };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-      body: JSON.stringify(body),
-      signal: linked.signal
-    });
-    if (!res.ok) return { ok: false, reason: 'http_' + res.status };
-    let data;
-    try { data = await res.json(); } catch (e) { return { ok: false, reason: 'malformed_response' }; }
-    const blocked = geminiBlockReason(data);
+    let response;
+    try {
+      response = await raceAbort(
+        ai.models.generateContent({ model, contents: prompt, config }),
+        linked.signal
+      );
+    } catch (e) {
+      if (e && e.aborted) return { ok: false, reason: 'provider_timeout' };
+      if (isSdkContentBlockedError(e)) return { ok: false, reason: 'content_blocked' };
+      const status = statusFromSdkError(e);
+      if (status) return { ok: false, reason: 'http_' + status };
+      return { ok: false, reason: 'provider_error' };
+    }
+    if (!response) return { ok: false, reason: 'malformed_response' };
+    const blocked = geminiBlockReason(response);
     if (blocked) return { ok: false, reason: blocked };
-    const inline = extractGeminiInline(data);
+    const inline = extractGeminiInline(response);
     // Model trả TEXT thay vì ảnh -> đây là FAILURE, không phải thành công (B9.8).
     if (!inline || !isLikelyBase64(inline.b64)) return { ok: false, reason: 'no_image_in_response' };
     return { ok: true, format: 'data_url', url: `data:${inline.mime};base64,${inline.b64}`, model };
@@ -721,9 +789,80 @@ async function callOpenAICompatibleImage({ prompt, timeoutMs, signal, size, aspe
   }
 }
 
-/** Giữ tên cũ cho mọi call-site/test hiện có — nay chỉ là alias trỏ vào endpoint OpenAI. */
+/** Giữ tên cũ cho mọi call-site/test hiện có — REST thuần, dùng khi cần gọi thẳng endpoint OpenAI
+ *  không qua SDK (vd script debug). Provider 'openai-image' trong registry KHÔNG dùng hàm này nữa —
+ *  xem callOpenAIImageSdk() bên dưới. */
 function callOpenAIImage(opts) {
   return callOpenAICompatibleImage(opts, 'https://api.openai.com/v1/images/generations');
+}
+
+/**
+ * callOpenAIImageSdk() — SDK chính chủ 'openai' (thay REST thuần cho riêng provider 'openai-image').
+ * Giữ NGUYÊN toàn bộ logic đọc/kiểm chứng response đã có ở callOpenAICompatibleImage() (b64_json,
+ * verifyImageBytes, xác minh URL bằng cách tải thật rồi so magic bytes — mục 3/8 đợt audit 2) — chỉ
+ * đổi PHƯƠNG TIỆN gửi request (SDK tự lo header Authorization/Content-Type/serialize).
+ */
+async function callOpenAIImageSdk({ prompt, timeoutMs, signal, size, aspectRatio, apiKey, model, extraBody }) {
+  const linked = createLinkedAbort(timeoutMs, signal);
+  try {
+    const OpenAI = loadOpenAiSdk();
+    if (!OpenAI) return { ok: false, reason: 'sdk_not_installed' };
+    // Truyền tường minh `fetch: global.fetch` (đọc TẠI THỜI ĐIỂM GỌI, không cache) — tài liệu SDK
+    // 'openai' hỗ trợ chính thức tham số này. Lợi ích kép: (1) test hiện có stub global.fetch vẫn
+    // chặn được đúng lệnh gọi HTTP dù đi qua SDK, không cần viết lại toàn bộ bộ test theo cơ chế
+    // mock khác; (2) môi trường serverless (Vercel) có sẵn fetch native, không cần polyfill thêm.
+    const client = new OpenAI({ apiKey, timeout: timeoutMs, fetch: global.fetch });
+    // MỤC XI — gpt-image-1 chỉ nhận 3 giá trị size CỐ ĐỊNH, dùng aspectRatio để chọn giá trị hợp lệ
+    // GẦN ĐÚNG nhất thay vì luôn vuông (giống hệt nhánh REST cũ).
+    const openaiSize = aspectRatio ? openaiSizeFor(aspectRatio) : (size || '1024x1024');
+    const requestBody = { model, prompt, size: openaiSize, n: 1, ...(extraBody || {}) };
+    let response;
+    try {
+      response = await raceAbort(
+        client.images.generate(requestBody, { signal: linked.signal }),
+        linked.signal
+      );
+    } catch (e) {
+      if (e && e.aborted) return { ok: false, reason: 'provider_timeout' };
+      if (isSdkContentBlockedError(e)) return { ok: false, reason: 'content_blocked' };
+      const status = statusFromSdkError(e);
+      if (status) return { ok: false, reason: 'http_' + status };
+      return { ok: false, reason: 'provider_error' };
+    }
+    if (!response) return { ok: false, reason: 'malformed_response' };
+    const item = (Array.isArray(response.data) ? response.data : [])[0];
+    if (!item) return { ok: false, reason: 'no_image_in_response' };
+    const b64 = item.b64_json || item.b64Json;
+    if (b64) {
+      const claimed = item.output_format ? `image/${item.output_format}` : 'image/png';
+      const verifiedMime = verifyImageBytes(b64, claimed);
+      if (verifiedMime) return { ok: true, format: 'data_url', url: `data:${verifiedMime};base64,${b64}`, model };
+      return { ok: false, reason: 'invalid_image_bytes' };
+    }
+    // URL phải là http(s) thật — không nhận data:/javascript:/chuỗi rác (ranh giới an toàn), và phải
+    // được XÁC MINH BẰNG CÁCH TẢI THẬT (không tin cú pháp URL đẹp là đủ — xem mục 3/8 đợt audit 2).
+    if (typeof item.url === 'string' && /^https?:\/\//i.test(item.url)) {
+      try {
+        const vRes = await fetch(item.url, { signal: linked.signal });
+        if (!vRes.ok) return { ok: false, reason: 'image_url_fetch_failed:' + vRes.status };
+        const len = Number(vRes.headers.get('content-length') || 0);
+        if (len && len > URL_VALIDATE_MAX_BYTES) return { ok: false, reason: 'image_url_too_large' };
+        const buf = Buffer.from(await vRes.arrayBuffer());
+        if (buf.length > URL_VALIDATE_MAX_BYTES) return { ok: false, reason: 'image_url_too_large' };
+        const validated = validateImageBuffer(buf, vRes.headers.get('content-type'));
+        if (!validated.valid) return { ok: false, reason: 'invalid_image_bytes' };
+        return {
+          ok: true, format: 'image_url', url: item.url, model,
+          urlVerified: true, verifiedMime: validated.detectedMime
+        };
+      } catch (e) {
+        return { ok: false, reason: (e && e.cancelled) ? 'cancelled' : 'image_url_verify_error' };
+      }
+    }
+    return { ok: false, reason: 'no_image_in_response' };
+  } finally {
+    linked.cleanup();
+  }
 }
 
 module.exports = {
@@ -731,8 +870,8 @@ module.exports = {
   listImageProviders, classifyImageCost, isRetryableReason, IMAGE_COST, activePromptCharLimit,
   extractGeminiInline, geminiBlockReason, isLikelyBase64, detectImageSignature, verifyImageBytes,
   // Mục 2.1a: registry mở rộng + phân giải khóa — export để test kiểm chứng trực tiếp.
-  IMAGE_PROVIDER_DEFS, resolveImageKey, callOpenAICompatibleImage, callOpenAIImage, callGeminiImage,
-  callGeminiInteractionsImage, extractInteractionsImage, interactionsBlockReason,
+  IMAGE_PROVIDER_DEFS, resolveImageKey, callOpenAICompatibleImage, callOpenAIImage, callOpenAIImageSdk,
+  callGeminiImage, callGeminiInteractionsImage, extractInteractionsImage, interactionsBlockReason,
   // Mục X/XI (đợt audit 6): quality mode + aspect-ratio -> size thật.
   sizeForRequest, openaiSizeFor, geminiImageSizeLabel, resolveQualityMode, IMAGE_QUALITY_LONG_EDGE,
   // Mục XXII (đợt audit 6): self-healing circuit breaker theo provider.

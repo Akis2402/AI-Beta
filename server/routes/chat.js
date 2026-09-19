@@ -23,6 +23,8 @@ const {
 // A1: system prompt đi xuống provider dưới dạng PromptParts để khối TĨNH thực sự được prompt-cache
 // (Anthropic: cache_control tường minh; OpenAI/Gemini: prefix trùng => implicit cache).
 const { appendToSystem, systemToString, estimatePromptTokens } = require('../utils/systemPromptParts');
+// PHẦN BG/21: lưu vòng đời + KẾT QUẢ CUỐI của 1 lượt giải, độc lập với kết nối SSE tạo ra nó.
+const aiJobStore = require('../utils/aiJobStore');
 
 /**
  * B10 — các field telemetry token MỚI, phẳng hoá để đi thẳng vào log (không lồng object).
@@ -400,6 +402,10 @@ function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode, probl
 // đang đối chiếu đa hướng ở chế độ Sâu — không có delta nào trong lúc này), "done" (kết thúc
 // thành công, kèm metadata provider/crossChecked), "error" (kết thúc do lỗi).
 function sseWrite(res, event, data) {
+  // PHẦN BG/21: mọi nhánh `done`/`error` của pipeline (cache hit, direct, cross-check, visual...)
+  // đều đi qua đúng hàm này — ghi nhận job ở ĐÂY nên không thể sót nhánh return nào, và không phải
+  // sửa rải rác trong handler. Ghi vào store là best-effort, không chặn luồng ghi SSE.
+  if (res.__aiJob) { try { aiJobStore.observeSseEvent(res.__aiJob, event, data); } catch (e) { /* không được làm hỏng stream */ } }
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
@@ -460,9 +466,40 @@ router.post('/', async (req, res, next) => {
   res.on('close', () => {
     if (res.writableEnded) return; // response đã kết thúc bình thường — không phải disconnect thật
     disconnected = true;
+    // PHẦN BG: ghi đúng bản chất "client rời đi" vào job (KHÔNG phải "đã xong"). Phần ĐÃ tính xong
+    // trước đó vẫn nằm trong store nếu `done` đã kịp phát — tab mở lại vẫn lấy lại được.
+    if (res.__aiJob) { try { aiJobStore.markDisconnected(res.__aiJob); } catch (e) { /* ignore */ } }
     abortController.abort();
   });
   const signal = abortController.signal;
+
+  // ---------- PHẦN BG/20/21: JOB RECORD theo requestId DO CLIENT SINH ----------
+  // Client (conversationTaskManager) sinh requestId TRƯỚC khi gọi, nên sau reload nó biết chính xác
+  // phải hỏi lại job nào: GET /api/chat/jobs/:requestId. Không có requestId (client cũ) -> null,
+  // toàn bộ phần này trở thành no-op, hành vi giữ nguyên như trước.
+  const clientRequestId = (req.body && typeof req.body.clientRequestId === 'string') ? req.body.clientRequestId.trim() : '';
+  if (clientRequestId) {
+    res.__aiJob = aiJobStore.createJob({
+      requestId: clientRequestId,
+      conversationId: (req.body && typeof req.body.conversationId === 'string') ? req.body.conversationId : null,
+      stage: (req.body && req.body.stage) || null,
+      query: (req.body && typeof req.body.query === 'string') ? req.body.query : '',
+      serverRequestId: reqLogger.requestId,
+      logger: reqLogger
+    });
+    // Nhánh KHÔNG streaming trả về bằng res.json() — bọc 1 lần ở đây để job cũng được ghi đầy đủ,
+    // thay vì chỉ ghi cho nhánh SSE (hai đường trả kết quả phải ghi nhận NHƯ NHAU).
+    const originalJson = res.json.bind(res);
+    res.json = (payload) => {
+      try {
+        if (res.__aiJob) {
+          if (res.statusCode >= 400) aiJobStore.finishJob(res.__aiJob, { status: aiJobStore.STATUS.FAILED, error: (payload && (payload.code || payload.error)) || 'error' });
+          else aiJobStore.finishJob(res.__aiJob, { status: aiJobStore.STATUS.COMPLETED, result: payload });
+        }
+      } catch (e) { /* không được làm hỏng response */ }
+      return originalJson(payload);
+    };
+  }
 
   try {
     // PHẦN 13 FIX: TRƯỚC ĐÂY globalDeadline được tạo SAU ensureProvidersReady() (discovery) + body
@@ -1218,6 +1255,19 @@ router.post('/', async (req, res, next) => {
           // giữ nguyên phần đã stream, đánh dấu interrupted, chuyển sang target KHÁC, gửi ngữ cảnh
           // TỐI THIỂU, chống lặp text ở điểm nối. Người dùng vẫn chỉ thấy MỘT câu trả lời liên tục.
           const coverageList = extractCoverageList(problemText);
+          // MỤC 6: gate THẬT trước khi gọi reconcile — không chỉ ghi log sau khi đã gọi. Ở luồng bình
+          // thường (stage==='detail', đã qua cross-check) quyết định luôn là ALLOW nên KHÔNG đổi hành
+          // vi hiện có; gate này chỉ thực sự chặn nếu có lỗi lập trình khiến reconcile bị gọi sai stage.
+          const reconcileAdmit = aiCallBudget.admit(aiBudget.PURPOSE.RECONCILE, 'detail', {
+            reason: agreement ? 'candidates_agree_light_reconcile' : 'candidates_disagree_full_reconcile',
+            risk: agreement ? 'low' : 'medium'
+          });
+          if (reconcileAdmit.decision === aiBudget.DECISION.DENY) {
+            reqLogger.log({ stage: 'ai_call_denied', ...reconcileAdmit });
+            sseWrite(res, 'error', { message: 'Không thể tổng hợp lời giải (nội bộ từ chối lệnh gọi AI trái phép).', code: 'AI_CALL_DENIED' });
+            return res.end();
+          }
+          aiCallBudget.record(aiBudget.PURPOSE.RECONCILE, { stage: 'detail', reason: reconcileAdmit.reason });
           const reconcileReserveState = { budget: budgetOf(reconcileStage).reserveBudget, used: 0 };
           const reconcileRun = await runResumableStream({
             providers: activeProviders,
@@ -1317,7 +1367,7 @@ router.post('/', async (req, res, next) => {
           // thực sự COMPLETED (partial=false), nếu không lần sau sẽ trả lại đúng câu trả lời bị cắt.
           if (reconcileRun.resumes || continuations) workingSetTracker.use('continuation'); // KHÔNG retrieval lại
           if (!tePlan.cacheBypassed && !outcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, donePayload);
-          if (!outcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, full.length / 3.2);
+          if (!outcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, full.length / 3.2, { actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null, provider: reconciler.label, model: reconciler.model || null });
           teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
           teTelemetry.record('outputTokens', full.length / 3.2);
           teTelemetry.record('continuationTokens', reconcileRun.session.continuationTokens);
@@ -1433,7 +1483,7 @@ router.post('/', async (req, res, next) => {
 
         // PHẦN P: chỉ cache khi COMPLETED thật (không cache partial/interrupted).
         if (!tePlan.cacheBypassed && !directOutcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, directDonePayload);
-        if (!directOutcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, directStageName, full.length / 3.2);
+        if (!directOutcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, directStageName, full.length / 3.2, { actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null, provider: provider.label, model: provider.model || null });
         teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
         teTelemetry.record('outputTokens', full.length / 3.2);
         teTelemetry.record('continuationTokens', directRun.session.continuationTokens);
@@ -1576,7 +1626,7 @@ router.post('/', async (req, res, next) => {
       jsonDonePayload.visuals = jsonVisualRun.visuals;
       jsonDonePayload.visualStatus = jsonVisualRun.status;
       if (!tePlan.cacheBypassed && !reconcilePartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
-      if (!reconcilePartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, finalText.length / 3.2);
+      if (!reconcilePartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, finalText.length / 3.2, { actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null, provider: reconciler.label, model: reconciler.model || null });
       teTelemetry.record('outputTokens', finalText.length / 3.2);
       reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });
       return res.json(jsonDonePayload);
@@ -1644,7 +1694,7 @@ router.post('/', async (req, res, next) => {
     finalJsonPayload.visuals = directJsonVisualRun.visuals;
     finalJsonPayload.visualStatus = directJsonVisualRun.status;
     if (!tePlan.cacheBypassed && !directJsonPartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
-    if (!directJsonPartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', text.length / 3.2);
+    if (!directJsonPartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', text.length / 3.2, { actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null, provider: provider.label, model: provider.model || null });
     teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
     teTelemetry.record('outputTokens', text.length / 3.2);
     reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });
@@ -1656,6 +1706,33 @@ router.post('/', async (req, res, next) => {
     if (disconnected || (err && err.cancelled)) return;
     next(err);
   }
+});
+
+/* =====================================================================================
+   GET /api/chat/jobs/:requestId — PHẦN 21: kênh HỎI LẠI KẾT QUẢ, tách khỏi SSE.
+   SSE chỉ là kênh theo dõi realtime; khi tab bị đóng/reload, tab mới hỏi đúng requestId nó đã sinh
+   ra để lấy lại lời giải ĐÃ TÍNH XONG thay vì bắt AI giải lại (tốn token lần 2).
+
+   TRUNG THỰC: `durable=false` nghĩa là job chỉ nằm trong RAM của 1 instance — client PHẢI hiển thị
+   đúng như vậy chứ không được coi là bảo đảm. 404 nghĩa là "không tìm thấy", KHÔNG phải "thất bại".
+   ===================================================================================== */
+router.get('/jobs/:requestId', async (req, res) => {
+  const requestId = String(req.params.requestId || '').trim();
+  if (!requestId || requestId.length > 64) {
+    return res.status(400).json({ error: 'requestId không hợp lệ.', code: 'INVALID_INPUT' });
+  }
+  const job = await aiJobStore.getJob(requestId);
+  if (!job) {
+    return res.status(404).json({
+      found: false,
+      durable: aiJobStore.isDurable(),
+      code: 'JOB_NOT_FOUND',
+      error: aiJobStore.isDurable()
+        ? 'Không tìm thấy lượt giải này (có thể đã quá hạn lưu trữ).'
+        : 'Không tìm thấy lượt giải này. Máy chủ chưa bật KV nên kết quả chỉ sống trong phiên đang chạy.'
+    });
+  }
+  return res.json({ found: true, job: aiJobStore.toPublic(job) });
 });
 
 module.exports = router;

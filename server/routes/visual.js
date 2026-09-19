@@ -269,6 +269,9 @@ router.post('/retry', express.json({ limit: '4kb' }), async (req, res) => {
   await hqStore.remember(visualId, ctx);
   const preparedRetry = await responseGuard.prepareResponsePayload({
     ok: true, visualId, model: img.model,
+    // Xem chú thích PHẦN XXXVIII/LXIII ở visualPipeline.js — phần tử cuối của providersTried luôn
+    // là provider đã thành công.
+    provider: (img.providersTried && img.providersTried.length) ? img.providersTried[img.providersTried.length - 1] : null,
     renderer: 'generated_image', origin: 'ai_generated', fidelity: 'illustrative',
     necessity: ctx.necessity, subject: ctx.subject, title: ctx.title,
     visuals: [{ visualId, format: img.format, url: img.url }]

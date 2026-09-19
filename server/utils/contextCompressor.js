@@ -1,5 +1,7 @@
 'use strict';
 
+const sharedImportance = require('./historyImportance'); // MỤC 17: importance dùng chung với tokenEconomy
+
 // ============================================================================================
 // LOSS-AWARE SEMANTIC CONTEXT COMPRESSION (PHẦN D / E / F)
 // ============================================================================================
@@ -277,14 +279,17 @@ function scoreImportance(item, ctx = {}) {
     ctx.seenFingerprints.add(fp);
   }
 
-  if (GREETING_RE.test(trimmed) || trimmed.length < 8) return IMPORTANCE.REDUNDANT;
-
-  // Có drawing state / code / công thức LaTeX / phép gán biến -> ACTIVE STATE, phải bảo toàn.
-  if (/```(shape|solid3d|plot)/.test(text)) return IMPORTANCE.CRITICAL;
-  if (/\$[^$\n]+\$/.test(text) || ASSIGN_RE.test(text)) {
-    ASSIGN_RE.lastIndex = 0;
-    return IMPORTANCE.HIGH;
+  // MỤC 16 — THỨ TỰ ĐÚNG: bảo vệ trạng thái toán học/dữ liệu TRƯỚC, heuristic độ dài SAU CÙNG.
+  // Bản cũ chạy `trimmed.length < 8 -> REDUNDANT` ngay tại đây, nên "x=2" / "y=-3" / "AB=6" /
+  // "(2,3)" bị loại trước khi kịp được nhận ra là dữ kiện. MỤC 17: dùng CHUNG classifier với
+  // tokenEconomy (historyImportance.js) để hai tầng không bao giờ đánh giá lệch nhau.
+  const shared = sharedImportance.classifyContent(trimmed);
+  if (shared.level === sharedImportance.LEVEL.CRITICAL) {
+    // Drawing/3D/plot là ACTIVE STATE -> CRITICAL; dữ kiện toán học khác -> HIGH (đủ để không bị
+    // nén mất, nhưng không chiếm chỗ của đề bài gốc vốn đã là isCore/CRITICAL).
+    return shared.reasons.includes('drawing_state') ? IMPORTANCE.CRITICAL : IMPORTANCE.HIGH;
   }
+  if (shared.level === sharedImportance.LEVEL.REDUNDANT) return IMPORTANCE.REDUNDANT;
   ASSIGN_RE.lastIndex = 0;
 
   // Liên quan tới đề bài hiện tại -> giữ ưu tiên cao hơn history vô thưởng vô phạt.
