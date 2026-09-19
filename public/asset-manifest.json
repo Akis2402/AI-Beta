@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-19T07:09:20.845Z",
+  "generatedAt": "2026-09-19T07:26:15.266Z",
   "assets": {
     "boot.js": "/js/boot.29aa9029e5.js",
     "payloadBudget.js": "/js/payloadBudget.c9bd656bea.js",
@@ -12,7 +12,7 @@
     "exprEval.js": "/js/exprEval.b06b7b8995.js",
     "scene3d.js": "/js/scene3d.eab03768bc.js",
     "voiceInput.js": "/js/voiceInput.66463c87c2.js",
-    "app.js": "/js/app.2454cb5a66.js",
+    "app.js": "/js/app.306420092b.js",
     "translations.js": "/js/i18n/translations.59b85322d4.js",
     "languageStore.js": "/js/i18n/languageStore.763a541496.js",
     "i18n.js": "/js/i18n/i18n.20d12a2b84.js",

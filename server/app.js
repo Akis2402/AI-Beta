@@ -65,6 +65,15 @@ app.get('/api/health', (req, res) => res.json({
   rateLimitScope: require('./middleware/rateLimit').isGlobalScope() ? 'global' : 'instance'
 }));
 
+// Chuẩn hoá tiền tố /api khi chạy sau serverless adapter hoặc reverse proxy (nếu /api bị tước)
+app.use((req, res, next) => {
+  const apiPrefixes = ['/chat', '/generate', '/recommend', '/study', '/visual', '/source', '/health'];
+  if (apiPrefixes.some((p) => req.url === p || req.url.startsWith(p + '/') || req.url.startsWith(p + '?'))) {
+    req.url = '/api' + req.url;
+  }
+  next();
+});
+
 app.use('/api', appKeyGate); // cổng khóa dùng chung tùy chọn (đọc từ .env, mặc định tắt)
 app.use('/api/chat', chatLimiter, jsonLarge, chatRoutes);
 app.use('/api/generate', generateLimiter, jsonLarge, generateRoutes);

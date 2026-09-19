@@ -8,7 +8,12 @@ let cachedApp: any = null;
 function getExpressApp() {
   if (!cachedApp) {
     // server/app.js exports the express instance
-    cachedApp = require('../../server/app');
+    const path = require('path');
+    try {
+      cachedApp = require(path.join(process.cwd(), 'server/app'));
+    } catch {
+      cachedApp = require('../../server/app');
+    }
   }
   return cachedApp;
 }

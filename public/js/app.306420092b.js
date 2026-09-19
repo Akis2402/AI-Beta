@@ -2029,12 +2029,13 @@ async function handleAddUrlSourceClick() {
       network_error: 'Không kết nối được mạng, thử lại sau.',
       invalid_url: 'URL không hợp lệ.',
       invalid_youtube_url: 'URL YouTube không hợp lệ.',
+      video_unavailable: result.userMessage || 'Video YouTube này không tồn tại hoặc ở chế độ riêng tư.',
       transcript_unavailable: result.userMessage || 'Video này không có phụ đề nên chưa đọc được nội dung.',
       no_readable_text: 'Không đọc được nội dung văn bản từ trang này.',
       unsupported_protocol: 'Chỉ hỗ trợ URL http/https.',
       https_required: 'Chỉ hỗ trợ URL https.'
     };
-    statusEl.textContent = REASON_MESSAGES[result.reason] || 'Không thêm được nguồn này, thử lại sau.';
+    statusEl.textContent = result.userMessage || REASON_MESSAGES[result.reason] || 'Không thêm được nguồn này, thử lại sau.';
     statusEl.classList.add('is-error');
     statusEl.style.display = 'block';
   }
@@ -2520,7 +2521,11 @@ async function addUrlSource(rawUrl) {
     const resp = await fetch(endpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url })
     });
-    data = await resp.json();
+    try {
+      data = await resp.json();
+    } catch (parseErr) {
+      data = null;
+    }
   } catch (e) {
     return { ok: false, reason: 'network_error' };
   }
@@ -2528,7 +2533,11 @@ async function addUrlSource(rawUrl) {
   // trả đúng `status:'INCOMPLETE'`/`reason` — client chỉ chuyển tiếp thông điệp đó, không diễn giải
   // lại thành "đã thêm thành công").
   if (!data || !data.ok) {
-    return { ok: false, reason: (data && data.reason) || 'fetch_failed', userMessage: data && data.userMessage };
+    return {
+      ok: false,
+      reason: (data && data.reason) || 'fetch_failed',
+      userMessage: (data && (data.userMessage || data.error)) || (data ? null : 'Không nhận được phản hồi hợp lệ từ máy chủ.')
+    };
   }
 
   const entry = {

@@ -255,6 +255,7 @@ test('V15. không cho hai phiên nhận dạng chồng nhau', () => {
   const second = voice.start({});
   assert.strictEqual(second, false, 'bấm mic lần hai khi đang ghi KHÔNG được mở phiên mới');
   assert.strictEqual(instances.length, 1);
+  voice.abort();
 });
 
 test('V16. engine throw ngay ở start() -> báo lỗi, KHÔNG Unhandled Rejection', () => {
@@ -293,6 +294,7 @@ test('V18. ngôn ngữ nhận dạng bám theo setting: Tiếng Việt -> vi-VN,
   assert.strictEqual(voice.resolveRecognitionLang('tự động theo câu hỏi'), 'vi-VN');
   voice.start({ lang: voice.resolveRecognitionLang('Tiếng Việt') });
   assert.strictEqual(instances[0].lang, 'vi-VN');
+  voice.abort();
 });
 
 console.log('\n== (c) Wiring trong app.js: transcript -> #qInput, KHÔNG tự gửi ==');

@@ -106,14 +106,18 @@ async function fetchPinned(url, opts) {
       host: url.hostname,
       servername: url.hostname, // SNI + xác thực chứng chỉ vẫn theo TÊN, không theo IP
       path: url.pathname + url.search,
-      method: 'GET',
-      // MỤC 26: cho phép caller thêm header ĐIỀU KIỆN (If-None-Match / If-Modified-Since) để
-      // revalidate bản đã cache — 304 thì không tải lại body. Chỉ nhận đúng các header an toàn,
-      // không để caller ghi đè Accept-Encoding (identity là bắt buộc cho trần byte trên luồng).
-      headers: { Accept: 'image/*', ...(opts.headers || {}), 'Accept-Encoding': 'identity' },
+      method: opts.method || 'GET',
+      // Cho phép caller thêm header tùy chỉnh, không để caller ghi đè Accept-Encoding (identity là bắt buộc cho trần byte trên luồng).
+      headers: { Accept: '*/*', ...(opts.headers || {}), 'Accept-Encoding': 'identity' },
       timeout: opts.timeoutMs,
-      // GHIM IP: mọi lần Node hỏi DNS trong request này đều nhận đúng địa chỉ đã được kiểm ở trên.
-      lookup: (host, options, cb) => cb(null, resolved.address, resolved.family)
+      lookup: (host, options, cb) => {
+        if (typeof options === 'function') { cb = options; options = {}; }
+        if (options && options.all) {
+          cb(null, [{ address: resolved.address, family: resolved.family }]);
+        } else {
+          cb(null, resolved.address, resolved.family);
+        }
+      }
     }, (res) => {
       const status = res.statusCode || 0;
       const declared = Number(res.headers['content-length'] || 0);
@@ -136,6 +140,9 @@ async function fetchPinned(url, opts) {
 
     req.on('timeout', () => { req.destroy(); done({ ok: false, reason: 'timeout' }); });
     req.on('error', () => done({ ok: false, reason: 'request_failed' }));
+    if (opts.body) {
+      req.write(opts.body);
+    }
     req.end();
   });
 }
