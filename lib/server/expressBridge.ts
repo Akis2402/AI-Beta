@@ -2,18 +2,13 @@ import { NextRequest } from 'next/server';
 import { Readable } from 'stream';
 import { EventEmitter } from 'events';
 
-// Lazy import Express app to avoid module-load crashes and ensure env is loaded
+// Keep the import path static so Turbopack can resolve and bundle the Express app.
+// server/app.js exports the configured Express instance.
 let cachedApp: any = null;
 
 function getExpressApp() {
   if (!cachedApp) {
-    // server/app.js exports the express instance
-    const path = require('path');
-    try {
-      cachedApp = require(path.join(process.cwd(), 'server/app'));
-    } catch {
-      cachedApp = require('../../server/app');
-    }
+    cachedApp = require('../../server/app');
   }
   return cachedApp;
 }
