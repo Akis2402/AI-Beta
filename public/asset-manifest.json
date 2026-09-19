@@ -1,0 +1,25 @@
+{
+  "generatedAt": "2026-09-19T06:01:56.796Z",
+  "assets": {
+    "boot.js": "/js/boot.29aa9029e5.js",
+    "payloadBudget.js": "/js/payloadBudget.c9bd656bea.js",
+    "storage.js": "/js/storage.1d27028cd0.js",
+    "imageStorage.js": "/js/imageStorage.2a4331b36c.js",
+    "config.js": "/js/config.7dce3170d3.js",
+    "formulas.js": "/js/formulas.8bbbb162bb.js",
+    "subjects.js": "/js/subjects.aa5a680318.js",
+    "solid3d.js": "/js/solid3d.b9cfced17e.js",
+    "exprEval.js": "/js/exprEval.b06b7b8995.js",
+    "scene3d.js": "/js/scene3d.eab03768bc.js",
+    "voiceInput.js": "/js/voiceInput.66463c87c2.js",
+    "app.js": "/js/app.2454cb5a66.js",
+    "translations.js": "/js/i18n/translations.59b85322d4.js",
+    "languageStore.js": "/js/i18n/languageStore.763a541496.js",
+    "i18n.js": "/js/i18n/i18n.20d12a2b84.js",
+    "puterAdapter.js": "/js/providers/puterAdapter.836f50da9e.js",
+    "providerRouter.js": "/js/providers/providerRouter.bcdbb977c7.js",
+    "conversationTaskManager.js": "/js/tasks/conversationTaskManager.1eb7e20b62.js",
+    "backgroundTaskUI.js": "/js/tasks/backgroundTaskUI.915a2a6d32.js",
+    "styles.css": "/css/styles.308ec08bf5.css"
+  }
+}
