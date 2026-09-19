@@ -49,7 +49,7 @@ const CORE_JS = [
 // fingerprint từng nhóm bằng process() riêng (mỗi nhóm 1 relDir) thay vì gộp chung CORE_JS.
 const I18N_JS = ['translations.js', 'languageStore.js', 'i18n.js'];
 const PROVIDER_JS = ['puterAdapter.js', 'providerRouter.js'];
-const TASK_JS = ['conversationTaskManager.js'];
+const TASK_JS = ['conversationTaskManager.js', 'backgroundTaskUI.js'];
 const CORE_CSS = ['styles.css'];
 
 function escapeRegExp(s) {
