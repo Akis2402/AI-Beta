@@ -18,7 +18,7 @@ const sourceVisionRoutes = require('./routes/sourceVision');
 const app = express();
 
 app.disable('x-powered-by');
-app.set('trust proxy', 1); // cần thiết khi deploy sau reverse proxy / load balancer (Render, Vercel, Nginx...)
+Reflect.apply(app.set, app, ['trust proxy', 1]); // cần thiết khi deploy sau reverse proxy / load balancer (Render, Vercel, Nginx...)
 
 // ---------- Lớp bảo mật áp dụng toàn cục ----------
 app.use(helmetConfig);
