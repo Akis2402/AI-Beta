@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "outputDirectory": "public",
+  "framework": "nextjs",
   "buildCommand": "npm run build",
   "functions": {
     "api/index.js": {

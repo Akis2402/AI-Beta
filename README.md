@@ -34,7 +34,7 @@ tro-giai-ai/
 │       ├── formulas.js     ← dữ liệu tĩnh: danh mục công thức cốt lõi theo môn/khối lớp
 │       ├── solid3d.js      ← vẽ hình học không gian 3D xoay được (three.js)
 │       └── app.js          ← toàn bộ logic giao diện, gọi backend qua fetch
-├── vercel.json             ← cấu hình deploy cho Vercel (routing + thời gian chạy function)
+├── vercel.json             ← cấu hình Next.js trên Vercel + thời gian chạy function
 ├── package.json
 ├── .env.example
 └── .gitignore
@@ -139,7 +139,7 @@ Vercel là nền tảng **serverless** — nó không chạy `app.listen()` như
 
 1. **Đẩy code lên GitHub** (hoặc GitLab/Bitbucket).
 2. Vào [vercel.com](https://vercel.com) → **Add New → Project** → chọn repo này.
-3. Vercel sẽ tự nhận diện (không cần chọn Framework Preset, để **"Other"** là được — không cần Build Command).
+3. Vercel phải dùng **Framework Preset: Next.js**. Giữ **Build Command** là `npm run build` và để trống **Output Directory** để Vercel dùng mặc định `.next`. Không đặt Output Directory thành `public`, vì `public` chỉ chứa tài nguyên tĩnh và không có `routes-manifest.json`.
 4. **Environment Variables** trong phần cài đặt project (Settings → Environment Variables), điền y hệt các biến trong `.env.example`:
    - `ANTHROPIC_API_KEY` — **bắt buộc**, khóa API thật của bạn.
    - `ALLOWED_ORIGINS` — thường **để trống là được**: server tự động cho phép origin cùng domain với chính nó (trường hợp mặc định — frontend & backend chung 1 domain Vercel). Chỉ điền vào đây nếu bạn có domain KHÁC cần gọi API (custom domain riêng, app di động...).
