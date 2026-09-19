@@ -3200,6 +3200,22 @@ async function restoreMessageImage(imageId) {
     return null;
   }
 }
+
+/** PHẦN Y/AB (multi-image F5-restore): khôi phục NHIỀU ảnh theo đúng thứ tự đã lưu (`imageIds`).
+ * Ảnh nào không khôi phục được (đã bị dọn khỏi IndexedDB) bị BỎ QUA CÓ KHAI BÁO qua `missingCount`
+ * (PHẦN CX) thay vì làm hỏng việc khôi phục các ảnh còn lại trong CÙNG tin nhắn. */
+async function restoreMessageImages(imageIds) {
+  const ids = Array.isArray(imageIds) ? imageIds.filter(Boolean) : [];
+  if (!ids.length) return { images: [], missingCount: 0 };
+  const images = [];
+  let missingCount = 0;
+  for (const id of ids) {
+    // eslint-disable-next-line no-await-in-loop -- giữ đúng thứ tự (PHẦN X), số ảnh/tin nhắn nhỏ
+    const r = await restoreMessageImage(id);
+    if (r) images.push(r); else missingCount++;
+  }
+  return { images, missingCount };
+}
 function addAiMsg(labelText) {
   const row = document.createElement('div');
   row.className = 'msg-row msg-ai';
@@ -3383,6 +3399,12 @@ async function loadConversation(id, silent) {
   const conv = state.conversations.find((c) => c.id === id);
   if (!conv) return;
   state.currentConvId = id;
+  // PHẦN BG (mục 16): mở conversation = đã xem mọi kết quả chạy nền của nó -> xoá badge "câu trả
+  // lời mới". CHỈ đụng cờ hiển thị `seen`, KHÔNG huỷ/không xoá task nào.
+  if (window.conversationTaskManager && window.conversationTaskManager.markConversationSeen) {
+    window.conversationTaskManager.markConversationSeen(id);
+  }
+  if (window.backgroundTaskUI) window.backgroundTaskUI.refresh();
   pendingTurn = null;
   revokeThreadBlobImages();
   threadEl.innerHTML = '';
@@ -3393,7 +3415,18 @@ async function loadConversation(id, silent) {
     // thị tin nhắn trong luồng chat — số lượng ảnh/hội thoại nhỏ nên không đáng lo về hiệu năng.
     for (const msg of conv.messages) {
       if (msg.role === 'user') {
-        if (msg.imageId) {
+        // PHẦN Y/AB: tin nhắn MỚI (sau bản vá multi-image) có `imageIds[]` — khôi phục ĐỦ, theo
+        // đúng thứ tự. Tin nhắn CŨ (trước bản vá) chỉ có `imageId` số ít — vẫn khôi phục đúng như
+        // hành vi gốc, không migrate dữ liệu cũ (PHẦN DV tinh thần: không phá dữ liệu đã lưu).
+        if (msg.imageIds && msg.imageIds.length) {
+          const { images: restoredImgs, missingCount } = await restoreMessageImages(msg.imageIds);
+          if (restoredImgs.length) {
+            addUserMsg(msg.text, restoredImgs.map((r) => r.url));
+            if (missingCount) console.warn(`[image] ${missingCount}/${msg.imageIds.length} ảnh của tin nhắn này không còn trong IndexedDB.`);
+          } else {
+            addUserMsg(msg.text, null, 'missing');
+          }
+        } else if (msg.imageId) {
           const restored = await restoreMessageImage(msg.imageId);
           if (restored && restored.url) addUserMsg(msg.text, restored.url);
           else addUserMsg(msg.text, null, 'missing');
@@ -3434,7 +3467,13 @@ async function loadConversation(id, silent) {
     const detach = window.conversationTaskManager.attach(id, (ev) => {
       if (ev.type === 'delta') preview.append(ev.chunk);
       else if (ev.type === 'statusMsg') preview.setStatus(ev.message, ev.state);
-      else if (ev.type === 'done' || ev.type === 'error' || ev.type === 'cancelled') { detach(); }
+      else if (ev.type === 'done' || ev.type === 'error' || ev.type === 'cancelled') {
+        detach();
+        // Mục 6/29: task kết thúc trong lúc UI chỉ đang "quan sát" (người dùng vừa quay lại
+        // conversation này giữa chừng) — dựng lại màn hình TỪ MESSAGE ĐÃ LƯU thay vì để nguyên khối
+        // preview tạm. Vẽ lại từ state đã lưu nên KHÔNG tạo message trùng và KHÔNG gọi AI lần nữa.
+        if (state.currentConvId === id) setTimeout(() => { if (state.currentConvId === id) loadConversation(id, true); }, 60);
+      }
     });
   }
   scrollThreadToBottom();
@@ -3450,7 +3489,12 @@ function deleteConversation(id) {
   // conversation khác. Chạy nền, không chặn UI, lỗi bỏ qua an toàn (ảnh mồ côi không hại gì thêm).
   if (removed && window.chatImageStore) {
     const imageIds = new Set();
-    (removed.messages || []).forEach((m) => { if (m.imageId) imageIds.add(m.imageId); });
+    // PHẦN Y/9: dọn CẢ `imageIds[]` (tin nhắn nhiều ảnh, mới) LẪN `imageId` số ít (tin nhắn cũ) —
+    // thiếu 1 trong 2 sẽ để lại "ảnh mồ côi" vĩnh viễn trong IndexedDB.
+    (removed.messages || []).forEach((m) => {
+      if (m.imageId) imageIds.add(m.imageId);
+      if (Array.isArray(m.imageIds)) m.imageIds.forEach((id) => { if (id) imageIds.add(id); });
+    });
     imageIds.forEach((imgId) => { window.chatImageStore.delete(imgId).catch(() => {}); });
   }
   if (state.currentConvId === id) {
@@ -3522,6 +3566,11 @@ function renderHistoryList() {
     // PHẦN F/H: badge "đang chạy nền" cho MỌI conversation có task active — không chỉ conv đang mở.
     const isBgGenerating = conv.id !== state.currentConvId && window.conversationTaskManager && window.conversationTaskManager.isGenerating(conv.id);
     const genBadge = isBgGenerating ? `<span class="hist-generating-dot" title="${window.t ? window.t('chat.generating') : 'Đang trả lời...'}"></span>` : '';
+    // PHẦN BG (mục 16): task hoàn tất trong lúc người dùng đang ở conversation KHÁC -> hiện badge
+    // "Có câu trả lời mới" (text, không chỉ màu — mục 34). Badge biến mất khi mở đúng conversation.
+    const hasUnseen = window.conversationTaskManager && window.conversationTaskManager.hasUnseen
+      && window.conversationTaskManager.hasUnseen(conv.id);
+    const unseenBadge = hasUnseen ? `<div class="hist-unseen-badge">${escapeHtml(t('background.newAnswer'))}</div>` : '';
     // Mục 14.20: icon môn chủ đạo ngay cạnh tiêu đề, để thấy ngay hội thoại này đã được "xếp" vào
     // danh mục nào mà không cần mở dropdown lọc.
     const domSubj = conv.dominantSubjectId || computeDominantSubject(conv);
@@ -3531,6 +3580,7 @@ function renderHistoryList() {
       <div class="hist-main">
         <div class="hist-title">${genBadge}${domIcon}${(conv.title || t('chat.newChatTitle')).replace(/</g, '&lt;')}</div>
         <div class="hist-meta">${escapeHtml(t('chat.messages', { n: conv.messages.length }))} · ${timeAgo(conv.updatedAt)}</div>
+        ${unseenBadge}
       </div>
       <button class="hist-del" title="${escapeHtml(t('history.deleteChat'))}">${ICONS.trash}</button>
     `;
@@ -4088,7 +4138,7 @@ function makeVisualRetryButton(v, hostEl) {
       // không chỉ thay <img> — card cũ (nếu là stub renderFailed) chưa có body/actions đúng dạng.
       const merged = {
         ...v, format: data.format, url: data.url, renderer: data.renderer,
-        origin: data.origin, fidelity: data.fidelity, model: data.model,
+        origin: data.origin, fidelity: data.fidelity, model: data.model, provider: data.provider,
         renderFailed: false
       };
       const newCard = renderVisualCard(merged);
@@ -4417,6 +4467,29 @@ function renderVisualActions(v) {
 }
 
 /** Một card hình hoàn chỉnh. @returns {HTMLElement|null} null khi payload không phải ảnh AI thật. */
+/**
+ * MỤC XXXVIII/LXIII (master prompt 09/2026) — PROVIDER TRANSPARENCY. Trước đây backend đã gửi
+ * `v.provider` (provider AI THẬT đã tạo ra ảnh này — xem visualPipeline.js) nhưng frontend chưa hề
+ * đọc field này ở đâu, nên người dùng không bao giờ biết ảnh do Gemini hay OpenAI (dự phòng) tạo ra.
+ * KHÔNG được đoán/hard-code 1 provider cố định cho mọi trường hợp — phải đọc đúng field server trả.
+ */
+const IMAGE_PROVIDER_LABELS = {
+  'gemini-image': 'Gemini',
+  'gemini-interactions-image': 'Gemini',
+  'openai-image': 'OpenAI',
+  'grok-image': 'Grok (xAI)',
+  'openrouter-image': 'OpenRouter'
+};
+function renderVisualProviderLabel(v) {
+  const key = v && v.provider;
+  if (!key) return null; // KHÔNG hiện gì nếu không rõ provider — không đoán bừa.
+  const label = IMAGE_PROVIDER_LABELS[key] || key;
+  const el = document.createElement('p');
+  el.className = 'visual-provider-label';
+  el.textContent = `Tạo bởi: ${label}`;
+  return el;
+}
+
 function renderVisualCard(v) {
   if (!v) return null;
   if (v.renderFailed) return renderVisualFailedCard(v); // stub lỗi kèm nút thử lại.
@@ -4441,6 +4514,9 @@ function renderVisualCard(v) {
 
   const overlay = renderVisualOverlay(v);
   if (overlay) fig.appendChild(overlay);
+
+  const providerLabel = renderVisualProviderLabel(v);
+  if (providerLabel) fig.appendChild(providerLabel);
 
   const actions = renderVisualActions(v);
   if (actions) fig.appendChild(actions);
@@ -5004,7 +5080,11 @@ async function sendMessage() {
   const conv = currentConversation();
   // FIX ROOT CAUSE #1: lưu imageId (tham chiếu tới IndexedDB) thay vì chỉ hadImage:true — đây là
   // dữ liệu duy nhất còn giữ lại được sau F5 để khôi phục đúng ảnh gốc (xem loadConversation()).
-  const userMsgObj = { role: 'user', text: query, hadImage: !!image, imageId: image ? image.imageId : null };
+  // PHẦN Y/AB: `imageIds[]` lưu ĐỦ mọi ảnh đã gửi (ảnh nào lưu IndexedDB thất bại thì không có id,
+  // lọc bỏ — filter(Boolean)); `imageId` (số ít) = ảnh đầu, giữ để code cũ đọc field này vẫn chạy
+  // đúng, và để chính tin nhắn NÀY tự phục hồi được dù người đọc code chỉ biết field cũ.
+  const imageIds = images.map((img) => img.imageId).filter(Boolean);
+  const userMsgObj = { role: 'user', text: query, hadImage: !!image, imageId: image ? image.imageId : null, imageIds };
   conv.messages.push(userMsgObj);
   if (conv.messages.filter((m) => m.role === 'user').length === 1) conv.title = autoTitleFromQuery(query || '[Ảnh đề bài]');
 
@@ -5046,7 +5126,7 @@ async function sendMessage() {
   // imageId gắn thêm vào chính aiMsgObj (không chỉ userMsgObj) — để fetchDetail()/renderStoredAiMessage()
   // sau F5 tra được ảnh cần khôi phục ngay từ message AI mà không phải dò ngược message user liền trước.
   const aiMsgObj = {
-    id: uid(), role: 'ai', query, approach: '', detail: null, contexts, crossChecked: false, imageId: image ? image.imageId : null,
+    id: uid(), role: 'ai', query, approach: '', detail: null, contexts, crossChecked: false, imageId: image ? image.imageId : null, imageIds,
     // PHẦN F/PHẦN N BỔ SUNG: lưu lại NGAY tại thời điểm retrieveContext() chạy — lượt "Giải chi
     // tiết" (stage=detail) tái dùng đúng `msgObj.contexts` đã lưu này (không gọi lại
     // retrieveContext()), nên phải giữ requirementLabels cùng lúc, không tính lại/đoán lại.
@@ -5076,13 +5156,25 @@ async function sendMessage() {
     explanationLanguage: settingsSnapshot.lang
   };
   const ctm = window.conversationTaskManager;
-  const taskHandle = ctm ? ctm.beginTask(conv.id, { langLock }) : null;
+  // PHẦN BG: gửi kèm query/title/stage để bảng theo dõi nền hiển thị đúng "đang giải bài nào, của
+  // cuộc trò chuyện nào" — dữ liệu HIỂN THỊ thuần tuý, không ảnh hưởng vòng đời task.
+  const taskHandle = ctm ? ctm.beginTask(conv.id, {
+    langLock, query: query || t('background.noQuery'), title: conv.title, stage: 'approach'
+  }) : null;
+  // Mục 29: correlation requestId <-> message, để kết quả về sau luôn UPDATE đúng message này,
+  // không bao giờ insert thêm 1 câu trả lời trùng.
+  if (taskHandle) aiMsgObj.requestId = taskHandle.task.requestId;
   const taskSignal = taskHandle ? taskHandle.signal : undefined;
   if (taskHandle) await taskHandle.whenReady; // PHẦN F: nếu vượt concurrency limit, chờ tới lượt (queue) trước khi thực sự gọi AI
   setChatStreaming(true, conv.id);
   try {
     const data = await streamViaProviderRouter('/api/chat', {
       query, deepThinking: state.deepThinking, crossCheck: state.crossCheck, stage: 'approach',
+      // PHẦN BG/21: requestId do CLIENT sinh -> server ghi kết quả vào job store theo đúng id này,
+      // nên sau khi đóng tab/reload, tab mới hỏi lại được GET /api/chat/jobs/:requestId thay vì
+      // bắt AI giải lại từ đầu (mất token lần 2).
+      clientRequestId: taskHandle ? taskHandle.task.requestId : undefined,
+      conversationId: conv.id,
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
       // PHẦN Y/AC: ảnh thứ 2 trở đi (nếu có) — server gộp lại đúng thứ tự với `image` ở trên
       // (validators.js: `images = image ? [image, ...body.images] : body.images`). KHÔNG lặp lại
@@ -5105,7 +5197,6 @@ async function sendMessage() {
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
       signal: taskSignal
     });
-    if (taskHandle) ctm.completeTask(taskHandle.task.requestId, data);
     const rawFull = data.text || preview.getText() || t('chat.noResponse');
     // Tách dòng "🌐 ..." (nếu AI có dùng web bổ sung — hiện giai đoạn Hướng giải chưa được cấp công
     // cụ web nên hiếm khi xảy ra, nhưng vẫn xử lý nhất quán với giai đoạn Giải chi tiết) ra khỏi nội
@@ -5126,6 +5217,11 @@ async function sendMessage() {
     aiMsgObj.approachVisualStatus = data.visualStatus || null;
     setMsgSubjectBadge(aiRow, aiMsgObj.subjectId, aiMsgObj.subjectConfidence, aiMsgObj.secondarySubjectId);
     touchConversation(conv);
+    // MỤC 19 — THỨ TỰ BẮT BUỘC: lưu result vào message + conversation (touchConversation ->
+    // saveConversations) TRƯỚC, rồi mới mark COMPLETED. completeTask() phát event `done`, và chính
+    // event đó mới kích hoạt toast/browser notification (backgroundTaskUI.js). Nếu đảo thứ tự,
+    // người dùng có thể bấm vào thông báo rồi mở ra KHÔNG thấy kết quả.
+    if (taskHandle) ctm.completeTask(taskHandle.task.requestId, data);
 
     contentEl.innerHTML = '';
     const approachWrap = document.createElement('div');
@@ -5145,8 +5241,8 @@ async function sendMessage() {
     contentEl.appendChild(btnWrap);
     const detailBtn = btnWrap.querySelector('.detail-btn');
 
-    pendingTurn = { query, image, approachRaw: raw, msgObj: aiMsgObj };
-    detailBtn.onclick = () => fetchDetail(detailBtn, aiRow, contentEl, aiMsgObj, image);
+    pendingTurn = { query, images, approachRaw: raw, msgObj: aiMsgObj };
+    detailBtn.onclick = () => fetchDetail(detailBtn, aiRow, contentEl, aiMsgObj, images);
   } catch (e) {
     if (taskHandle) ctm.failTask(taskHandle.task.requestId, e);
     // mục 4: người dùng chủ động bấm "Dừng" — không phải lỗi, hiển thị nhẹ nhàng, không tô đỏ.
@@ -5176,16 +5272,18 @@ async function sendMessage() {
   }
 }
 
-// Wrapper dùng riêng cho message đã lưu (mở lại sau F5): msg.image chưa có sẵn trong RAM, phải
-// khôi phục từ IndexedDB trước. Nếu msg không có imageId (không có ảnh hoặc dữ liệu cũ/legacy),
-// restoreMessageImage() trả về null và fetchDetail() chạy như bình thường (không ảnh).
+// Wrapper dùng riêng cho message đã lưu (mở lại sau F5): msg.images chưa có sẵn trong RAM, phải
+// khôi phục từ IndexedDB trước. Nếu msg không có imageIds/imageId (không có ảnh hoặc dữ liệu
+// cũ/legacy), fetchDetail() chạy như bình thường (không ảnh). PHẦN Y/AB: ưu tiên `imageIds[]`
+// (nhiều ảnh, tin nhắn mới), fallback `imageId` số ít cho tin nhắn cũ trước bản vá multi-image.
 async function handleDetailClickWithRestore(btn, aiRow, contentEl, msg) {
-  if (!msg.imageId) { fetchDetail(btn, aiRow, contentEl, msg, null); return; }
+  const ids = (msg.imageIds && msg.imageIds.length) ? msg.imageIds : (msg.imageId ? [msg.imageId] : []);
+  if (!ids.length) { fetchDetail(btn, aiRow, contentEl, msg, null); return; }
   btn.disabled = true;
   const originalHtml = btn.innerHTML;
   btn.innerHTML = `<span class="typing"><span></span><span></span><span></span></span><span>${escapeHtml(t('chat.restoringImage'))}</span>`;
-  const restoredImage = await restoreMessageImage(msg.imageId);
-  if (!restoredImage) {
+  const { images: restoredImages } = await restoreMessageImages(ids);
+  if (!restoredImages.length) {
     // Ảnh không còn trong IndexedDB (đã bị xoá/dọn dẹp) — báo rõ, KHÔNG crash, vẫn cho giải tiếp
     // chỉ bằng text đã có (approach/query) như hành vi trước đây, tránh chặn đứng người dùng.
     btn.innerHTML = originalHtml;
@@ -5195,10 +5293,14 @@ async function handleDetailClickWithRestore(btn, aiRow, contentEl, msg) {
     return;
   }
   btn.innerHTML = originalHtml;
-  fetchDetail(btn, aiRow, contentEl, msg, restoredImage);
+  fetchDetail(btn, aiRow, contentEl, msg, restoredImages);
 }
 
-async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
+async function fetchDetail(btn, aiRow, contentEl, msgObj, images) {
+  // PHẦN Y/AC: `images` giờ là MẢNG (hoặc null) — ảnh đầu vẫn dùng như trước cho mọi chỗ chỉ cần
+  // biết "có ảnh hay không" (nhãn trạng thái...); các ảnh còn lại (nếu có) chỉ ảnh hưởng payload gửi
+  // đi bên dưới, không đổi phần còn lại của hàm.
+  const image = images && images[0];
   btn.disabled = true;
   // FIX PHẦN G (response isolation): trước đây `conv` được lấy bằng currentConversation() SAU khi
   // await xong — nếu người dùng đã chuyển sang conversation khác trong lúc chờ, touchConversation()
@@ -5223,13 +5325,21 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
     answerLanguage: settingsSnapshot.lang, explanationLanguage: settingsSnapshot.lang
   };
   const ctm = window.conversationTaskManager;
-  const taskHandle = (ctm && ownerConv) ? ctm.beginTask(ownerConv.id, { langLock }) : null;
+  const taskHandle = (ctm && ownerConv) ? ctm.beginTask(ownerConv.id, {
+    langLock, query: msgObj.query || t('background.noQuery'), title: ownerConv.title, stage: 'detail'
+  }) : null;
+  if (taskHandle) msgObj.detailRequestId = taskHandle.task.requestId;
   if (taskHandle) await taskHandle.whenReady;
   if (ownerConv) setChatStreaming(true, ownerConv.id);
   try {
     const data = await streamViaProviderRouter('/api/chat', {
       query: msgObj.query, deepThinking, crossCheck, stage: 'detail', approachText: msgObj.approach,
+      clientRequestId: taskHandle ? taskHandle.task.requestId : undefined,
+      conversationId: ownerConv ? ownerConv.id : undefined,
       image: image ? { mediaType: image.mediaType, base64: image.base64 } : null,
+      // PHẦN Y/AC: mở rộng nốt lượt "Giải chi tiết" mang theo ĐỦ ảnh (không chỉ ảnh đầu như trước) —
+      // cùng hợp đồng với server đã định nghĩa ở vòng 1 (không lặp lại ảnh đầu trong `images[]`).
+      images: (images || []).slice(1).map((img) => ({ mediaType: img.mediaType, base64: img.base64 })),
       sourceImages: collectSourceImages(msgObj.query),
       rules: state.rules, contexts: msgObj.contexts, settings: settingsSnapshot,
       history: selectRelevantHistory(msgObj.query, state.history),
@@ -5243,7 +5353,6 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
       signal: taskHandle ? taskHandle.signal : undefined
     });
-    if (taskHandle) ctm.completeTask(taskHandle.task.requestId, data);
     const rawFull = data.text || preview.getText() || t('chat.noResponse');
     // Tách dòng "🌐 ..." (đánh dấu có dùng web bổ sung — chỉ có thể xảy ra ở chế độ "Đối chiếu đa
     // hướng", nơi lượt tổng hợp được cấp công cụ web search) ra khỏi nội dung chính, lưu riêng
@@ -5284,6 +5393,8 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, image) {
 
     // FIX PHẦN G: dùng ownerConv (chốt từ đầu hàm) thay vì currentConversation() đọc lại sau await.
     if (ownerConv) touchConversation(ownerConv);
+    // MỤC 19: lưu xong lời giải chi tiết rồi MỚI mark COMPLETED (event `done` -> toast/notification).
+    if (taskHandle) ctm.completeTask(taskHandle.task.requestId, data);
   } catch (e) {
     if (taskHandle) ctm.failTask(taskHandle.task.requestId, e);
     preview.wrap.remove();
@@ -6789,6 +6900,101 @@ async function scheduleRecommend(query) {
     markRecommendUpdated();
   }
 }
+
+/* =====================================================================================
+   PHẦN BG — CẦU NỐI giữa app và bảng tác vụ chạy nền (backgroundTaskUI.js).
+
+   Đây là 1 chiều "UI hỏi app", KHÔNG phải nơi điều khiển AI: module nền chỉ được phép HỎI
+   "đang xem conversation nào" và YÊU CẦU "mở conversation này". Mọi quyết định abort/huỷ vẫn nằm
+   ở nút Dừng (conversationTaskManager.abortActiveTask/abortTask) — mục 11/24/39 của yêu cầu:
+   conversation đang xem CHỈ được dùng để quyết định CÓ RENDER hay không, không bao giờ để quyết
+   định task sống hay chết.
+   ===================================================================================== */
+window.appTaskBridge = {
+  /** Người dùng có đang xem đúng conversation này không (dùng cho toast/seen/notification). */
+  isViewing(conversationId) {
+    const conv = currentConversation();
+    return !!conv && conv.id === conversationId;
+  },
+  /** Mở conversation (bấm toast/notification/nút "Xem" trong panel). */
+  openConversation(conversationId) {
+    if (!conversationId) return false;
+    const conv = state.conversations.find((c) => c.id === conversationId);
+    if (!conv) return false;
+    if (state.currentConvId === conversationId) {
+      // Đang ở đúng đây rồi — chỉ cần xoá badge "chưa xem" + cuộn xuống kết quả mới nhất.
+      if (window.conversationTaskManager) window.conversationTaskManager.markConversationSeen(conversationId);
+      renderHistoryList();
+      scrollThreadToBottom();
+      return true;
+    }
+    loadConversation(conversationId, false);
+    return true;
+  },
+  getConversationTitle(conversationId) {
+    const conv = state.conversations.find((c) => c.id === conversationId);
+    return conv ? (conv.title || t('chat.newChatTitle')) : '';
+  },
+  /** Gọi khi tab được hiển thị lại (mục 12): chỉ ĐỒNG BỘ UI, không gọi API, không abort. */
+  syncActiveConversation() {
+    syncSendButtonForActiveConversation();
+    renderHistoryList();
+  },
+  /**
+   * PHẦN BG/21 — HỎI LẠI SERVER kết quả của 1 task bị cắt giữa chừng (đóng tab/reload/mất mạng).
+   * Không giải lại: chỉ đọc job đã lưu. Nếu server đã có kết quả -> ghi vào ĐÚNG message mang
+   * requestId đó (update, không insert -> không duplicate, mục 29), lưu hội thoại, rồi cập nhật task.
+   * KHÔNG tìm thấy job (hoặc server chưa bật KV) -> trả lý do rõ ràng, không giả vờ là đã xong.
+   */
+  async recoverJob(requestId) {
+    if (!requestId) return { ok: false, reason: 'missing-request-id' };
+    let data = null;
+    let status = 0;
+    try {
+      const res = await fetch('/api/chat/jobs/' + encodeURIComponent(requestId), { headers: apiHeaders() });
+      status = res.status;
+      try { data = await res.json(); } catch (e) { data = null; }
+    } catch (e) {
+      return { ok: false, reason: 'network' };
+    }
+    if (status === 404 || !data || !data.found) {
+      return { ok: false, reason: 'not-found', durable: !!(data && data.durable) };
+    }
+    const job = data.job || {};
+    if (job.status === 'running') return { ok: false, reason: 'still-running' };
+
+    const result = job.result || {};
+    const text = result.text || '';
+    if (job.status === 'completed' && text) {
+      const conv = state.conversations.find((c) => c.id === job.conversationId)
+        || state.conversations.find((c) => (c.messages || []).some((m) => m.requestId === requestId || m.detailRequestId === requestId));
+      if (conv) {
+        const msg = (conv.messages || []).find((m) => m.requestId === requestId || m.detailRequestId === requestId);
+        if (msg) {
+          const { clean, webNote } = extractWebSourceNote(text);
+          if (msg.detailRequestId === requestId) {
+            if (!msg.detail) { msg.detail = clean; msg.detailWebNote = webNote; msg.detailCitationMap = result.citationMap || null; msg.detailPartial = !!result.partial; }
+          } else if (!msg.approach) {
+            msg.approach = clean;
+            msg.approachWebNote = webNote;
+            msg.approachCitationMap = result.citationMap || null;
+            msg.approachProvider = result.provider || null;
+          }
+          if (result.subjectId) msg.subjectId = result.subjectId;
+          touchConversation(conv);
+        }
+      }
+    }
+    const adopted = window.conversationTaskManager
+      && window.conversationTaskManager.adoptRecoveredResult(requestId, {
+        status: job.status, text, partial: result.partial, provider: result.provider,
+        model: result.model, error: job.error, completedAt: job.completedAt
+      });
+    if (state.currentConvId === job.conversationId) loadConversation(job.conversationId, true);
+    renderHistoryList();
+    return { ok: true, status: job.status, adopted: !!adopted, durable: !!job.durable };
+  }
+};
 
 loadAll();
 // Đánh dấu app.js đã chạy hết tới đây (không bị ReferenceError chết giữa chừng) — cho phép

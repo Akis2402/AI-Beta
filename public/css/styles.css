@@ -1516,6 +1516,15 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 }
 .visual-fidelity-note { font-style: italic; }
 
+/* MỤC XXXVIII/LXIII — nhãn provider ảnh THẬT (Gemini/OpenAI dự phòng/...). Cố ý nhỏ, nhạt, đặt
+   cuối card — thông tin minh bạch phụ trợ, không tranh chỗ với hình/lời giải. */
+.visual-provider-label {
+  margin: 2px 0 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  opacity: 0.6;
+}
+
 /* MỤC 16/17/21 — trạng thái LỖI ảnh: KHÔNG để khung trắng, luôn có thông báo + nút thử lại. */
 .visual-img-error {
   min-height: 120px;
@@ -1531,3 +1540,129 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 .visual-card-failed { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .visual-btn-retry { border-style: dashed; }
 
+
+/* =========================================================================
+   PHẦN BG — Bảng theo dõi tác vụ AI chạy nền + badge + toast
+   Dùng LẠI biến/màu/khoảng cách của design system hiện có (var(--paper-*),
+   var(--rule), var(--r-*), var(--shadow-*)) — không tạo phong cách mới.
+   ========================================================================= */
+
+/* Nhãn chỉ dành cho trình đọc màn hình (mục 34: trạng thái không chỉ dựa vào màu) */
+.sr-only{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0;
+}
+
+/* ---------- Nút + badge trên topbar ---------- */
+.bgtask-btn{position:relative;}
+.bgtask-ic{font-size:15px;line-height:1;}
+.bgtask-badge{
+  position:absolute;top:-3px;right:-3px;min-width:16px;height:16px;padding:0 4px;
+  border-radius:999px;background:var(--primary);color:#fff;font-size:10px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;font-family:var(--font-body);
+}
+.bgtask-btn.has-unseen .bgtask-badge{background:var(--success);}
+.bgtask-btn.has-running .bgtask-ic{animation:bgtask-pulse 1.6s ease-in-out infinite;}
+@keyframes bgtask-pulse{0%,100%{opacity:1;}50%{opacity:.45;}}
+
+/* ---------- Popup / bottom sheet ---------- */
+#bgTaskPanel{
+  position:fixed;top:76px;right:16px;width:330px;max-height:calc(100vh - 96px);
+  background:var(--paper-3);border:1px solid var(--rule);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
+  display:flex;flex-direction:column;overflow:hidden;z-index:40;
+  transform:translateX(calc(100% + 32px));opacity:0;pointer-events:none;
+  transition:transform .22s var(--ease),opacity .22s var(--ease);
+}
+#bgTaskPanel.open{transform:translateX(0);opacity:1;pointer-events:auto;}
+.bgtask-note{padding:8px 15px 0;font-size:11px;color:var(--muted);line-height:1.5;flex-shrink:0;}
+.bgtask-list{list-style:none;margin:0;padding:11px 13px 4px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;}
+.bgtask-item{
+  border:1px solid var(--rule);border-left:3px solid var(--muted);border-radius:var(--r-md);
+  background:var(--paper-2);padding:10px 11px;display:flex;flex-direction:column;gap:5px;
+}
+.bgtask-item.is-running,.bgtask-item.is-recovering{border-left-color:var(--primary);}
+.bgtask-item.is-queued{border-left-color:var(--amber);}
+.bgtask-item.is-done{border-left-color:var(--success);}
+.bgtask-item.is-failed{border-left-color:var(--danger);}
+.bgtask-item.is-stopped{border-left-color:var(--muted);}
+.bgtask-item.is-unseen{box-shadow:0 0 0 1px var(--success-tint) inset;}
+.bgtask-row-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.bgtask-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0;}
+.bgtask-item.is-running .bgtask-dot,.bgtask-item.is-recovering .bgtask-dot{background:var(--primary);animation:bgtask-pulse 1.2s ease-in-out infinite;}
+.bgtask-item.is-queued .bgtask-dot{background:var(--amber);}
+.bgtask-item.is-done .bgtask-dot{background:var(--success);}
+.bgtask-item.is-failed .bgtask-dot{background:var(--danger);}
+.bgtask-conv{font-size:12.5px;font-weight:600;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.bgtask-stage{font-size:10px;color:var(--muted);border:1px solid var(--rule);border-radius:var(--r-sm);padding:1px 5px;}
+.bgtask-status{font-size:10.5px;font-weight:600;color:var(--muted);font-family:var(--font-mono);}
+.bgtask-item.is-done .bgtask-status{color:var(--success);}
+.bgtask-item.is-failed .bgtask-status{color:var(--danger);}
+.bgtask-query{font-size:12px;color:var(--text);line-height:1.5;}
+.bgtask-meta{display:flex;gap:9px;flex-wrap:wrap;font-size:10.5px;color:var(--muted);font-family:var(--font-mono);}
+.bgtask-progress{font-size:11px;color:var(--primary);line-height:1.45;}
+.bgtask-bgnote{font-size:10.5px;color:var(--muted);font-style:italic;}
+.bgtask-error{font-size:11px;color:var(--danger);line-height:1.45;word-break:break-word;}
+.bgtask-actions{display:flex;gap:6px;margin-top:2px;flex-wrap:wrap;}
+.bgtask-act{
+  background:var(--paper-3);border:1px solid var(--rule);border-radius:var(--r-sm);
+  padding:5px 10px;font-size:11.5px;font-weight:600;color:var(--text);cursor:pointer;font-family:var(--font-body);
+}
+.bgtask-act:hover{border-color:var(--primary);color:var(--primary);}
+.bgtask-act:focus-visible{outline:2px solid var(--primary);outline-offset:2px;}
+.bgtask-act--stop:hover{border-color:var(--danger);color:var(--danger);}
+.bgtask-act--ghost{color:var(--muted);}
+.bgtask-notify{
+  display:flex;align-items:center;gap:8px;padding:10px 15px;border-top:1px solid var(--rule);
+  font-size:12px;color:var(--text);cursor:pointer;flex-shrink:0;min-height:var(--tap);
+}
+.bgtask-notify input{width:15px;height:15px;cursor:pointer;}
+.bgtask-notify-hint{padding:0 15px 10px;font-size:10.5px;color:var(--muted);line-height:1.45;}
+
+@media (max-width:760px){
+  #bgTaskPanel{top:auto;bottom:0;left:0;right:0;width:auto;max-height:68vh;
+    border-radius:var(--r-lg) var(--r-lg) 0 0;transform:translateY(calc(100% + 20px));}
+  #bgTaskPanel.open{transform:translateY(0);}
+  .bgtask-act{min-height:36px;}
+}
+
+/* ---------- Toast trong app ---------- */
+.toast-host{
+  position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:60;
+  display:flex;flex-direction:column;gap:8px;pointer-events:none;width:min(92vw,400px);
+}
+.app-toast{
+  pointer-events:auto;display:flex;align-items:center;gap:10px;
+  background:var(--paper-3);border:1px solid var(--rule);border-left:3px solid var(--success);
+  border-radius:var(--r-md);box-shadow:var(--shadow-lg);padding:10px 12px;
+  animation:toast-in .24s var(--ease);
+}
+.app-toast--error{border-left-color:var(--danger);}
+.app-toast.leaving{opacity:0;transform:translateY(8px);transition:opacity .18s,transform .18s;}
+.app-toast-main{flex:1;min-width:0;}
+.app-toast-title{font-size:12.5px;font-weight:700;color:var(--text);}
+.app-toast-sub{font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.app-toast-act{
+  background:var(--primary);color:#fff;border:0;border-radius:var(--r-sm);padding:6px 11px;
+  font-size:11.5px;font-weight:600;cursor:pointer;font-family:var(--font-body);flex-shrink:0;
+}
+.app-toast-close{background:transparent;border:0;color:var(--muted);font-size:12px;cursor:pointer;flex-shrink:0;}
+@keyframes toast-in{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
+
+/* ---------- Badge "có câu trả lời mới" trong Lịch sử ---------- */
+.hist-unseen-badge{
+  display:inline-flex;align-items:center;gap:4px;margin-top:3px;
+  font-size:10.5px;font-weight:600;color:var(--success);
+}
+.hist-unseen-badge::before{content:"●";font-size:8px;}
+
+@media (prefers-reduced-motion:reduce){
+  #bgTaskPanel,.app-toast{transition:none;animation:none;}
+  .bgtask-btn.has-running .bgtask-ic,.bgtask-item .bgtask-dot{animation:none;}
+}
+
+/* Kéo–thả bảng tác vụ nền (chỉ desktop — mobile là bottom sheet, xem media query phía trên) */
+#bgTaskPanel .rec-head{cursor:grab;user-select:none;touch-action:none;}
+#bgTaskPanel.dragging{transition:none;box-shadow:var(--shadow-lg);}
+#bgTaskPanel.dragging .rec-head{cursor:grabbing;}
+.bgtask-act--recover:hover{border-color:var(--amber);color:var(--amber);}
+@media (max-width:760px){ #bgTaskPanel .rec-head{cursor:default;} }
