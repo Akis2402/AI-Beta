@@ -115,7 +115,18 @@ async function test(name, fn) {
     assert.ok(!/await fetch\(/.test(src), 'không được còn fetch() trần trong route proxy ảnh');
   });
 
+  // BUG-007: CHỈ assertion này cần `express` thật (nó require server/routes/visual.js). 36 assertion
+  // còn lại của file KHÔNG cần, nên guard cả file bằng _depGuard sẽ mất trắng 36 phép kiểm tra thật.
+  // Thay vào đó: thiếu express -> in ĐÚNG dấu hiệu SKIPPED mà test/run-all.js nhận diện, để file
+  // được đếm là SKIPPED (CHƯA CHẠY) chứ không phải FAILED-do-môi-trường và cũng KHÔNG phải PASS.
+  let hasExpress = true;
+  try { require.resolve('express'); } catch (e) { hasExpress = false; }
+  if (!hasExpress) {
+    console.log('  SKIPPED — thiếu dependency: express (chỉ ảnh hưởng phép kiểm tra whitelist host bên dưới)');
+    console.log('  Chạy `npm install` rồi chạy lại — SKIPPED KHÔNG được tính là PASS.');
+  }
   await test('whitelist host vẫn bắt buộc, và không đọc từ env (env đổi = mở toang SSRF)', () => {
+    if (!hasExpress) return; // đã báo SKIPPED ở trên; không giả vờ pass, harness đánh dấu cả file là SKIPPED
     const route = require('../server/routes/visual.js');
     assert.strictEqual(route.parseAllowedUrl('https://evil.com/a.png'), null);
     assert.strictEqual(route.parseAllowedUrl('http://cdn.openai.com/a.png'), null, 'chỉ https');

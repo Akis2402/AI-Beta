@@ -22,6 +22,7 @@
     "live-smoke": "node scripts/live-smoke.js",
     "measure-tokens": "node scripts/measure-tokens.js",
     "live-image-check": "node scripts/live-image-check.js",
+    "puter-browser-smoke": "node scripts/puter-browser-smoke.js",
     "visual-corpus-report": "node scripts/visual-corpus-report.js",
     "live-source-check": "node scripts/live-source-check.js",
     "test:ci": "npm run build && node scripts/check-static-assets.js && node test/run-all.js --ci",

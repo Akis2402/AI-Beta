@@ -206,6 +206,35 @@ function parseSourceImages(body) {
 // PHẦN F/N: tập giá trị hợp lệ cho provenance + vòng đời nguồn (khớp public/js/app.js).
 const ALLOWED_EXTRACTION_METHODS = ['text', 'vision', 'none', 'unknown'];
 const ALLOWED_EXTRACTION_STATUSES = ['ok', 'failed', 'pending', 'placeholder'];
+
+// ---------- BUG-001 (V6): locator theo LOẠI nguồn ----------
+// `kind` quyết định promptBuilder in "[YouTube] <url>, mốc mm:ss" hay "[Web] <url>, đoạn <heading>".
+// Chỉ 2 giá trị này được nhận; mọi giá trị khác -> null và promptBuilder tự suy ra từ sourceId.
+const ALLOWED_CONTEXT_KINDS = ['youtube', 'web'];
+const MAX_SECTION_ANCHOR = 200;
+// Mốc thời gian dài nhất còn hợp lý cho 1 nguồn audio/video (24 giờ). Chặn số vô lý/NaN/Infinity để
+// không in ra locator kiểu "mốc 99999999:59" — locator sai là một dạng bịa nguồn (§22).
+const MAX_SOURCE_SECONDS = 24 * 60 * 60;
+
+/** @returns {string|null} URL http/https đã chuẩn hoá, null nếu không hợp lệ (KHÔNG "sửa" thành URL khác). */
+function httpUrlOrNull(u) {
+  if (!u) return null;
+  try {
+    const parsed = new URL(String(u));
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return clip(parsed.href, 2000);
+  } catch (e) {
+    return null;
+  }
+}
+
+/** @returns {number|null} số giây hữu hạn trong [0, 24h], null nếu không hợp lệ. */
+function nonNegativeSecondsOrNull(v) {
+  if (v == null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > MAX_SOURCE_SECONDS) return null;
+  return Math.floor(n);
+}
 const ALLOWED_SOURCE_STATUSES = ['UPLOADING', 'PARSING', 'RASTERIZING', 'EXTRACTING', 'VERIFYING', 'READY', 'INCOMPLETE', 'ERROR'];
 const ALLOWED_AVAILABILITY_STATUSES = ['UNAVAILABLE', 'PARTIAL', 'AVAILABLE'];
 const ALLOWED_PROCESSING_STATUS_AXIS = ['IDLE', 'PROCESSING', 'DONE', 'ERROR'];
@@ -251,6 +280,10 @@ function validateChatBody(body) {
   // Giới hạn 64 ký tự + bảng chữ cái an toàn: visualId server sinh có dạng `vz_<base36>_<seq>`.
   const rawVisualId = String((body.visualId == null ? '' : body.visualId)).trim();
   const visualId = /^[A-Za-z0-9_-]{1,64}$/.test(rawVisualId) ? rawVisualId : '';
+  const imageIds = Array.isArray(body.imageIds)
+    ? body.imageIds.slice(0, MAX_USER_IMAGES).map((id) => String(id || '').trim())
+      .filter((id) => /^[A-Za-z0-9_-]{1,128}$/.test(id))
+    : [];
 
   let image = null;
   if (body.image) {
@@ -341,7 +374,20 @@ function validateChatBody(body) {
           // thêm ở đây (vượt SECURITY_MAX_CONTEXT_LEN) — downstream (sourceCoverage.js) PHẢI coi
           // trường hợp này là "còn khả năng thiếu", KHÔNG được kết luận "source không có X" chỉ vì X
           // nằm ngoài đúng phần excerpt hiện có.
-          truncated: rawText.length > SECURITY_MAX_CONTEXT_LEN
+          truncated: rawText.length > SECURITY_MAX_CONTEXT_LEN,
+          // BUG-001 (V6 — locator theo LOẠI nguồn). Trước bản vá này allow-list dưới đây KHÔNG có 5
+          // trường sau, nên chúng bị vứt bỏ tại cổng vào và toàn bộ nhánh youtube/web của
+          // promptBuilder.formatContextLine() là dead code: mọi trích dẫn Web/YouTube mất mốc thời
+          // gian + heading. Vẫn giữ nguyên tinh thần allow-list (chỉ nhận đúng 5 trường, validate
+          // từng trường) — KHÔNG spread `...c`.
+          kind: ALLOWED_CONTEXT_KINDS.includes(c && c.kind) ? c.kind : null,
+          // URL nguồn đi vào prompt VÀ quay lại DOM ở client -> chỉ nhận http/https. Không bao giờ
+          // để javascript:/data:/file: lọt qua (§12 URL injection), và không "sửa" URL sai thành một
+          // URL khác — sai thì bỏ trống, vì locator bịa còn tệ hơn locator trống (§22).
+          sourceUrl: httpUrlOrNull(c && c.sourceUrl),
+          timeStart: nonNegativeSecondsOrNull(c && c.timeStart),
+          timeEnd: nonNegativeSecondsOrNull(c && c.timeEnd),
+          sectionAnchor: (c && c.sectionAnchor) ? clip(String(c.sectionAnchor), MAX_SECTION_ANCHOR) : null
         };
       }).filter((c) => c.text)
     : [];
@@ -418,7 +464,7 @@ function validateChatBody(body) {
       })).filter((h) => h.content)
     : [];
 
-  const result = { query, deepThinking, crossCheck, image, images, imagesRejected, sourceImages, sourceImagesRejected, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText, visualId };
+  const result = { query, deepThinking, crossCheck, image, images, imageIds, imagesRejected, sourceImages, sourceImagesRejected, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText, visualId };
   // PHẦN A7: server dùng ĐÚNG chính sách mà client đã dùng để tự kiểm trước khi gửi. Nếu tới đây vẫn
   // vượt ngân sách (client cũ chưa cập nhật, hoặc gọi API trực tiếp) -> lỗi CÓ CẤU TRÚC, KHÔNG âm
   // thầm cắt bớt dữ liệu rồi trả lời như thể đã đọc đủ.

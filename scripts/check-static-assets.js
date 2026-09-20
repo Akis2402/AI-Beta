@@ -22,6 +22,12 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+/** Cùng thuật toán với scripts/build.js (sha256, 10 hex đầu) — nếu lệch thì phép kiểm tra vô nghĩa. */
+function sha10(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex').slice(0, 10);
+}
 
 const publicDir = path.join(__dirname, '..', 'public');
 const indexHtmlPath = path.join(publicDir, 'index.html');
@@ -60,6 +66,33 @@ for (const [logicalName, urlPath] of Object.entries(manifest.assets)) {
   const tagCount = html.split(urlPath).length - 1;
   check(`${logicalName}: index.html tham chiếu ĐÚNG 1 lần tới ${urlPath}`, tagCount === 1,
     `tìm thấy ${tagCount} lần trong index.html`);
+
+  // ---------- BUG-002: HASH PHẢI KHỚP NỘI DUNG (§14) ----------
+  // Lỗ hổng của bản trước: script này chỉ kiểm tra file đã-hash CÓ TỒN TẠI, chưa bao giờ kiểm tra
+  // nội dung của nó có đúng bằng hash in trong TÊN nó hay không. Repo thực tế đã trôi vào đúng
+  // trạng thái đó: public/js/app.306420092b.js có nội dung băm ra a53976d3f6 (lệch ~2KB so với
+  // public/js/app.js) — mà check-static-assets vẫn báo 99 PASS. Vì asset đã-hash được phục vụ với
+  // `Cache-Control: immutable, max-age=1 năm`, một lần lệch là trình duyệt ghim BẢN SAI gần như
+  // vĩnh viễn dưới đúng URL đó. Hai assertion dưới đây đóng cả hai chiều:
+  //   (a) nội dung file đã-hash băm ra đúng hash trong tên nó;
+  //   (b) nó giống HỆT file nguồn chưa hash (không có bản build trôi khỏi source of truth).
+  if (fs.existsSync(diskPath)) {
+    const declaredHash = (urlPath.match(/\.([0-9a-f]{10})\.(?:js|css)$/) || [])[1] || '';
+    const hashedBuf = fs.readFileSync(diskPath);
+    const actualHash = sha10(hashedBuf);
+    check(`${logicalName}: hash trong TÊN file khớp NỘI DUNG file (${declaredHash})`,
+      declaredHash === actualHash,
+      `tên khai hash=${declaredHash} nhưng nội dung băm ra ${actualHash} — asset đã-hash bị trôi, ` +
+      'và nó được phục vụ immutable 1 năm. Chạy lại `npm run build`.');
+
+    const sourcePath = path.join(path.dirname(diskPath), logicalName);
+    if (fs.existsSync(sourcePath)) {
+      const sourceHash = sha10(fs.readFileSync(sourcePath));
+      check(`${logicalName}: bản đã-hash giống HỆT file nguồn (không trôi khỏi source of truth)`,
+        sourceHash === actualHash,
+        `nguồn băm ra ${sourceHash}, bản đã-hash băm ra ${actualHash}`);
+    }
+  }
 }
 
 // ---------- 3: không có logical script nào bị nạp trùng dưới URL KHÁC (vd tên cũ còn sót) ----------

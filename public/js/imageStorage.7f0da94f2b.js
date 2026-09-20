@@ -88,6 +88,14 @@ function createChatImageStore(opts) {
       id: id,
       conversationId: meta.conversationId || null,
       messageId: meta.messageId || null,
+      kind: meta.kind || 'user_input',
+      visualId: meta.visualId || null,
+      provider: meta.provider || null,
+      puterProvider: meta.puterProvider || null,
+      model: meta.model || null,
+      fingerprint: meta.fingerprint || null,
+      width: Number(meta.width) || null,
+      height: Number(meta.height) || null,
       mediaType: meta.mediaType || fileOrBlob.type || 'image/png',
       blob: fileOrBlob,
       size: fileOrBlob.size || 0,
@@ -110,7 +118,13 @@ function createChatImageStore(opts) {
           url = URL.createObjectURL(record.blob); // Object URL mới cho phiên hiện tại — KHÔNG lưu url này xuống bất kỳ storage nào (mục 6)
         }
       } catch (e) { url = null; }
-      return { id: record.id, mediaType: record.mediaType, blob: record.blob, url: url };
+      return {
+        id: record.id, mediaType: record.mediaType, blob: record.blob, url: url,
+        kind: record.kind || 'user_input', visualId: record.visualId || null,
+        provider: record.provider || null, puterProvider: record.puterProvider || null,
+        model: record.model || null, fingerprint: record.fingerprint || null,
+        width: record.width || null, height: record.height || null
+      };
     }).catch(function () { return null; });
   }
 
@@ -131,6 +145,11 @@ function createChatImageStore(opts) {
     get: get,
     delete: del,
     has: has,
+    revoke: function (url) {
+      if (url && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+        try { URL.revokeObjectURL(url); } catch (_) {}
+      }
+    },
     _isIndexedDbUsable: function () { return indexedDbUsable; }
   };
 }

@@ -1,5 +1,12 @@
 'use strict';
 
+// BUG-007: file test này require gián tiếp `express`/`dotenv` THẬT. Khi chưa `npm install` (máy mới
+// clone, sandbox không có mạng), trước đây nó ném MODULE_NOT_FOUND và harness đếm là FAILED — một
+// "FAIL" hoàn toàn do môi trường, che mất kết quả thật và làm người đọc tưởng code hỏng. Dùng đúng
+// cơ chế đã có sẵn của repo (test/_depGuard.js): in SKIPPED trung thực + tên gói còn thiếu.
+// KHÔNG assertion nào bị nới lỏng hay bỏ đi: khi dependency có mặt, file chạy y như cũ.
+require('./_depGuard').requireDeps(['express-rate-limit'], 'rate-limit-scope.test.js');
+
 // PHẦN J + I + K — REGRESSION: hệ thống phải NÓI THẬT trạng thái nào là toàn cục, trạng thái nào
 // chỉ sống trong 1 instance. Bug lớp này không làm sập gì cả — nó chỉ khiến người vận hành tin vào
 // một giới hạn không tồn tại.

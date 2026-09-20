@@ -223,6 +223,55 @@ async function apiPost(path, body, { signal } = {}) {
   return data;
 }
 
+function dataUrlToBlob(dataUrl) {
+  const m = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(String(dataUrl || ''));
+  if (!m) return null;
+  const bytes = m[2] ? atob(m[3]) : decodeURIComponent(m[3]);
+  const out = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) out[i] = bytes.charCodeAt(i);
+  return new Blob([out], { type: m[1] || 'image/png' });
+}
+
+async function runClientVisualJob(job, signal) {
+  if (!job || job.renderer !== 'puter_image') return null;
+  if (signal && signal.aborted) return null;
+  if (!window.puterVisualManager) throw new Error('Puter visual manager unavailable.');
+  return window.puterVisualManager.enqueue(job);
+}
+
+function bindClientVisualCallbacks({ message, container, conversation }) {
+  const render = () => {
+    if (!container || !message) return;
+    renderVisuals(container, message.approachVisuals || message.detailVisuals || [], message.approachVisualStatus || message.detailVisualStatus);
+    if (conversation) touchConversation(conversation);
+  };
+  return {
+    onVisualPending: () => {
+      message.approachVisualStatus = 'pending';
+      render();
+    },
+    onVisualRequest: (job) => {
+      message.approachVisualStatus = 'pending';
+      message.approachVisuals = [{ ...job, provider: 'puter', renderPending: true }];
+      render();
+    },
+    onVisualReady: (visual) => {
+      const list = message.detail !== undefined && message.detail !== null ? 'detailVisuals' : 'approachVisuals';
+      const status = list === 'detailVisuals' ? 'detailVisualStatus' : 'approachVisualStatus';
+      message[list] = [visual];
+      message[status] = 'ready';
+      render();
+    },
+    onVisualError: (failure) => {
+      const list = message.detail !== undefined && message.detail !== null ? 'detailVisuals' : 'approachVisuals';
+      const status = list === 'detailVisuals' ? 'detailVisualStatus' : 'approachVisualStatus';
+      message[list] = [{ ...(message[list] && message[list][0] || failure), ...failure, renderFailed: true }];
+      message[status] = 'failed';
+      render();
+    }
+  };
+}
+
 /**
  * Gửi request streaming (SSE) tới backend — dùng cho hiệu ứng "gõ chữ" thời gian thực thay vì đợi
  * AI trả lời xong toàn bộ rồi mới hiển thị. callbacks:
@@ -236,7 +285,7 @@ async function apiPost(path, body, { signal } = {}) {
  * Nếu trình duyệt không hỗ trợ ReadableStream (rất hiếm), hoặc server trả lỗi trước khi kịp mở
  * stream, tự động rơi về apiPost() thường (không streaming) để vẫn hoạt động được.
  */
-async function apiPostStream(path, body, { onDelta, onStatus, signal } = {}) {
+async function apiPostStream(path, body, { onDelta, onStatus, onVisualRequest, onVisualPending, onVisualReady, onVisualError, signal } = {}) {
   if (!window.ReadableStream || !window.TextDecoder) {
     const data = await apiPost(path, body, { signal });
     if (data && data.text && typeof onDelta === 'function') onDelta(data.text);
@@ -302,14 +351,27 @@ async function apiPostStream(path, body, { onDelta, onStatus, signal } = {}) {
       // Server gửi "done" NGAY khi text xong (kèm visualPending), rồi mới gửi visual:ready/error.
       // Vì vậy vòng đọc vẫn tiếp tục sau "done" và ta gộp hình vào doneData trước khi trả về.
       // Ảnh lỗi TUYỆT ĐỐI không được biến câu trả lời thành lỗi (PHẦN 20/32).
-      else if (currentEvent === 'visual:pending') { if (typeof onStatus === 'function') onStatus(t('chat.visualPending'), lastKnownState); }
-      else if (currentEvent === 'visual:ready') {
-        if (!doneData) doneData = {};
-        if (!Array.isArray(doneData.visuals)) doneData.visuals = [];
-        doneData.visuals.push(payload);
-        doneData.visualStatus = 'ready';
+      else if (currentEvent === 'visual:pending') {
+        if (typeof onVisualPending === 'function') onVisualPending(payload);
+        if (typeof onStatus === 'function') onStatus(t('chat.visualPending'), lastKnownState);
       }
-      else if (currentEvent === 'visual:error') { if (doneData) { doneData.visualStatus = 'failed'; doneData.visualError = payload.reason || null; } }
+      else if (currentEvent === 'visual:request') {
+        if (typeof onVisualRequest === 'function') onVisualRequest(payload);
+        runClientVisualJob(payload, signal).then(
+          (result) => { if (typeof onVisualReady === 'function') onVisualReady(result); },
+          (error) => { if (typeof onVisualError === 'function') onVisualError({
+            ...payload, errorCode: error && error.code || 'upstream_failed',
+            authRequired: !!(error && (error.code === 'PUTER_AUTH_REQUIRED' || error.code === 'auth_required'))
+          }); }
+        );
+        if (typeof onStatus === 'function') onStatus(t('chat.visualGenerating'), 'GENERATING');
+      }
+      else if (currentEvent === 'visual:ready') {
+        if (typeof onVisualReady === 'function') onVisualReady(payload);
+      }
+      else if (currentEvent === 'visual:error') {
+        if (typeof onVisualError === 'function') onVisualError(payload);
+      }
       // PHẦN AF/AG: sự kiện error qua SSE cũng mang `code` ổn định — ưu tiên dịch theo code, chỉ
       // dùng payload.message làm phương án cuối (code lạ/backend cũ chưa gửi code).
       else if (currentEvent === 'error') {
@@ -1060,7 +1122,7 @@ function renderSources() {
     const previewText = firstChunk
       ? (firstChunk.garbled
         ? '⚠️ Tài liệu chứa nhiều công thức/ký hiệu đặc biệt — bản xem trước có thể không hiển thị đầy đủ, nhưng nội dung vẫn được dùng khi trả lời.'
-        : firstChunk.text.slice(0, 320).replace(/</g, '&lt;') + '…')
+        : escapeHtml(firstChunk.text.slice(0, 320)) + '…')
       : '';
     li.innerHTML = `
       <div class="row">
@@ -2617,10 +2679,18 @@ function collectAvailableEvidence(query) {
       const norm = normalizeForMatch(ch.text);
       let score = 0;
       qWords.forEach((w) => { if (norm.includes(w)) score += 1; });
-      // PHẦN BV (source provenance): locator (mốc thời gian YouTube) gắn kèm trong text để citation
-      // truy nguyên được TỚI ĐÚNG ĐOẠN, không chỉ tới cả video — timestamp không có ô riêng trong
-      // schema context (page/startPage/endPage là ngữ nghĩa PDF), nên đi kèm ngay đầu đoạn trích.
-      const text = ch.locator ? `[${ch.locator}] ${ch.text}` : ch.text;
+      // PHẦN BV (V6 — source provenance): locator đầy đủ cho CẢ YouTube (mốc mm:ss) LẪN Web
+      // (heading của section), vì citation phải truy nguyên tới ĐÚNG ĐOẠN, không chỉ tới cả
+      // video/trang. Locator vừa nhét vào đầu `text` (để model thấy ngay khi đọc evidence), vừa
+      // truyền RIÊNG qua kind/sourceUrl/timeStart/timeEnd/sectionAnchor để:
+      //   - server (promptBuilder.formatContextLine) in đúng dòng "(Nguồn: [YouTube] <url>, mốc mm:ss)";
+      //   - client (renderCitations) dựng được link nhảy tới đúng mốc/đoạn.
+      // BUG-001: trước bản vá này 5 trường dưới đây KHÔNG được gửi, nên toàn bộ nhánh youtube/web
+      // trong formatContextLine() là dead code và mọi trích dẫn URL đều mất locator.
+      let prefix = '';
+      if (ch.locator) prefix = `[${ch.locator}] `;
+      else if (ch.sectionAnchor) prefix = `[Đoạn: "${ch.sectionAnchor}"] `;
+      const text = prefix ? `${prefix}${ch.text}` : ch.text;
       out.push({
         doc: s.title || s.url, id: ch.chunkIndex || (i + 1), text, garbled: false, score,
         page: null, startPage: null, endPage: null,
@@ -2629,6 +2699,14 @@ function collectAvailableEvidence(query) {
         evidenceId: `${urlSourceId(s)}:c${ch.chunkIndex || (i + 1)}`,
         extractionMethod: 'text',
         extractionStatus: 'ok',
+        // V6 — metadata locator theo LOẠI nguồn. `sourceUrl` đi qua sanitizeUrl() ngay tại cổng ra
+        // để không bao giờ có javascript:/data: lọt vào payload rồi quay lại DOM ở lượt render sau
+        // (defense-in-depth: server cũng validate lại trong validators.js).
+        kind: s.sourceType === 'YOUTUBE' ? 'youtube' : 'web',
+        sourceUrl: httpUrlOrNull(s.url),
+        timeStart: (ch.startSeconds != null) ? ch.startSeconds : null,
+        timeEnd: (ch.endSeconds != null) ? ch.endSeconds : null,
+        sectionAnchor: ch.sectionAnchor || null,
         _norm: norm
       });
     });
@@ -2851,11 +2929,27 @@ function highlightSnippet(text, query) {
   const qWords = (query.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter((w) => w.length > 2);
   const clean = cleanExtractedText(text).replace(/\s+/g, ' ').trim();
   let snippet = clean.length > 260 ? clean.slice(0, 260) + '…' : clean;
-  let out = snippet.replace(/</g, '&lt;');
-  qWords.slice(0, 6).forEach((w) => {
-    const re = new RegExp('(' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig');
-    out = out.replace(re, '<span class="hl">$1</span>');
-  });
+  // BUG-006: bản trước escape THIẾU '&' (chỉ '<'), nên mọi chuỗi "&amp;"/"&lt;" có thật trong tài
+  // liệu nguồn bị trình duyệt giải mã lại thành '&'/'<' -> nội dung TRÍCH DẪN bị hiển thị SAI so với
+  // tài liệu gốc.
+  // Đồng thời KHÔNG được escape rồi mới highlight: sau khi escape, văn bản chứa các entity
+  // ("&amp;", "&quot;"...) và một từ khoá như "amp"/"quot" sẽ khớp vào GIỮA entity, cắt nó thành
+  // "&<span class=hl>amp</span>;" -> ký tự gốc bị phá.
+  // Cách đúng: tìm vị trí khớp trên văn bản THÔ, rồi escape từng mảnh và chỉ bọc <span> quanh mảnh
+  // đã escape. Không bao giờ có HTML thô lọt ra ngoài.
+  const terms = qWords.slice(0, 6).filter(Boolean);
+  if (!terms.length) return escapeHtml(snippet);
+  const re = new RegExp('(' + terms.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')', 'ig');
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(snippet)) !== null) {
+    if (m.index === re.lastIndex) { re.lastIndex += 1; continue; } // chống vòng lặp vô hạn với khớp rỗng
+    out += escapeHtml(snippet.slice(last, m.index));
+    out += `<span class="hl">${escapeHtml(m[0])}</span>`;
+    last = m.index + m[0].length;
+  }
+  out += escapeHtml(snippet.slice(last));
   return out;
 }
 
@@ -3352,11 +3446,36 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 function currentConversation() {
   return state.conversations.find((c) => c.id === state.currentConvId) || null;
 }
+function serializeVisualForConversation(v) {
+  if (!v || typeof v !== 'object') return v;
+  const out = { ...v };
+  delete out.url;
+  delete out.blob;
+  delete out.dataUrl;
+  delete out.base64;
+  delete out.inputImages;
+  delete out.auth;
+  delete out.tokens;
+  return out;
+}
+function serializeMessageForConversation(message) {
+  if (!message || typeof message !== 'object') return message;
+  const out = { ...message };
+  ['approachVisuals', 'detailVisuals'].forEach((key) => {
+    if (Array.isArray(out[key])) out[key] = out[key].map(serializeVisualForConversation);
+  });
+  return out;
+}
+function serializeConversationForStorage(conv) {
+  return { ...conv, messages: (conv.messages || []).map(serializeMessageForConversation) };
+}
 function saveConversations() {
   // FIX: không ghi hội thoại rỗng (chưa có tin nhắn nào) xuống localStorage — hội thoại nháp mới
   // tạo chỉ tồn tại trong bộ nhớ tới khi người dùng thật sự gửi câu hỏi đầu tiên. Ngăn "Buổi học
   // mới" rỗng tích tụ trong Lịch sử mỗi lần mở app / bấm nút mà không gõ gì.
-  lsSet(LS_KEYS.conversations, state.conversations.filter((c) => c.messages && c.messages.length > 0));
+  lsSet(LS_KEYS.conversations, state.conversations
+    .filter((c) => c.messages && c.messages.length > 0)
+    .map(serializeConversationForStorage));
   lsSet(LS_KEYS.currentConv, state.currentConvId);
   updateChatMeta();
 }
@@ -3503,6 +3622,9 @@ function deleteConversation(id) {
     (removed.messages || []).forEach((m) => {
       if (m.imageId) imageIds.add(m.imageId);
       if (Array.isArray(m.imageIds)) m.imageIds.forEach((id) => { if (id) imageIds.add(id); });
+      [m.approachVisuals, m.detailVisuals].forEach((visuals) => (visuals || []).forEach((v) => {
+        if (v && v.imageId) imageIds.add(v.imageId);
+      }));
     });
     imageIds.forEach((imgId) => { window.chatImageStore.delete(imgId).catch(() => {}); });
   }
@@ -3587,7 +3709,7 @@ function renderHistoryList() {
     const domIcon = domInfo ? `<span class="hist-subject-ic" title="${escapeHtml(domInfo.name)}">${domInfo.icon}</span>` : '';
     li.innerHTML = `
       <div class="hist-main">
-        <div class="hist-title">${genBadge}${domIcon}${(conv.title || t('chat.newChatTitle')).replace(/</g, '&lt;')}</div>
+        <div class="hist-title">${genBadge}${domIcon}${escapeHtml(conv.title || t('chat.newChatTitle'))}</div>
         <div class="hist-meta">${escapeHtml(t('chat.messages', { n: conv.messages.length }))} · ${timeAgo(conv.updatedAt)}</div>
         ${unseenBadge}
       </div>
@@ -3779,9 +3901,9 @@ function renderFormulaList() {
   }
   list.innerHTML = items.map((it) => `
     <div class="formula-card">
-      <div class="formula-name">${it.name.replace(/</g, '&lt;')}</div>
+      <div class="formula-name">${escapeHtml(it.name)}</div>
       <div class="formula-eq">$$${it.formula}$$</div>
-      ${it.note ? `<div class="formula-note">${it.note.replace(/</g, '&lt;')}</div>` : ''}
+      ${it.note ? `<div class="formula-note">${escapeHtml(it.note)}</div>` : ''}
     </div>
   `).join('');
   renderMath(list);
@@ -3876,7 +3998,7 @@ function paintSelfCheckPanel(wrapper, msgObj, answerText) {
   panel.innerHTML = `
     <div class="sc-head">🧠 Tự kiểm tra</div>
     <div class="sc-hint">Bạn thử giải lại bài này theo cách hiểu của mình, AI sẽ chấm và chỉ ra chỗ sai.</div>
-    <textarea class="sc-input" placeholder="Viết lời giải của bạn...">${draft.replace(/</g, '&lt;')}</textarea>
+    <textarea class="sc-input" placeholder="Viết lời giải của bạn...">${escapeHtml(draft)}</textarea>
     <button class="sc-submit" type="button">Kiểm tra bài làm</button>
     <div class="sc-result"${resultHtml ? '' : ' style="display:none;"'}></div>
   `;
@@ -3910,7 +4032,8 @@ async function runSelfCheck(panel, wrapper, msgObj, answerText) {
     });
     resultEl.innerHTML = '';
     const label = SC_STATUS_LABEL[data.status] || data.status || '';
-    const errorsHtml = (data.errors || []).map((e) => `<li><b>${(e.step || '').replace(/</g, '&lt;')}:</b> ${(e.issue || '').replace(/</g, '&lt;')}${e.correction ? ' → ' + e.correction.replace(/</g, '&lt;') : ''}</li>`).join('');
+    // BUG-006: dữ liệu do AI sinh ra -> escape ĐẦY ĐỦ (escapeHtml), không chỉ '<'.
+    const errorsHtml = (data.errors || []).map((e) => `<li><b>${escapeHtml(e.step || '')}:</b> ${escapeHtml(e.issue || '')}${e.correction ? ' → ' + escapeHtml(e.correction) : ''}</li>`).join('');
     const wrap = document.createElement('div');
     wrap.className = 'sc-verdict';
     wrap.innerHTML = `<div class="sc-status">${label}${Number.isFinite(data.score) ? ` — ${data.score}/100` : ''}</div>${errorsHtml ? `<ul class="sc-errors">${errorsHtml}</ul>` : ''}`;
@@ -4097,6 +4220,7 @@ function visualDownloadName(v, mime) {
  */
 function visualProxySrc(v, disposition) {
   if (/^data:/i.test(v.url)) return v.url;
+  if (/^blob:/i.test(v.url)) return v.url;
   // PHẦN B: ảnh lớn không còn nhúng base64 vào response — server trả tham chiếu nội bộ
   // `/api/visual/asset/<id>`. Đây là URL CÙNG-ORIGIN, không đi qua proxy download (proxy chỉ dành
   // cho link https của provider bên ngoài).
@@ -4114,7 +4238,7 @@ function visualProxySrc(v, disposition) {
 /** @returns {boolean} v là ẢNH THẬT do image model sinh. */
 function isGeneratedImageVisual(v) {
   return !!(v && (v.format === 'data_url' || v.format === 'image_url' || v.format === 'asset_url')
-    && typeof v.url === 'string' && /^(data:image\/|https:\/\/|\/api\/visual\/asset\/)/i.test(v.url));
+    && ((typeof v.url === 'string' && /^(data:image\/|https:\/\/|blob:|\/api\/visual\/asset\/)/i.test(v.url)) || v.imageId));
 }
 
 /**
@@ -4132,6 +4256,16 @@ function makeVisualRetryButton(v, hostEl) {
     btn.disabled = true;
     btn.textContent = t('chat.visualGenerating');
     try {
+      if (v.provider === 'puter' && window.puterVisualManager) {
+        const data = v.authRequired || v.errorCode === 'PUTER_AUTH_REQUIRED' || v.errorCode === 'auth_required'
+          ? await window.puterVisualManager.signInAndResume(v)
+          : await window.puterVisualManager.retry(v);
+        const merged = { ...v, ...data, renderFailed: false };
+        const newCard = renderVisualCard(merged);
+        const oldCard = hostEl.closest ? hostEl.closest('.visual-card') : null;
+        if (newCard && oldCard && oldCard.parentNode) oldCard.parentNode.replaceChild(newCard, oldCard);
+        return;
+      }
       const res = await fetch('/api/visual/retry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4233,6 +4367,11 @@ async function downloadVisualHQ(v, btn) {
   const label = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = t('chat.visualDownloading'); }
   try {
+    if (v.provider === 'puter' && window.puterVisualManager) {
+      const data = await window.puterVisualManager.hq(v);
+      await downloadVisualPNG(data, null);
+      return;
+    }
     const res = await fetch('/api/visual/hq', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4340,7 +4479,16 @@ function renderVisualImage(v) {
   img.loading = 'lazy';
   img.alt = v.title || '';
   // Ảnh https của provider đi qua proxy (CSP img-src không mở cho domain bên thứ 3), data: dùng thẳng.
-  img.src = visualProxySrc(v, 'inline');
+  if (v.imageId && window.chatImageStore) {
+    window.chatImageStore.get(v.imageId).then((record) => {
+      if (!record || !record.url) return renderVisualImageError(v, holder);
+      v.url = record.url;
+      v.format = 'image_url';
+      img.src = record.url;
+    }).catch(() => renderVisualImageError(v, holder));
+  } else if (v.url) {
+    img.src = visualProxySrc(v, 'inline');
+  }
   img.addEventListener('click', () => openVisualLightbox(v)); // click thẳng vào ảnh cũng phóng to
   img.addEventListener('error', () => renderVisualImageError(v, holder), { once: true });
   holder.appendChild(img);
@@ -4492,7 +4640,9 @@ const IMAGE_PROVIDER_LABELS = {
 function renderVisualProviderLabel(v) {
   const key = v && v.provider;
   if (!key) return null; // KHÔNG hiện gì nếu không rõ provider — không đoán bừa.
-  const label = IMAGE_PROVIDER_LABELS[key] || key;
+  const label = key === 'puter'
+    ? `Puter${v.puterProvider ? ` (${v.puterProvider})` : ''}`
+    : (IMAGE_PROVIDER_LABELS[key] || key);
   const el = document.createElement('p');
   el.className = 'visual-provider-label';
   el.textContent = `Tạo bởi: ${label}`;
@@ -4765,11 +4915,30 @@ function renderCitations(container, contexts, query, answerText, webNote, citati
           ? (c.startPage != null && c.endPage != null && c.startPage !== c.endPage
             ? ` · trang ${c.startPage}-${c.endPage}` : ` · trang ${c.page}`)
           : '';
-        return `<div class="cite"><b>[${num}] ${escapeHtml(c.doc)}${pageLabel} · đoạn ${escapeHtml(String(c.id))}</b><br>${body}</div>`;
+        // BUG-001 (V6): in ĐỊA CHỈ trích dẫn theo LOẠI nguồn, không chỉ "trang X" kiểu PDF:
+        //   - YouTube -> link nhảy thẳng tới mốc thời gian (&t=Xs)
+        //   - Web     -> link mở trang + tên heading của đoạn
+        //   - PDF     -> giữ nguyên " · trang X"
+        // href LUÔN đi qua sanitizeUrl() (KHÔNG chỉ escapeHtml — escapeHtml không chặn được
+        // `javascript:`/`data:text/html`, xem chú thích ở sanitizeUrl()).
+        let meta = '';
+        const safeSrcUrl = c.sourceUrl ? sanitizeUrl(c.sourceUrl) : '#';
+        if (c.kind === 'youtube' && safeSrcUrl !== '#') {
+          const startS = Math.max(0, Math.floor(Number(c.timeStart) || 0));
+          const jumpUrl = safeSrcUrl.includes('?') ? `${safeSrcUrl}&t=${startS}s` : `${safeSrcUrl}?t=${startS}s`;
+          const mmss = `${Math.floor(startS / 60)}:${String(startS % 60).padStart(2, '0')}`;
+          meta = ` · <a href="${escapeHtml(jumpUrl)}" target="_blank" rel="noopener noreferrer">mốc ${mmss}</a>`;
+        } else if (c.kind === 'web' && safeSrcUrl !== '#') {
+          const anchor = c.sectionAnchor ? ` · đoạn “${escapeHtml(c.sectionAnchor)}”` : '';
+          meta = ` · <a href="${escapeHtml(safeSrcUrl)}" target="_blank" rel="noopener noreferrer">mở trang</a>${anchor}`;
+        } else if (pageLabel) {
+          meta = pageLabel; // đã có " · trang X" sẵn
+        }
+        return `<div class="cite"><b>[${num}] ${escapeHtml(c.doc)}${meta} · đoạn ${escapeHtml(String(c.id))}</b><br>${body}</div>`;
       }).join('');
   }
   if (webNote) {
-    const esc = String(webNote).replace(/</g, '&lt;');
+    const esc = escapeHtml(webNote);
     html += `<div class="cite-title cite-title-web">Nguồn web bổ sung</div><div class="cite cite-web">🌐 ${esc}</div>`;
   }
   citeWrap.innerHTML = html;
@@ -5189,6 +5358,7 @@ async function sendMessage() {
       // (validators.js: `images = image ? [image, ...body.images] : body.images`). KHÔNG lặp lại
       // images[0] ở đây (đã gửi qua field `image` riêng) để tránh server nhận trùng 1 ảnh 2 lần.
       images: images.slice(1).map((img) => ({ mediaType: img.mediaType, base64: img.base64 })),
+      imageIds,
       sourceImages: collectSourceImages(query),
       rules: state.rules, contexts, settings: settingsSnapshot,
       // PHẦN K/L: chỉ gửi history THỰC SỰ liên quan (query độc lập -> gần như 0 lượt), và báo số
@@ -5204,6 +5374,7 @@ async function sendMessage() {
     }, {
       onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
+      ...bindClientVisualCallbacks({ message: aiMsgObj, container: contentEl, conversation: conv }),
       signal: taskSignal
     });
     const rawFull = data.text || preview.getText() || t('chat.noResponse');
@@ -5222,8 +5393,8 @@ async function sendMessage() {
     aiMsgObj.subjectId = data.subjectId || 'general';
     aiMsgObj.subjectConfidence = Number.isFinite(data.subjectConfidence) ? data.subjectConfidence : 0;
     aiMsgObj.secondarySubjectId = data.secondarySubjectId || null;
-    aiMsgObj.approachVisuals = Array.isArray(data.visuals) ? data.visuals : [];
-    aiMsgObj.approachVisualStatus = data.visualStatus || null;
+    if (Array.isArray(data.visuals) && data.visuals.length) aiMsgObj.approachVisuals = data.visuals;
+    if (data.visualStatus) aiMsgObj.approachVisualStatus = data.visualStatus;
     setMsgSubjectBadge(aiRow, aiMsgObj.subjectId, aiMsgObj.subjectConfidence, aiMsgObj.secondarySubjectId);
     touchConversation(conv);
     // MỤC 19 — THỨ TỰ BẮT BUỘC: lưu result vào message + conversation (touchConversation ->
@@ -5349,6 +5520,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, images) {
       // PHẦN Y/AC: mở rộng nốt lượt "Giải chi tiết" mang theo ĐỦ ảnh (không chỉ ảnh đầu như trước) —
       // cùng hợp đồng với server đã định nghĩa ở vòng 1 (không lặp lại ảnh đầu trong `images[]`).
       images: (images || []).slice(1).map((img) => ({ mediaType: img.mediaType, base64: img.base64 })),
+      imageIds: (images || []).map((img) => img.imageId).filter(Boolean),
       sourceImages: collectSourceImages(msgObj.query),
       rules: state.rules, contexts: msgObj.contexts, settings: settingsSnapshot,
       history: selectRelevantHistory(msgObj.query, state.history),
@@ -5364,6 +5536,7 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, images) {
     }, {
       onDelta: (piece) => { if (taskHandle) ctm.appendDelta(taskHandle.task.requestId, piece); preview.append(piece); scrollThreadToBottom(); },
       onStatus: (msg, st) => { if (taskHandle) ctm.setStatus(taskHandle.task.requestId, msg, st); preview.setStatus(msg, st); },
+      ...bindClientVisualCallbacks({ message: msgObj, container: contentEl, conversation: ownerConv }),
       signal: taskHandle ? taskHandle.signal : undefined
     });
     const rawFull = data.text || preview.getText() || t('chat.noResponse');
@@ -5383,10 +5556,9 @@ async function fetchDetail(btn, aiRow, contentEl, msgObj, images) {
     // MỤC 61/62: Detail KHÔNG sinh hình. Server trả lại chính hình của Hướng giải khi còn state;
     // nếu state đã hết hạn (không có KV), giữ nguyên hình đang hiển thị thay vì để trống — TUYỆT ĐỐI
     // không gọi lại pipeline chỉ vì trang vừa được tải lại.
-    msgObj.detailVisuals = (Array.isArray(data.visuals) && data.visuals.length)
-      ? data.visuals
-      : (Array.isArray(msgObj.approachVisuals) ? msgObj.approachVisuals : []);
-    msgObj.detailVisualStatus = data.visualStatus || null;
+    if (Array.isArray(data.visuals) && data.visuals.length) msgObj.detailVisuals = data.visuals;
+    else if (!Array.isArray(msgObj.detailVisuals)) msgObj.detailVisuals = Array.isArray(msgObj.approachVisuals) ? msgObj.approachVisuals : [];
+    if (data.visualStatus) msgObj.detailVisualStatus = data.visualStatus;
     msgObj.detailIncompleteReasons = Array.isArray(data.incompleteReasons) ? data.incompleteReasons : [];
     // Cập nhật lại subject sau bước "giải chi tiết" (có thể chính xác hơn approach, đặc biệt khi
     // approach chỉ có ảnh chưa detect được — xem resolveSubject() phía server).
@@ -6786,6 +6958,16 @@ function sanitizeUrl(u) {
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
   } catch (e) { /* URL không hợp lệ -> rơi xuống trả về '#' bên dưới */ }
   return '#';
+}
+
+// BUG-001 (V6): biến thể của sanitizeUrl() dùng cho DỮ LIỆU, không phải cho thuộc tính href. Khi URL
+// không phải http/https, ta KHÔNG được trả '#' (một "URL" vô nghĩa sẽ bị gửi lên server rồi in vào
+// prompt như thể là địa chỉ nguồn thật — đúng loại "bịa locator" mà §22 cấm). Trả null để mọi lớp
+// phía sau bỏ trống locator một cách trung thực.
+function httpUrlOrNull(u) {
+  if (!u) return null;
+  const safe = sanitizeUrl(u);
+  return safe === '#' ? null : safe;
 }
 
 // Heuristic: câu hỏi CHỈ xin đề/bài tập ôn tập (không kèm 1 bài toán cụ thể cần giải) — ưu tiên

@@ -31,7 +31,14 @@ app.use(corsOptions);
 // nén (tiết kiệm băng thông) cho mọi response JSON/tĩnh khác.
 app.use(compression({
   filter: (req, res) => {
-    if (res.getHeader('Content-Type') === 'text/event-stream; charset=utf-8') return false;
+    // BUG-005: bản trước so sánh BẰNG CHÍNH XÁC chuỗi 'text/event-stream; charset=utf-8'. Lớp bảo vệ
+    // đó vỡ im lặng ngay khi bất kỳ route nào set Content-Type hơi khác (thiếu charset, đổi thứ tự
+    // tham số, hoặc setHeader nhận mảng) — SSE sẽ bị nén + đệm lại, hiệu ứng "gõ chữ" biến thành một
+    // cục văn bản đến sau vài chục giây, và không có test nào bắt được vì nó vẫn "chạy". Nay nhận
+    // diện theo MEDIA TYPE (substring, không phân biệt hoa/thường, gộp mảng) — đúng thứ cần nhận diện.
+    const raw = res.getHeader('Content-Type');
+    const ct = (Array.isArray(raw) ? raw.join(',') : String(raw || '')).toLowerCase();
+    if (ct.includes('text/event-stream')) return false;
     return compression.filter(req, res);
   }
 }));
@@ -56,6 +63,20 @@ const jsonSmall = express.json({ limit: '64kb' });
 // app.use('/api/my-feature', myFeatureRoutes);
 // PHẦN N: log runtime THẬT sau deploy (không đoán theo cấu hình). PHẦN H/I/J: nói rõ tầng trạng
 // thái nào đang bền vững — health endpoint là nơi kiểm chứng sau khi deploy, không phải nơi quảng cáo.
+// Chuẩn hoá tiền tố /api khi chạy sau serverless adapter hoặc reverse proxy (nếu /api bị tước).
+// BUG-003: middleware này TRƯỚC ĐÂY nằm SAU `app.get('/api/health')`. Express khớp theo đúng thứ tự
+// đăng ký, nên khi nền tảng tước tiền tố (request tới là `/health`), URL được viết lại thành
+// `/api/health` NHƯNG handler health đã bị đi qua từ trước -> request rơi xuống notFoundHandler và
+// trả 404. Tức là chính endpoint dùng để kiểm tra "hệ thống còn sống không" là endpoint chết trong
+// đúng cấu hình deploy mà nó được viết ra để phục vụ. Nay normalizer chạy ĐẦU TIÊN.
+app.use((req, res, next) => {
+  const apiPrefixes = ['/chat', '/generate', '/recommend', '/study', '/visual', '/source', '/health'];
+  if (apiPrefixes.some((p) => req.url === p || req.url.startsWith(p + '/') || req.url.startsWith(p + '?'))) {
+    req.url = '/api' + req.url;
+  }
+  next();
+});
+
 app.get('/api/health', (req, res) => res.json({
   ok: true,
   time: new Date().toISOString(),
@@ -64,15 +85,6 @@ app.get('/api/health', (req, res) => res.json({
   distributedStore: require('./utils/kvStore').isEnabled(),
   rateLimitScope: require('./middleware/rateLimit').isGlobalScope() ? 'global' : 'instance'
 }));
-
-// Chuẩn hoá tiền tố /api khi chạy sau serverless adapter hoặc reverse proxy (nếu /api bị tước)
-app.use((req, res, next) => {
-  const apiPrefixes = ['/chat', '/generate', '/recommend', '/study', '/visual', '/source', '/health'];
-  if (apiPrefixes.some((p) => req.url === p || req.url.startsWith(p + '/') || req.url.startsWith(p + '?'))) {
-    req.url = '/api' + req.url;
-  }
-  next();
-});
 
 app.use('/api', appKeyGate); // cổng khóa dùng chung tùy chọn (đọc từ .env, mặc định tắt)
 app.use('/api/chat', chatLimiter, jsonLarge, chatRoutes);

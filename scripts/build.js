@@ -49,6 +49,7 @@ const CORE_JS = [
 // fingerprint từng nhóm bằng process() riêng (mỗi nhóm 1 relDir) thay vì gộp chung CORE_JS.
 const I18N_JS = ['translations.js', 'languageStore.js', 'i18n.js'];
 const PROVIDER_JS = ['puterAdapter.js', 'providerRouter.js'];
+const VISUAL_JS = ['puterVisualManager.js'];
 const TASK_JS = ['conversationTaskManager.js', 'backgroundTaskUI.js'];
 const CORE_CSS = ['styles.css'];
 
@@ -98,7 +99,13 @@ function buildTagRegex(relDir, baseName) {
   const pattern =
     `(["'])/${escapeRegExp(relDir)}/${escapeRegExp(stem)}` +
     `(?:\\.[0-9a-f]{10})?${escapeRegExp(ext)}(?:\\?[^"']*)?\\1`;
-  return new RegExp(pattern);
+  // BUG-002b: regex này TRƯỚC ĐÂY không có cờ `g`, nên `html.replace(re, ...)` chỉ thay THẺ ĐẦU TIÊN.
+  // Nếu index.html tham chiếu cùng một asset hai lần (vd <link rel="preload"> + <script src>, hoặc
+  // <link rel="modulepreload">), thẻ thứ hai giữ nguyên tên KHÔNG hash -> trang tải CẢ HAI bản của
+  // cùng một file (một bản immutable, một bản no-cache) => khai báo lại biến top-level =>
+  // "Identifier ... has already been declared" — đúng lớp lỗi mà toàn bộ pipeline fingerprint này
+  // được viết ra để diệt. Nay dùng cờ `g`: thay MỌI tham chiếu.
+  return new RegExp(pattern, 'g');
 }
 
 function main() {
@@ -118,6 +125,10 @@ function main() {
           `nhầm khỏi index.html. Dừng build (không đoán/tự chèn lại) để tránh deploy thiếu asset.`
         );
       }
+      // BUG-002b (bẫy kèm theo): với regex có cờ `g`, `re.test()` ĐÃ đẩy `re.lastIndex` lên sau lần
+      // khớp đầu. Nếu không reset, `html.replace(re, ...)` bắt đầu tìm TỪ vị trí đó và BỎ QUA chính
+      // thẻ đầu tiên — tức là bản vá "thay tất cả" sẽ biến thành "thay tất cả TRỪ cái đầu".
+      re.lastIndex = 0;
       html = html.replace(re, `$1${info.urlPath}$1`);
       manifest.assets[name] = info.urlPath;
     }
@@ -126,6 +137,7 @@ function main() {
   process('js', CORE_JS);
   process('js/i18n', I18N_JS);
   process('js/providers', PROVIDER_JS);
+  process('js/visual', VISUAL_JS);
   process('js/tasks', TASK_JS);
   process('css', CORE_CSS);
 
@@ -150,4 +162,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { main, hashOf, buildTagRegex, CORE_JS, CORE_CSS };
+module.exports = { main, hashOf, buildTagRegex, CORE_JS, CORE_CSS, VISUAL_JS };

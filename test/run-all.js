@@ -29,7 +29,8 @@ for (const f of files) {
   const r = spawnSync(process.execPath, [path.join(dir, f)], {
     encoding: 'utf8',
     timeout: FILE_TIMEOUT_MS,
-    killSignal: 'SIGKILL' // SIGTERM có thể bị chính test nuốt; SIGKILL bảo đảm không còn tiến trình mồ côi
+    killSignal: 'SIGKILL',
+    env: { ...process.env, PUTER_VISUAL_MODE: process.env.PUTER_VISUAL_MODE || 'server_fallback' }
   });
   const out = `${r.stdout || ''}${r.stderr || ''}`;
   process.stdout.write(out);

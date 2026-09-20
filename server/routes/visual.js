@@ -183,6 +183,10 @@ router.post('/hq', express.json({ limit: '4kb' }), async (req, res) => {
   const ctx = await hqStore.get(visualId);
   // Không còn ngữ cảnh (hết TTL, hoặc instance serverless khác) -> nói thẳng, KHÔNG đoán prompt.
   if (!ctx) return res.status(404).json({ error: 'visual_context_expired' });
+  if (String(process.env.PUTER_VISUAL_MODE || 'client_primary').toLowerCase() === 'client_primary') {
+    const job = ctx.visualJob || { visualId, prompt: ctx.prompt, status: 'QUEUED' };
+    return res.json({ ok: true, clientPrimary: true, visualJob: { ...job, quality: 'high', hq: true, status: 'QUEUED' } });
+  }
   if (!imageClient.isConfigured()) return res.status(503).json({ error: 'no_image_provider' });
 
   // Cost-gate y hệt visualPipeline: 2048 luôn rơi vào nhóm chi phí cao hơn, nên chỉ hình THỰC SỰ
@@ -258,6 +262,10 @@ router.post('/retry', express.json({ limit: '4kb' }), async (req, res) => {
   const visualId = req.body && req.body.visualId;
   const ctx = await hqStore.get(visualId);
   if (!ctx) return res.status(404).json({ error: 'visual_context_expired' });
+  if (String(process.env.PUTER_VISUAL_MODE || 'client_primary').toLowerCase() === 'client_primary') {
+    const job = ctx.visualJob || { visualId, prompt: ctx.prompt, status: 'QUEUED' };
+    return res.json({ ok: true, clientPrimary: true, visualJob: { ...job, status: 'QUEUED', retryCount: (job.retryCount || 0) + 1 } });
+  }
   if (!imageClient.isConfigured()) return res.status(503).json({ error: 'no_image_provider' });
 
   const img = await imageClient.generateImage({ prompt: ctx.prompt, size: '1024x1024', timeoutMs: 20000 });

@@ -1,4 +1,5 @@
 'use strict';
+const crypto = require('crypto');
 
 // Thời gian TỐI THIỂU còn lại để một lệnh gọi ảnh có cơ hội hoàn tất ở mức degrade 'low'.
 const MIN_IMAGE_CALL_MS = Number(process.env.MIN_IMAGE_CALL_MS) || 4000;
@@ -136,7 +137,7 @@ async function runVisualPipeline(args) {
     stage = 'approach',
     // MỤC 33: visual đã có từ vòng đời Approach (server load qua visualStateStore) — Detail chỉ
     // được DÙNG LẠI đúng tập này.
-    existingVisuals = null
+    existingVisuals = null, inputImageIds = []
   } = args || {};
 
   const telemetry = {
@@ -168,7 +169,9 @@ async function runVisualPipeline(args) {
     // nhánh trả về riêng: mọi lệnh gọi tốn token/tiền nằm SAU điểm này nên không thể lọt qua.
     if (!stageMayGenerate(stage)) {
       telemetry.visualLifecycleLocked = true;
-      const reuse = Array.isArray(existingVisuals) ? existingVisuals.filter(Boolean) : [];
+      const reuse = Array.isArray(existingVisuals)
+        ? existingVisuals.filter((v) => v && (v.url || v.format === 'image_url' || v.format === 'data_url'))
+        : [];
       if (reuse.length) {
         telemetry.visualReused = true;
         telemetry.visualType = reuse[0].type || telemetry.visualType;
@@ -230,8 +233,12 @@ async function runVisualPipeline(args) {
     }
 
     // ---------- Chọn renderer: generated_image | interactive_3d | no_visual ----------
+    const clientPrimary = String(process.env.PUTER_VISUAL_MODE || 'client_primary').toLowerCase() === 'client_primary';
     const imageProviderAvailable = imageClient.isConfigured();
-    const route = router.chooseVisualRenderer(spec, { imageProviderAvailable });
+    const route = router.chooseVisualRenderer(spec, {
+      imageProviderAvailable,
+      puterImageAvailable: clientPrimary
+    });
     telemetry.visualRenderer = route.renderer;
     telemetry.visualNeedsPreciseGeometry = !!spec.needsPreciseGeometry;
     telemetry.visualHighPrecision = !!route.highPrecisionRequired;
@@ -255,13 +262,15 @@ async function runVisualPipeline(args) {
       specFingerprint: specBuilder.specFingerprint(spec),
       answerStructureHash: cache.answerStructureHash(finalAnswer),
       subject, language: spec.language, renderer: route.renderer,
-      model: imageClient.activeProviderName() || '',
+      model: clientPrimary
+        ? `${process.env.PUTER_IMAGE_PROVIDER || 'openai-image-generation'}:${process.env.PUTER_IMAGE_MODEL || 'default'}`
+        : imageClient.activeProviderName() || '',
       sourceFingerprint: cacheKeyExtra.sourceFingerprint || '',
       imageFingerprint: cacheKeyExtra.imageFingerprint || '',
       style: `${spec.style}#${spec.aspectRatio}`,
       userPreference
     };
-    const cached = await cache.getAsync(keyParts);
+    const cached = clientPrimary ? null : await cache.getAsync(keyParts);
     if (cached) {
       telemetry.visualCacheHit = true;
       telemetry.visualGenerated = true;
@@ -285,6 +294,57 @@ async function runVisualPipeline(args) {
     const basePrompt = specBuilder.buildImagePrompt(spec, { maxChars, degrade });
     const promptCtx = { prompt: basePrompt, necessity, subject, title: spec.title, type: spec.type };
     telemetry.visualPromptTokens = Math.ceil(basePrompt.length / 3.2);
+
+    // Client-primary mode: server prepares a job only. Puter.js owns auth, generation,
+    // validation and IndexedDB storage in browser. Never hold SSE open for image generation.
+    if (clientPrimary) {
+      const visualId = nextVisualId();
+      const visualFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+        promptVersion: specBuilder.VISUAL_PROMPT_VERSION,
+        prompt: basePrompt,
+        spec: specBuilder.specFingerprint(spec),
+        source: cacheKeyExtra.sourceFingerprint || '',
+        images: cacheKeyExtra.imageFingerprint || ''
+      })).digest('hex').slice(0, 32);
+      const visualJob = {
+        visualId,
+        requestId: cacheKeyExtra.requestId || null,
+        visualFingerprint,
+        promptVersion: specBuilder.VISUAL_PROMPT_VERSION,
+        renderer: 'puter_image',
+        displayProvider: 'puter',
+        provider: 'puter',
+        puterProvider: process.env.PUTER_IMAGE_PROVIDER || 'openai-image-generation',
+        model: process.env.PUTER_IMAGE_MODEL || null,
+        visualType: spec.type,
+        ratioRequested: spec.aspectRatio,
+        qualityRequested: degrade === 'low' ? 'fast' : 'standard',
+        ratio: spec.aspectRatio,
+        quality: degrade === 'low' ? 'fast' : 'standard',
+        inputImageIds: Array.isArray(inputImageIds) ? inputImageIds : [],
+        inputImageCount: Array.isArray(inputImageIds) ? inputImageIds.length : 0,
+        inputImageMetadata: Array.isArray(inputImageIds) ? inputImageIds.map((id) => ({ imageId: id })) : [],
+        prompt: basePrompt,
+        title: spec.title,
+        caption: spec.purpose || '',
+        overlay: specBuilder.buildVisualOverlay(spec),
+        fingerprint: visualFingerprint,
+        createdAt: new Date().toISOString(),
+        status: 'QUEUED',
+        necessity,
+        subject: spec.subject || subject || 'visual',
+        type: spec.type,
+        fidelity: 'ai_generated',
+        placement: decision.placement
+      };
+      await hqStore.remember(visualId, { ...promptCtx, visualFingerprint, visualJob });
+      telemetry.visualRenderer = 'puter';
+      telemetry.visualLifecycleLocked = true;
+      telemetry.visualGenerationLifecycleCount = 1;
+      telemetry.visualGenerated = false;
+      onEvent({ ...visualJob, type: 'visual:request' });
+      return { status: 'pending', decision, visuals: [], visualJob, telemetry };
+    }
 
     /** Thất bại toàn tập -> stub {renderFailed:true} + giữ text. KHÔNG có hình thay thế. */
     const failWith = async (reason) => {

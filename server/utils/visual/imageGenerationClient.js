@@ -434,6 +434,9 @@ function activePromptCharLimit() {
  *   latencyMs:number, promptChars:number}>}
  */
 async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, size = '1024x1024', aspectRatio = '1:1', quality = 'standard', deadlineAt }) {
+  if (String(process.env.PUTER_VISUAL_MODE || '').toLowerCase() === 'client_primary') {
+    throw new Error('server_image_generation_forbidden_in_client_primary');
+  }
   const startedAt = Date.now();
   const base = { latencyMs: 0, promptChars: String(prompt || '').length, providersTried: [] };
   if (!prompt || prompt.length < 10) return { ...base, ok: false, reason: 'empty_prompt', latencyMs: 0 };

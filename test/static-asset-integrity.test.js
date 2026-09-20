@@ -1,5 +1,12 @@
 'use strict';
 
+// BUG-007: file test này require gián tiếp `express`/`dotenv` THẬT. Khi chưa `npm install` (máy mới
+// clone, sandbox không có mạng), trước đây nó ném MODULE_NOT_FOUND và harness đếm là FAILED — một
+// "FAIL" hoàn toàn do môi trường, che mất kết quả thật và làm người đọc tưởng code hỏng. Dùng đúng
+// cơ chế đã có sẵn của repo (test/_depGuard.js): in SKIPPED trung thực + tên gói còn thiếu.
+// KHÔNG assertion nào bị nới lỏng hay bỏ đi: khi dependency có mặt, file chạy y như cũ.
+require('./_depGuard').requireDeps(['express', 'dotenv'], 'static-asset-integrity.test.js');
+
 // ---------- REGRESSION (PHẦN 10 của yêu cầu audit): "Unexpected token '<'" / HTML-thay-vì-JS ----------
 // Test này dựng THẬT server/app.js (giống test/vercel-header-parity.test.js — không mock), GET
 // TRỰC TIẾP các URL JS/CSS core (cả dạng có ?v=... cũ lẫn dạng đã fingerprint mới) và khẳng định

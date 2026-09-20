@@ -236,7 +236,11 @@ function formatContextLine(c, i) {
   } else if (kind === 'youtube') {
     const parts = [];
     if (c.sourceUrl) parts.push(c.sourceUrl);
+    // BUG-001b: trước đây locator CHỈ được in khi có ĐỦ cả timeStart và timeEnd. Nhiều transcript
+    // chỉ có mốc bắt đầu cho mỗi đoạn (endSeconds null), nên toàn bộ mốc thời gian bị bỏ im lặng.
+    // Có timeStart là đã đủ để truy nguyên đúng đoạn; endSeconds chỉ làm khoảng chính xác hơn.
     if (c.timeStart != null && c.timeEnd != null) parts.push(`mốc ${formatSec(c.timeStart)}–${formatSec(c.timeEnd)}`);
+    else if (c.timeStart != null) parts.push(`mốc ${formatSec(c.timeStart)}`);
     locator = parts.length ? `, ${parts.join(', ')}` : '';
     return `[${num}] (Nguồn: [YouTube] ${c.doc}${locator}, đoạn ${c.id}) ${c.text}`;
   } else if (kind === 'web') {

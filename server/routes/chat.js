@@ -422,10 +422,12 @@ async function runVisualsFor(opts) {
     const result = await visualSystem.runVisualPipeline(opts);
     // MỤC 33: vòng đời nào SINH RA hình thì chính nó ghi canonical state — Detail sau đó chỉ đọc.
     // Ghi sau khi đã externalize (visuals mang asset reference, không mang base64 — mục 56).
-    if (opts.visualKey && visualSystem.stageMayGenerate(opts.stage) && result.visuals && result.visuals.length) {
+    if (opts.visualKey && visualSystem.stageMayGenerate(opts.stage)
+      && ((result.visuals && result.visuals.length) || result.visualJob)) {
       try {
         await visualSystem.stateStore.saveVisualState(opts.visualKey, {
-          visuals: result.visuals, status: result.status, stage: opts.stage,
+          visuals: result.visuals && result.visuals.length ? result.visuals : [result.visualJob],
+          status: result.status, stage: opts.stage,
           lifecycleCount: result.telemetry ? result.telemetry.visualGenerationLifecycleCount : 1
         });
       } catch (e) { /* state chỉ để TIẾT KIỆM lượt sau — hỏng cũng không được ảnh hưởng response này */ }
@@ -1048,6 +1050,7 @@ router.post('/', async (req, res, next) => {
       remainingMs: globalDeadline.remaining(), requirements: requirementsList,
       cacheKeyExtra: {
         promptVersion: PROMPT_VERSION,
+        requestId: reqLogger.requestId,
         // ---------- MỤC 29: CACHE KEY PHẢI MANG CHÍNH SÁCH MODEL THẬT ----------
         // `modelTier` (đã có sẵn trong key) chỉ là NHÃN độ phức tạp, không phải model. Hai request
         // giống hệt nhau nhưng pool đã đổi (thêm/bớt API key, model discovery chọn revision khác,
@@ -1194,6 +1197,7 @@ router.post('/', async (req, res, next) => {
           ? tokenEconomy.fingerprint(input.images.map((img) => tokenEconomy.imageFingerprint(img.base64, img.mediaType)).join('|'))
           : ''
       },
+      inputImageIds: input.imageIds || [],
       // ---------- PHẦN 25 — TẦNG 3: model judge CHỈ cho case borderline ----------
       // visualPipeline tự gate: nó chỉ gọi `judge` khi decisionEngine.needsModelJudgement() true
       // (điểm nằm sát ngưỡng). Với bộ chuẩn hiện tại chỉ ~4% câu rơi vào vùng đó, nên chi phí trung

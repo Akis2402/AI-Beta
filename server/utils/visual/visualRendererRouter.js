@@ -72,11 +72,12 @@ function isInteractive3dSpec(spec) {
 function chooseVisualRenderer(spec, env = {}) {
   const type = (spec && spec.type) || 'no_visual';
   const imageAvailable = !!env.imageProviderAvailable;
+  const puterAvailable = !!env.puterImageAvailable;
 
   if (type === 'no_visual') {
     return {
       renderer: 'no_visual', primary: 'no_visual', fallbacks: [],
-      highPrecisionRequired: false, imageProviderAvailable: imageAvailable, blocked: null,
+      highPrecisionRequired: false, imageProviderAvailable: imageAvailable, puterImageAvailable: puterAvailable, blocked: null,
       fidelity: 'none', realismRequired: false, upgradeHint: null, reason: 'decision_said_no'
     };
   }
@@ -85,7 +86,7 @@ function chooseVisualRenderer(spec, env = {}) {
   if (INTERACTIVE_3D_TYPES.has(type) && isInteractive3dSpec(spec)) {
     return {
       renderer: 'interactive_3d', primary: 'interactive_3d', fallbacks: [],
-      highPrecisionRequired: false, imageProviderAvailable: imageAvailable, blocked: null,
+      highPrecisionRequired: false, imageProviderAvailable: imageAvailable, puterImageAvailable: puterAvailable, blocked: null,
       fidelity: 'interactive', realismRequired: false, upgradeHint: null,
       reason: 'interactive_3d_schema'
     };
@@ -103,15 +104,16 @@ function chooseVisualRenderer(spec, env = {}) {
     fallbacks: [],
     highPrecisionRequired: highPrecision,
     imageProviderAvailable: imageAvailable,
+    puterImageAvailable: puterAvailable,
     // Không có provider ảnh = KHÔNG có hình. Nói thẳng ra ở đây để pipeline phát trạng thái lỗi
     // rõ ràng + nút thử lại, thay vì lặng lẽ dựng một sơ đồ SVG thay thế.
-    blocked: imageAvailable ? null : 'no_image_provider',
+    blocked: puterAvailable || imageAvailable ? null : 'no_image_provider',
     fidelity: 'ai_generated',
     realismRequired: realism,
-    upgradeHint: imageAvailable ? null
+    upgradeHint: puterAvailable || imageAvailable ? null
       : 'Chưa cấu hình nhà cung cấp ảnh AI (GEMINI_IMAGE_API_KEY / OPENAI_IMAGE_API_KEY). '
         + 'Hệ thống KHÔNG dựng hình thay thế bằng SVG — hãy cấu hình khoá ảnh rồi bấm "Thử tạo lại".',
-    reason: imageAvailable
+    reason: puterAvailable || imageAvailable
       ? (highPrecision ? 'static_visual_image_high_precision' : 'static_visual_image')
       : 'no_image_provider'
   };
