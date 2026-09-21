@@ -67,6 +67,8 @@ async function saveVisualState(visualKey, state) {
     visuals: visuals.map((v) => {
       const out = { ...v };
       if (typeof out.url === 'string' && out.url.startsWith('data:')) delete out.url;
+      // Thẻ "cần Auth Puter" mang kèm job để chạy tiếp; prompt gốc KHÔNG được lưu ở đây (đã có visualHqStore).
+      if (out.job && typeof out.job === 'object') { out.job = { ...out.job }; delete out.job.prompt; delete out.job.overlay; }
       return out;
     }),
     visualIds: visuals.map((v) => v && v.visualId).filter(Boolean),

@@ -464,7 +464,11 @@ function validateChatBody(body) {
       })).filter((h) => h.content)
     : [];
 
-  const result = { query, deepThinking, crossCheck, image, images, imageIds, imagesRejected, sourceImages, sourceImagesRejected, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText, visualId };
+  // Hybrid Visual Engine: CLIENT báo trạng thái Auth Puter (chỉ 4 giá trị hợp lệ; mọi thứ khác -> 'unknown').
+  // Đây chỉ là gợi ý để server khỏi phát job ảnh AI vô ích — server KHÔNG bao giờ tin nó cho việc bảo mật.
+  const rawCaps = (body.clientCaps && typeof body.clientCaps === 'object') ? body.clientCaps : {};
+  const clientCaps = { puterAuth: ['authenticated', 'unauthenticated', 'unknown', 'error'].includes(rawCaps.puterAuth) ? rawCaps.puterAuth : 'unknown' };
+  const result = { query, deepThinking, crossCheck, image, images, imageIds, imagesRejected, sourceImages, sourceImagesRejected, rules, contexts, sourceManifest, sourceStatus, historyTurnsRaw, requirementLabels, unmatchedRequirementLabels, settings, history, stage, approachText, visualId, clientCaps };
   // PHẦN A7: server dùng ĐÚNG chính sách mà client đã dùng để tự kiểm trước khi gửi. Nếu tới đây vẫn
   // vượt ngân sách (client cũ chưa cập nhật, hoặc gọi API trực tiếp) -> lỗi CÓ CẤU TRÚC, KHÔNG âm
   // thầm cắt bớt dữ liệu rồi trả lời như thể đã đọc đủ.

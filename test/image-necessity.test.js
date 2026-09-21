@@ -67,9 +67,9 @@ const decide = (question, over = {}) => de.evaluateVisualNeed({ question, subjec
     assert.strictEqual(pipeline.resolveVisualDegradeLevel(1000), 'emergency');
   });
 
-  await test('R. Deadline hết -> BỎ hình, giữ text, KHÔNG làm fail cả response', async () => {
+  await test('R. Deadline hết -> BỎ hình AI, giữ text, KHÔNG làm fail cả response', async () => {
     const r = await pipeline.runVisualPipeline({
-      question: 'Vẽ đồ thị hàm số y = x^2', finalAnswer: 'y = x^2', answerComplete: true,
+      question: 'Vẽ đồ thị hàm số y = x^2 bằng AI', finalAnswer: 'y = x^2', answerComplete: true,
       subject: 'math', deadline: { remaining: () => 500 }
     });
     assert.strictEqual(r.status, 'skipped');

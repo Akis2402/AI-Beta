@@ -298,12 +298,15 @@ test('29. PHẦN 24: candidate đồng thuận -> không có conflict', () => {
     assert.deepStrictEqual(r.visuals, []);
   });
 
-  await atest('31. pipeline: tạo được ẢNH AI cho bài đồ thị + phát đủ sự kiện', async () => {
+  // HYBRID (Master prompt Puter Auth): đồ thị/hình học/sơ đồ Lý-Hoá dựng được chính xác đi SVG tất định.
+  // Các test 31–37 kiểm NHÁNH ẢNH AI nên ép nhánh đó bằng yêu cầu tường minh "bằng AI" (người dùng có
+  // quyền chọn) — nhánh SVG có test riêng (31c, 32b, 33b, và test/hybrid-visual-engine.test.js).
+  await atest('31. pipeline: tạo được ẢNH AI (người dùng yêu cầu bằng AI) + phát đủ sự kiện', async () => {
     const { pipeline: pl, restore } = loadVisualModules({ GEMINI_IMAGE_API_KEY: 'k' });
     try {
       const events = [];
       const r = await withFetch(async () => geminiImageResponse(), () => pl.runVisualPipeline({
-        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3',
+        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3 bằng AI',
         finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4), giao Ox tại x = -1 và x = 3.',
         subject: 'math', answerComplete: true, onEvent: (e) => events.push(e.type)
       }));
@@ -317,12 +320,12 @@ test('29. PHẦN 24: candidate đồng thuận -> không có conflict', () => {
     } finally { restore(); }
   });
 
-  await atest('31b. KHÔNG có provider ảnh -> failed + stub retry, TUYỆT ĐỐI không dựng SVG', async () => {
+  await atest('31b. AI được yêu cầu nhưng KHÔNG có provider ảnh -> failed + stub retry, không dựng SVG thay thế', async () => {
     const { pipeline: pl, restore } = loadVisualModules({});
     try {
       let apiCalls = 0;
       const r = await withFetch(async () => { apiCalls++; return geminiImageResponse(); }, () => pl.runVisualPipeline({
-        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3',
+        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3 bằng AI',
         finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4).', subject: 'math', answerComplete: true
       }));
       assert.strictEqual(apiCalls, 0, 'không có khóa thì không gọi API');
@@ -338,7 +341,7 @@ test('29. PHẦN 24: candidate đồng thuận -> không có conflict', () => {
     const { pipeline: pl, restore } = loadVisualModules({ GEMINI_IMAGE_API_KEY: 'k' });
     try {
       const args = {
-        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3',
+        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3 bằng AI',
         finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4), giao Ox tại x = -1 và x = 3.',
         subject: 'math', answerComplete: true
       };
@@ -352,14 +355,56 @@ test('29. PHẦN 24: candidate đồng thuận -> không có conflict', () => {
     } finally { restore(); }
   });
 
-  await atest('33. PHẦN 30: deadline gần hết -> BỎ hình, KHÔNG làm hỏng request', async () => {
+  await atest('33. PHẦN 30: deadline gần hết -> BỎ hình AI, KHÔNG làm hỏng request', async () => {
     const r = await pipeline.runVisualPipeline({
-      question: 'Vẽ đồ thị hàm số y = x^2',
+      question: 'Vẽ đồ thị hàm số y = x^2 bằng AI',
       finalAnswer: 'y = x^2', subject: 'math', answerComplete: true,
       deadline: { remaining: () => 500 }
     });
     assert.strictEqual(r.status, 'skipped');
     assert.strictEqual(r.telemetry.visualError, 'deferred_deadline');
+  });
+
+  // ---------- HYBRID: nhánh SVG tất định (không phụ thuộc provider ảnh / Puter) ----------
+  await atest('31c. SVG tất định: KHÔNG có provider ảnh vẫn dựng được hình, 0 lệnh gọi image API', async () => {
+    const { pipeline: pl, restore } = loadVisualModules({});
+    try {
+      let apiCalls = 0;
+      const events = [];
+      const r = await withFetch(async () => { apiCalls++; return geminiImageResponse(); }, () => pl.runVisualPipeline({
+        question: 'Vẽ đồ thị hàm số y = x^2 - 2x - 3',
+        finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4).', subject: 'math', answerComplete: true, onEvent: (e) => events.push(e.type)
+      }));
+      assert.strictEqual(apiCalls, 0, 'SVG tất định không được gọi image API');
+      assert.strictEqual(r.status, 'ready', JSON.stringify(r.telemetry));
+      assert.strictEqual(r.visuals[0].format, 'svg');
+      assert.strictEqual(r.visuals[0].renderer, 'deterministic_svg');
+      assert.strictEqual(r.visuals[0].origin, 'deterministic');
+      assert.strictEqual(r.telemetry.visualProviderAttempts, 0);
+      assert.strictEqual(r.telemetry.visualJudgeCalls, 0);
+      assert.deepStrictEqual(events, ['visual:ready']);
+    } finally { restore(); }
+  });
+
+  await atest('32b. SVG tất định: cùng dữ kiện -> cùng specHash, lần 2 là cache hit', async () => {
+    const { pipeline: pl, restore } = loadVisualModules({});
+    try {
+      const args = { question: 'Vẽ tam giác ABC vuông tại A, AB = 3 cm, AC = 4 cm', finalAnswer: 'BC = 5 cm', subject: 'math', answerComplete: true };
+      const a = await pl.runVisualPipeline(args);
+      const b = await pl.runVisualPipeline(args);
+      assert.strictEqual(a.status, 'ready');
+      assert.strictEqual(a.visuals[0].specHash, b.visuals[0].specHash);
+      assert.strictEqual(b.telemetry.visualSvgCacheHit, true);
+    } finally { restore(); }
+  });
+
+  await atest('33b. deadline gần hết: SVG tất định (0 chi phí mạng) VẪN được giao, chỉ ảnh AI mới bị hoãn', async () => {
+    const r = await pipeline.runVisualPipeline({
+      question: 'Vẽ đồ thị hàm số y = x^2', finalAnswer: 'y = x^2', subject: 'math', answerComplete: true,
+      deadline: { remaining: () => 500 }
+    });
+    assert.strictEqual(r.status, 'ready');
+    assert.strictEqual(r.visuals[0].format, 'svg');
   });
 
   await atest('34. PHẦN 20/32: pipeline KHÔNG BAO GIỜ throw, kể cả input rác', async () => {
@@ -396,7 +441,7 @@ test('29. PHẦN 24: candidate đồng thuận -> không có conflict', () => {
 
   await atest('37. PHẦN 24: hình chỉ dùng số của FINAL ANSWER, loại số của candidate bị bác bỏ', async () => {
     const r = await pipeline.runVisualPipeline({
-      question: 'Vật ném xiên với v0 = 20 m/s ở góc 30°, tính tầm xa và minh họa quỹ đạo',
+      question: 'Vật ném xiên với v0 = 20 m/s ở góc 30°, tính tầm xa và minh họa quỹ đạo bằng AI',
       finalAnswer: 'Ta có v0 = 20 m/s, góc 30°, g = 10 m/s². Tầm xa L = 34.6 m.',
       subject: 'physics', answerComplete: true,
       candidates: [{ label: 'A', text: 'v0 = 20 m/s' }, { label: 'B', text: 'v0 = 45 m/s' }]

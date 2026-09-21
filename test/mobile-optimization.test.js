@@ -114,9 +114,12 @@ test('M10. thẻ hình AI co theo bề ngang, không tràn ngang trên điện t
   'ảnh AI phải co theo bề ngang màn hình');
 });
 
-test('M11. KHÔNG còn CSS phục vụ hình SVG minh hoạ (.visual-svg, .draw-wrap svg)', () => {
-  assert.ok(!/\.visual-svg/.test(css), 'CSS còn selector của hình SVG cũ');
-  assert.ok(!/\.draw-wrap svg/.test(css), 'CSS còn selector của hình SVG cũ');
+test('M11. KHÔNG còn CSS của đường SVG nhúng-DOM cũ (.draw-wrap svg, .visual-svg-inline); SVG tất định chỉ qua <img>', () => {
+  assert.ok(!/\.draw-wrap svg/.test(css), 'CSS còn selector của hình SVG nhúng-DOM cũ');
+  assert.ok(!/\.visual-svg-inline/.test(css), 'không được có CSS cho SVG nhúng trực tiếp');
+  // Đường mới (Hybrid): SVG tất định hiển thị qua <img src=data:image/svg+xml> -> CSS nhắm vào img.
+  assert.ok(/\.visual-svg-wrap\s+\.visual-svg-img/.test(css), 'thiếu CSS cho thẻ SVG tất định (img)');
+  assert.ok(!/\.visual-svg-wrap\s+svg\b/.test(css), 'CSS SVG tất định không được nhắm vào <svg> nhúng-DOM');
 });
 
 test('M12. CSS 3D tương tác vẫn còn nguyên (không xoá nhầm khi dọn SVG)', () => {

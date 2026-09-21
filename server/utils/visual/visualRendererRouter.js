@@ -1,9 +1,14 @@
 'use strict';
 
 // ============================================================================================
-// VISUAL TYPE ROUTING — AI IMAGE FIRST (kiến trúc sau đợt dọn dẹp deterministic/SVG)
+// VISUAL TYPE ROUTING — NHÁNH ẢNH AI của Hybrid Visual Engine
 // ============================================================================================
-// Kiến trúc CUỐI CÙNG chỉ còn ĐÚNG 3 renderer:
+// PHẠM VI: file này CHỈ phân giải nhánh ảnh AI. Việc chọn giữa SVG tất định / Puter AI Image /
+// không hình nằm ở visualDeterminationEngine (điểm quyết định canonical duy nhất); router này chỉ
+// được visualPipeline gọi SAU KHI nhánh 'puter-image' đã được chọn — nó KHÔNG tự chọn SVG và
+// không cạnh tranh với determination engine. SVG tất định dựng bằng code ở ./deterministic/.
+//
+// Trong nhánh ảnh AI chỉ còn ĐÚNG 3 renderer:
 //
 //   generated_image  — MỌI hình minh hoạ 2D TĨNH (hình học, đồ thị, mạch điện, flowchart, chart,
 //                      sơ đồ sinh/hoá/địa, concept illustration...). Nguồn duy nhất: AI image
