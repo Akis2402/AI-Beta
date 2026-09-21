@@ -1,5 +1,12 @@
 'use strict';
 
+// BUG-007: file test này require gián tiếp `express`/`dotenv` THẬT. Khi chưa `npm install` (máy mới
+// clone, sandbox không có mạng), trước đây nó ném MODULE_NOT_FOUND và harness đếm là FAILED — một
+// "FAIL" hoàn toàn do môi trường, che mất kết quả thật và làm người đọc tưởng code hỏng. Dùng đúng
+// cơ chế đã có sẵn của repo (test/_depGuard.js): in SKIPPED trung thực + tên gói còn thiếu.
+// KHÔNG assertion nào bị nới lỏng hay bỏ đi: khi dependency có mặt, file chạy y như cũ.
+require('./_depGuard').requireDeps(['express', 'dotenv'], 'static-asset-integrity.test.js');
+
 // ---------- REGRESSION (PHẦN 10 của yêu cầu audit): "Unexpected token '<'" / HTML-thay-vì-JS ----------
 // Test này dựng THẬT server/app.js (giống test/vercel-header-parity.test.js — không mock), GET
 // TRỰC TIẾP các URL JS/CSS core (cả dạng có ?v=... cũ lẫn dạng đã fingerprint mới) và khẳng định
@@ -114,10 +121,18 @@ async function main() {
 
     await test('index.html KHÔNG chứa 2 thẻ <script> nào trỏ cùng 1 file JS core (không load trùng)', async () => {
       const res = await get(server, '/');
+      // FIX: stem TRƯỚC ĐÂY suy từ logicalName (vd "translations.js" -> "/js/translations...") —
+      // SAI khi asset thật nằm trong subfolder (vd i18n.js/translations.js build ra
+      // "/js/i18n/translations.<hash>.js"), khiến regex không bao giờ khớp và test luôn báo giả
+      // "0 lần" dù index.html hoàn toàn đúng. Nay suy stem từ CHÍNH đường dẫn thật trong manifest
+      // (giữ nguyên subfolder), escape ký tự đặc biệt regex (dấu / không cần escape nhưng để chắc
+      // chắn với path lạ trong tương lai).
       for (const logicalName of Object.keys(manifest.assets)) {
         if (!logicalName.endsWith('.js')) continue;
-        const stem = logicalName.replace(/\.js$/, '');
-        const re = new RegExp(`src="/js/${stem}(?:\\.[0-9a-f]{10})?\\.js[^"]*"`, 'g');
+        const assetPath = manifest.assets[logicalName]; // vd "/js/i18n/translations.c0f5a9cc96.js"
+        const stem = assetPath.replace(/\.[0-9a-f]{10}\.js$/, '').replace(/\.js$/, '');
+        const escapedStem = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`src="${escapedStem}(?:\\.[0-9a-f]{10})?\\.js[^"]*"`, 'g');
         const count = (res.body.match(re) || []).length;
         assert.strictEqual(count, 1, `${logicalName} xuất hiện ${count} lần trong index.html trả về`);
       }

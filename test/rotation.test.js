@@ -1,6 +1,6 @@
 'use strict';
 
-// Test suite thuần Node (không dùng framework ngoài, giống test/geo2d-engine.test.js) cho cơ chế
+// Test suite thuần Node (không dùng framework ngoài, giống test/storage.test.js) cho cơ chế
 // AI Rotation / Execution Target. Chạy: node test/rotation.test.js
 //
 // Mock global.fetch để không gọi mạng thật — định tuyến theo URL/header để giả lập từng

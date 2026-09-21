@@ -9,6 +9,23 @@ function notFoundHandler(req, res) {
 
 // eslint-disable-next-line no-unused-vars
 function errorHandler(err, req, res, next) {
+  // PHẦN A8/AE: lỗi 413 do CHÍNH body-parser ném ra mang message thô của thư viện ("request entity
+  // too large") và stack chứa đường dẫn nội bộ. Chuẩn hoá tại đây thành đúng một hình dạng với lỗi
+  // payload do validator sinh ra — cùng code, cùng userMessage, cùng actualSize/safeLimit — để client
+  // xử lý một cách duy nhất, và KHÔNG lộ đường dẫn/stack.
+  if (err && (err.type === 'entity.too.large' || err.status === 413) && !err.payloadInfo) {
+    const budget = require('../utils/payloadBudget');
+    err.code = 'PAYLOAD_TOO_LARGE';
+    err.userMessage = 'Yêu cầu quá nặng so với giới hạn của máy chủ. Hãy giảm số trang/ảnh nguồn gửi kèm rồi thử lại.';
+    err.debugMessage = undefined;
+    err.stack = '';
+    err.payloadInfo = {
+      scope: 'request',
+      actualSize: Number(err.length) || 0, // 0 khi parser chặn trước lúc đọc xong — không đoán số
+      safeLimit: budget.SAFE_REQUEST_BYTES,
+      suggestedAction: 'reduce_source_images_or_contexts'
+    };
+  }
   const normalized = normalizeError(err);
   const status = normalized.status;
   // Observability (mục LVIII/6): 1 dòng log JSON có cấu trúc cho MỌI lỗi lọt tới đây (route/status/
@@ -51,6 +68,17 @@ function errorHandler(err, req, res, next) {
     code: normalized.code,
     retryable: normalized.retryable
   };
+  // PHẦN A8: lỗi payload quá lớn đi kèm thông tin ĐỦ để client tự giảm tải (kích thước thật, trần an
+  // toàn, hành động gợi ý) — và KHÔNG có gì hơn thế (không path nội bộ, không cấu hình, không stack).
+  if (err && err.payloadInfo) {
+    payload.actualSize = err.payloadInfo.actualSize;
+    payload.safeLimit = err.payloadInfo.safeLimit;
+    payload.suggestedAction = err.payloadInfo.suggestedAction;
+    payload.scope = err.payloadInfo.scope;
+  }
+  // PHẦN E: danh sách trang nguồn bị TỪ CHỐI (kèm lý do) luôn đi cùng lỗi, để client đánh dấu đúng
+  // trang đó thay vì coi như đã đọc thành công.
+  if (err && Array.isArray(err.rejected) && err.rejected.length) payload.rejectedPages = err.rejected;
   // debugMessage CHỈ lộ ngoài production (giữ tên field cũ `detail` cho tương thích ngược).
   if (normalized.debugMessage) payload.detail = normalized.debugMessage;
   // providerErrors: chỉ gồm tên provider + câu lỗi đã được rút gọn/sanitize (KHÔNG chứa khóa API) —

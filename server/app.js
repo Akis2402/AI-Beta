@@ -12,6 +12,8 @@ const chatRoutes = require('./routes/chat');
 const generateRoutes = require('./routes/generate');
 const recommendRoutes = require('./routes/recommend');
 const studyRoutes = require('./routes/study');
+const visualRoutes = require('./routes/visual');
+const sourceVisionRoutes = require('./routes/sourceVision');
 
 const app = express();
 
@@ -29,25 +31,77 @@ app.use(corsOptions);
 // nén (tiết kiệm băng thông) cho mọi response JSON/tĩnh khác.
 app.use(compression({
   filter: (req, res) => {
-    if (res.getHeader('Content-Type') === 'text/event-stream; charset=utf-8') return false;
+    // BUG-005: bản trước so sánh BẰNG CHÍNH XÁC chuỗi 'text/event-stream; charset=utf-8'. Lớp bảo vệ
+    // đó vỡ im lặng ngay khi bất kỳ route nào set Content-Type hơi khác (thiếu charset, đổi thứ tự
+    // tham số, hoặc setHeader nhận mảng) — SSE sẽ bị nén + đệm lại, hiệu ứng "gõ chữ" biến thành một
+    // cục văn bản đến sau vài chục giây, và không có test nào bắt được vì nó vẫn "chạy". Nay nhận
+    // diện theo MEDIA TYPE (substring, không phân biệt hoa/thường, gộp mảng) — đúng thứ cần nhận diện.
+    const raw = res.getHeader('Content-Type');
+    const ct = (Array.isArray(raw) ? raw.join(',') : String(raw || '')).toLowerCase();
+    if (ct.includes('text/event-stream')) return false;
     return compression.filter(req, res);
   }
 }));
-app.use(express.json({ limit: '8mb' })); // đủ chứa ảnh base64 (validators.js giới hạn chặt hơn: 5MB)
+// ---------- PHẦN F: THỨ TỰ BODY-PARSER ----------
+// TRƯỚC ĐÂY: express.json({limit:'8mb'}) mount TOÀN CỤC ở đây, nên `express.json({limit:'4kb'})`
+// khai trong routes/visual.js KHÔNG BAO GIỜ có tác dụng — body đã được parse xong (với trần 8mb)
+// từ lâu trước khi request tới router đó. Đó là một lớp bảo vệ CHẾT: comment nói có, thực tế không.
+// NAY: KHÔNG có parser toàn cục. Mỗi nhóm route tự khai trần đúng nhu cầu của nó, và trần đó là
+// trần THẬT vì không còn parser nào chạy trước.
+//   - PARSER_LIMIT_BYTES (~4.2MB) chỉ dành cho route có ảnh; cố tình CAO HƠN ngân sách an toàn một
+//     chút để request hơi quá vẫn parse được và nhận lỗi CÓ CẤU TRÚC từ validator (PHẦN A8) thay vì
+//     413 trần trụi của body-parser.
+//   - route JSON nhỏ giữ trần nhỏ thật sự.
+const payloadBudget = require('./utils/payloadBudget');
+const jsonLarge = express.json({ limit: payloadBudget.PARSER_LIMIT_BYTES });
+const jsonSmall = express.json({ limit: '64kb' });
+// (routes/visual.js tự khai express.json({limit:'4kb'}) cho /hq và /retry — nay là trần THẬT.)
 
 // ---------- API ----------
 // Đây là nơi để thêm các route API mới trong tương lai:
 // const myFeatureRoutes = require('./routes/myFeature');
 // app.use('/api/my-feature', myFeatureRoutes);
-app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+// PHẦN N: log runtime THẬT sau deploy (không đoán theo cấu hình). PHẦN H/I/J: nói rõ tầng trạng
+// thái nào đang bền vững — health endpoint là nơi kiểm chứng sau khi deploy, không phải nơi quảng cáo.
+// Chuẩn hoá tiền tố /api khi chạy sau serverless adapter hoặc reverse proxy (nếu /api bị tước).
+// BUG-003: middleware này TRƯỚC ĐÂY nằm SAU `app.get('/api/health')`. Express khớp theo đúng thứ tự
+// đăng ký, nên khi nền tảng tước tiền tố (request tới là `/health`), URL được viết lại thành
+// `/api/health` NHƯNG handler health đã bị đi qua từ trước -> request rơi xuống notFoundHandler và
+// trả 404. Tức là chính endpoint dùng để kiểm tra "hệ thống còn sống không" là endpoint chết trong
+// đúng cấu hình deploy mà nó được viết ra để phục vụ. Nay normalizer chạy ĐẦU TIÊN.
+app.use((req, res, next) => {
+  const apiPrefixes = ['/chat', '/generate', '/recommend', '/study', '/visual', '/source', '/health'];
+  if (apiPrefixes.some((p) => req.url === p || req.url.startsWith(p + '/') || req.url.startsWith(p + '?'))) {
+    req.url = '/api' + req.url;
+  }
+  next();
+});
+
+app.get('/api/health', (req, res) => res.json({
+  ok: true,
+  time: new Date().toISOString(),
+  nodeVersion: process.version,
+  runtime: process.env.VERCEL ? 'vercel' : 'self-hosted',
+  distributedStore: require('./utils/kvStore').isEnabled(),
+  rateLimitScope: require('./middleware/rateLimit').isGlobalScope() ? 'global' : 'instance'
+}));
 
 app.use('/api', appKeyGate); // cổng khóa dùng chung tùy chọn (đọc từ .env, mặc định tắt)
-app.use('/api/chat', chatLimiter, chatRoutes);
-app.use('/api/generate', generateLimiter, generateRoutes);
-app.use('/api/recommend', recommendLimiter, recommendRoutes);
+app.use('/api/chat', chatLimiter, jsonLarge, chatRoutes);
+app.use('/api/generate', generateLimiter, jsonLarge, generateRoutes);
+app.use('/api/recommend', recommendLimiter, jsonSmall, recommendRoutes);
 // Mục 3A/3C: /api/study/* KHÔNG chạy qua chatLimiter (giới hạn dành cho pipeline giải bài nặng hơn
 // nhiều) — dùng chung generateLimiter (giới hạn cho các tác vụ nhỏ/JSON ngắn) cho hợp lý mức chi phí.
-app.use('/api/study', generateLimiter, studyRoutes);
+app.use('/api/study', generateLimiter, jsonSmall, studyRoutes);
+// MỤC 1.4: proxy tải hộ ảnh do image provider trả về (CSP/CORS chặn client fetch thẳng). Whitelist
+// domain CỨNG trong routes/visual.js — dùng generateLimiter vì đây là tác vụ nhẹ, không phải
+// pipeline giải bài.
+app.use('/api/visual', generateLimiter, visualRoutes); // parser khai TRONG router: /hq và /retry dùng jsonTiny 4kb THẬT
+// PHẦN A6/A11: batch vision-extraction cho PDF scan (đọc trang 1 lần, cache evidence text ở client
+// để KHÔNG phải gửi lại ảnh base64 mỗi lượt hỏi) — dùng chatLimiter (không phải generateLimiter) vì
+// đây là lệnh gọi AI thật (vision), cùng nhóm chi phí với pipeline giải bài chính, không phải tác
+// vụ nhẹ.
+app.use('/api/source', chatLimiter, jsonLarge, sourceVisionRoutes);
 
 // ---------- Frontend tĩnh ----------
 // Lưu ý: khi deploy trên Vercel, thư mục public/ được Vercel phục vụ trực tiếp

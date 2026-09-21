@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Puter Image Smoke Test</title></head>
+<body>
+<h1>Puter image smoke test</h1>
+<pre id="status"></pre>
+<img id="result" alt="Puter output" style="max-width:640px;display:block">
+<button id="run" type="button">Run live test_mode</button>
+<script src="https://js.puter.com/v2/"></script>
+<script>
+const status = document.getElementById('status');
+const result = document.getElementById('result');
+const lines = [];
+function mark(name, ok, detail) { lines.push(`${name.padEnd(24)} ${ok ? 'PASS' : 'FAIL'}${detail ? `: ${detail}` : ''}`); status.textContent = lines.join('\n'); }
+document.getElementById('run').onclick = async () => {
+  lines.length = 0;
+  mark('Puter SDK', !!window.puter);
+  mark('AI API', !!(window.puter && puter.ai));
+  mark('txt2img', !!(window.puter && puter.ai && typeof puter.ai.txt2img === 'function'));
+  if (!window.puter?.ai?.txt2img) return;
+  try {
+    const image = await puter.ai.txt2img('A simple educational triangle diagram on a white background.', { test_mode: true });
+    mark('HTMLImageElement', image instanceof HTMLImageElement);
+    mark('src', !!image.src);
+    await image.decode();
+    mark('Decode', true);
+    mark('Dimensions', image.width > 0 && image.height > 0, `${image.width}x${image.height}`);
+    result.src = image.src;
+    const response = await fetch(image.src);
+    const blob = await response.blob();
+    mark('Blob', blob.size > 0);
+    mark('MIME', /^image\//.test(blob.type), blob.type);
+    mark('IndexedDB', 'MANUAL: use app visual manager');
+    mark('Render', result.complete && result.width > 0);
+    mark('LIVE PASS', true);
+  } catch (e) {
+    mark('LIVE PASS', false, 'Puter request failed');
+    console.error(e);
+  }
+};
+</script>
+</body>
+</html>

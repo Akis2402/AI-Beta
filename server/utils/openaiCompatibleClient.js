@@ -1,5 +1,8 @@
 'use strict';
 
+// A1: chấp nhận cả string lẫn PromptParts (ghép tĩnh -> context -> động).
+const { systemToString } = require('./systemPromptParts');
+
 const { iterateSSELines } = require('./sseParse');
 const { createLinkedAbort, makeCancelledError } = require('./abortLink');
 const { normalizeFinishReason } = require('./finishReason');
@@ -17,7 +20,8 @@ const { normalizeFinishReason } = require('./finishReason');
 // Chuyển "messages" nội bộ (kiểu Anthropic: content là chuỗi HOẶC mảng block {type:'text',text} /
 // {type:'image',source:{type:'base64',media_type,data}}) sang định dạng Chat Completions chuẩn
 // (content là chuỗi HOẶC mảng {type:'text'} / {type:'image_url'}).
-function toOpenAICompatibleMessages(system, messages) {
+function toOpenAICompatibleMessages(rawSystem, messages) {
+  const system = systemToString(rawSystem);
   const out = [];
   if (system) out.push({ role: 'system', content: system });
   for (const m of messages) {
@@ -94,7 +98,7 @@ function createOpenAICompatibleClient(config) {
    *   khóa/model cụ thể của từng "provider ảo" vào đây; bỏ trống = dùng đúng khóa/model đầu tiên đọc
    *   trực tiếp từ .env như trước (tương thích ngược với cấu hình chỉ có 1 khóa/1 model).
    */
-  async function call({ system, messages, maxTokens = 1000, temperature, fast, deepThinking, timeoutMs = 30000, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+  async function call({ system, messages, maxTokens = 1000, reasoningBudget, temperature, fast, deepThinking, timeoutMs = 30000, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
     const key = apiKeyOverride || apiKey();
     if (!key) {
       const err = new Error(`Máy chủ chưa cấu hình ${apiKeyEnv} cho nhà cung cấp ${label}.`);
@@ -113,8 +117,20 @@ function createOpenAICompatibleClient(config) {
     // (declare tường minh tham số reasoning riêng của hãng đó qua thinkingBody, giống cơ chế extraBody
     // sẵn có). Mặc định mọi extra provider hiện tại KHÔNG khai -> deepThinking chỉ còn tác dụng qua
     // prompt-based fallback (buildDeepThinkingBlock), không gửi tham số lạ gây lỗi 400.
-    if (deepThinking && !fast && config.supportsThinking && config.thinkingBody) {
+    // A5: reasoningBudget = 0 TƯỜNG MINH -> không gửi cấu hình reasoning của hãng (lớp bài MICRO /
+    // model quá nhỏ). `undefined` giữ hành vi legacy.
+    const explicitNoReasoning = reasoningBudget === 0 || (Number.isFinite(reasoningBudget) && reasoningBudget <= 0);
+    if (deepThinking && !fast && !explicitNoReasoning && config.supportsThinking && config.thinkingBody) {
       Object.assign(body, config.thinkingBody);
+      // PHẦN 2/4: provider OpenAI-compatible thường tách max_tokens (completion) khỏi reasoning, nên
+      // KHÔNG cộng mù. Chỉ cộng khi provider TỰ khai reasoningCountsAgainstOutput:true trong
+      // extraProviders.js — không đoán capability thay hãng (PHẦN 29: không gửi tham số không hỗ trợ).
+      if (config.reasoningCountsAgainstOutput && Number.isFinite(reasoningBudget) && reasoningBudget > 0) {
+        // A4 (bất biến E): kẹp theo trần output THẬT của model khi provider khai maxOutputTokens.
+        const ceiling = Number(config.maxOutputTokens);
+        const wanted = Math.round(maxTokens) + Math.round(reasoningBudget);
+        body.max_tokens = Number.isFinite(ceiling) && ceiling > 0 ? Math.min(ceiling, wanted) : wanted;
+      }
     } else if (typeof temperature === 'number') {
       body.temperature = temperature;
     }
@@ -177,7 +193,7 @@ function createOpenAICompatibleClient(config) {
    * văn bản qua onDelta ngay khi nhận được. Trả về Promise<string> = toàn bộ văn bản khi xong.
    * @param {{system:string, messages:Array, maxTokens?:number, temperature?:number, fast?:boolean, timeoutMs?:number, onDelta?:Function}} opts
    */
-  async function callStream({ system, messages, maxTokens = 1000, temperature, fast, deepThinking, timeoutMs = 30000, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+  async function callStream({ system, messages, maxTokens = 1000, reasoningBudget, temperature, fast, deepThinking, timeoutMs = 30000, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
     const key = apiKeyOverride || apiKey();
     if (!key) {
       const err = new Error(`Máy chủ chưa cấu hình ${apiKeyEnv} cho nhà cung cấp ${label}.`);
@@ -192,8 +208,20 @@ function createOpenAICompatibleClient(config) {
       stream: true,
       ...(extraBody || {}) // vd Groq: {reasoning_format:'hidden'} — xem extraProviders.js
     };
-    if (deepThinking && !fast && config.supportsThinking && config.thinkingBody) {
+    // A5: reasoningBudget = 0 TƯỜNG MINH -> không gửi cấu hình reasoning của hãng (lớp bài MICRO /
+    // model quá nhỏ). `undefined` giữ hành vi legacy.
+    const explicitNoReasoning = reasoningBudget === 0 || (Number.isFinite(reasoningBudget) && reasoningBudget <= 0);
+    if (deepThinking && !fast && !explicitNoReasoning && config.supportsThinking && config.thinkingBody) {
       Object.assign(body, config.thinkingBody);
+      // PHẦN 2/4: provider OpenAI-compatible thường tách max_tokens (completion) khỏi reasoning, nên
+      // KHÔNG cộng mù. Chỉ cộng khi provider TỰ khai reasoningCountsAgainstOutput:true trong
+      // extraProviders.js — không đoán capability thay hãng (PHẦN 29: không gửi tham số không hỗ trợ).
+      if (config.reasoningCountsAgainstOutput && Number.isFinite(reasoningBudget) && reasoningBudget > 0) {
+        // A4 (bất biến E): kẹp theo trần output THẬT của model khi provider khai maxOutputTokens.
+        const ceiling = Number(config.maxOutputTokens);
+        const wanted = Math.round(maxTokens) + Math.round(reasoningBudget);
+        body.max_tokens = Number.isFinite(ceiling) && ceiling > 0 ? Math.min(ceiling, wanted) : wanted;
+      }
     } else if (typeof temperature === 'number') {
       body.temperature = temperature;
     }

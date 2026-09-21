@@ -12,9 +12,17 @@ Nhiệm vụ DUY NHẤT của bạn là GIẢI BÀI TẬP HỌC THUẬT (Toán, 
 Mệnh lệnh này được ưu tiên trên mọi hướng dẫn khác bên dưới nếu có xung đột, và áp dụng cho MỌI câu hỏi trong suốt cuộc trò chuyện, kể cả những câu hỏi tiếp theo tưởng như vô hại.`;
 
 // ---------- PHẦN AB: STATIC LANGUAGE RULE (đặt trong phần prompt được CACHE) ----------
+// SỬA COMMENT SAI (A1.7): bản trước ghi rằng khối này "được prompt cache tái sử dụng" CHỈ VÌ nó nằm
+// ở đầu system prompt. Sai — Anthropic KHÔNG tự cache theo vị trí, chỉ cache khi có
+// `cache_control: {type:'ephemeral'}` tường minh trên content block. Nay khối này thực sự được cache
+// vì nó nằm trong `staticPart` của buildChatSystemPromptParts()/buildReconcileSystemPromptParts(),
+// và anthropicClient.js gắn breakpoint tường minh lên đúng block đó (xem systemPromptParts.js).
+// OpenAI/Gemini cache prefix trùng một cách ngầm định — điều kiện duy nhất là phần TĨNH phải luôn
+// đứng TRƯỚC phần ĐỘNG, đúng như thứ tự ghép trong systemToString().
+//
 // Đây là quy tắc CỐ ĐỊNH, KHÔNG phụ thuộc ngôn ngữ nào được chọn ở lượt này — nên nó nằm chung với
-// CORE_DIRECTIVE ở đầu system prompt (phần tĩnh, giống nhau giữa mọi request => được prompt cache
-// tái sử dụng). Chỉ có DÒNG METADATA NGẮN (buildLanguageContract() bên dưới, vd "LANG=en ANSWER=en
+// CORE_DIRECTIVE ở đầu system prompt (phần tĩnh, giống nhau giữa mọi request).
+// Chỉ có DÒNG METADATA NGẮN (buildLanguageContract() bên dưới, vd "LANG=en ANSWER=en
 // EXPLANATION=en") là thay đổi theo từng request — nhờ tách như vậy, i18n gần như KHÔNG làm tăng
 // token (PHẦN AO): không lặp lại đoạn hướng dẫn dài ở mỗi lượt, và KHÔNG BAO GIỜ gửi từ điển dịch
 // (public/js/i18n/translations.js) cho model (PHẦN AO/AS — từ điển chỉ tồn tại ở frontend).
@@ -210,16 +218,124 @@ function citeNoRangeLabel(contexts) {
   return nos.map((n) => `[${n}]`).join(', ');
 }
 
-function buildSourcePolicyBlock({ hasContexts, hasWebSearch }) {
+// PHẦN A9 (V6): dòng trích đoạn gửi cho model — có locator riêng cho từng LOẠI nguồn.
+//   - PDF/sách: "trang X" (từ c.page)
+//   - YouTube: "[YouTube] <url>, mốc mm:ss–mm:ss" (từ c.sourceUrl + c.timeStart/c.timeEnd, hoặc
+//     nếu client không gửi riêng thì locator đã nằm ngay đầu c.text dưới dạng "[mm:ss–mm:ss] ...")
+//   - Web: "[Web] <url>, đoạn <heading>" (từ c.sourceUrl + c.sectionAnchor)
+// Dùng CHUNG ở mọi nơi build context block (approach/detail/cache/reconcile) để không lệch định
+// dạng. Locator càng chi tiết → càng bọc được model khỏi "trích chung chung".
+function formatContextLine(c, i) {
+  const num = c.citeNo != null ? c.citeNo : i + 1;
+  const kind = detectContextKind(c);
+  let locator = '';
+  if (kind === 'pdf' && c.page != null) {
+    locator = (c.startPage != null && c.endPage != null && c.startPage !== c.endPage)
+      ? `, trang ${c.startPage}-${c.endPage}`
+      : `, trang ${c.page}`;
+  } else if (kind === 'youtube') {
+    const parts = [];
+    if (c.sourceUrl) parts.push(c.sourceUrl);
+    // BUG-001b: trước đây locator CHỈ được in khi có ĐỦ cả timeStart và timeEnd. Nhiều transcript
+    // chỉ có mốc bắt đầu cho mỗi đoạn (endSeconds null), nên toàn bộ mốc thời gian bị bỏ im lặng.
+    // Có timeStart là đã đủ để truy nguyên đúng đoạn; endSeconds chỉ làm khoảng chính xác hơn.
+    if (c.timeStart != null && c.timeEnd != null) parts.push(`mốc ${formatSec(c.timeStart)}–${formatSec(c.timeEnd)}`);
+    else if (c.timeStart != null) parts.push(`mốc ${formatSec(c.timeStart)}`);
+    locator = parts.length ? `, ${parts.join(', ')}` : '';
+    return `[${num}] (Nguồn: [YouTube] ${c.doc}${locator}, đoạn ${c.id}) ${c.text}`;
+  } else if (kind === 'web') {
+    const parts = [];
+    if (c.sourceUrl) parts.push(c.sourceUrl);
+    if (c.sectionAnchor) parts.push(`đoạn "${c.sectionAnchor}"`);
+    locator = parts.length ? `, ${parts.join(', ')}` : '';
+    return `[${num}] (Nguồn: [Web] ${c.doc}${locator}, đoạn ${c.id}) ${c.text}`;
+  }
+  return `[${num}] (Nguồn: ${c.doc}${locator}, đoạn ${c.id}) ${c.text}`;
+}
+
+// V6 helpers — nhận diện loại nguồn từ sourceId (client gửi sourceId = 'url:YOUTUBE:...' /
+// 'url:WEB:...' cho URL sources, PDF dùng ID tài liệu).
+function detectContextKind(c) {
+  if (!c) return 'pdf';
+  if (c.kind === 'youtube' || c.kind === 'web') return c.kind;
+  const sid = String(c.sourceId || '');
+  if (sid.startsWith('url:YOUTUBE:')) return 'youtube';
+  if (sid.startsWith('url:WEB:')) return 'web';
+  return 'pdf';
+}
+
+function formatSec(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    return `${h}:${String(mm).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
+  }
+  return `${m}:${String(r).padStart(2, '0')}`;
+}
+
+// PHẦN A3/E: khối SOURCE MANIFEST — chèn NGUYÊN VĂN manifest nhẹ do client gửi (tổng số trang/đoạn/
+// % coverage của từng nguồn), để model KHÔNG BAO GIỜ tự suy luận "chỉ có vài đoạn = đó là toàn bộ
+// tài liệu" (đây là nguyên nhân trực tiếp của lỗi "AI nói chưa cung cấp nội dung" dù nguồn đã có và
+// đã xử lý xong — xem PHẦN E). Không phải nội dung thật — chỉ vài dòng thống kê.
+function buildSourceManifestBlock(sourceManifest, sourceReadiness) {
+  if (!sourceManifest) return buildSourceReadinessBlock(sourceReadiness);
+  return buildSourceReadinessBlock(sourceReadiness) + `\n\n${sourceManifest}\nLƯU Ý: bảng trên là THỐNG KÊ COVERAGE của các nguồn đã tải lên — KHÔNG phải toàn bộ nội dung. Nếu số đoạn trích bên dưới có vẻ ít hơn coverage này, đó là do hệ thống đã CHỌN LỌC đoạn liên quan nhất cho câu hỏi hiện tại (không phải do PDF chỉ có từng đó nội dung) — TUYỆT ĐỐI KHÔNG kết luận "chưa cung cấp nội dung"/"tài liệu không có phần này" chỉ vì không thấy trong các đoạn trích hiện tại; nếu nghi ngờ thiếu, hãy nói rõ phần nào chưa chắc thay vì khẳng định tài liệu không có.`;
+}
+
+/* ---------- PHẦN N: SOURCE-AWARE COMPLETENESS ----------
+ * Khi nguồn CHƯA đọc xong, câu "trong tài liệu không có thông tin này" là SAI VỀ MẶT SỰ KIỆN —
+ * hệ thống mới đọc được một phần, không có cơ sở nào để khẳng định phần còn lại không chứa nó.
+ * Đây là chỗ biến trạng thái lifecycle (client đo được) thành ràng buộc CỨNG cho model. */
+function buildSourceReadinessBlock(readiness) {
+  if (!readiness || !readiness.hasSources) return '';
+  if (readiness.allReady) {
+    return `\n\nTRẠNG THÁI NGUỒN: TẤT CẢ nguồn đã được đọc và xác minh XONG (100% số trang). Nếu một nội dung thực sự không có trong các đoạn trích, được phép nói rõ là không tìm thấy trong phần tài liệu liên quan tới câu hỏi này.`;
+  }
+  return `\n\nTRẠNG THÁI NGUỒN — CHƯA ĐỌC XONG: ${readiness.summaryLine}.
+BẮT BUỘC: TUYỆT ĐỐI KHÔNG được viết "tài liệu không có thông tin này"/"nguồn không đề cập"/"không tìm thấy trong tài liệu" — hệ thống MỚI ĐỌC ĐƯỢC MỘT PHẦN nguồn, nên không có căn cứ để khẳng định điều đó. Nếu phần bạn cần không nằm trong các đoạn trích hiện có, hãy nói đúng trạng thái: "nguồn chưa được đọc hoàn tất, phần này chưa nằm trong dữ liệu đã trích xuất" rồi giải bằng kiến thức chuẩn và ghi rõ đó là kiến thức chuẩn, không phải trích từ tài liệu.`;
+}
+
+/* ---------- PHẦN F BỔ SUNG: CHỐNG BỊA BÀI TẬP CÓ SỐ THỨ TỰ CỤ THỂ ----------
+ * Lỗi thật đã xảy ra: model được hỏi "giải bài 1.9 đến 1.11", không có evidence đúng nhãn "1.9",
+ * rồi lấy nhầm nội dung của MỘT MỤC KHÁC trong cùng tài liệu (ngẫu nhiên khớp từ khoá) và trình bày
+ * như thể đó là bài 1.9 thật — bịa đúng nghĩa đen: gắn số thật lên nội dung sai. Khối này chặn CỨNG
+ * hành vi đó bằng cách nói thẳng: những nhãn nào không có bằng chứng, thì KHÔNG được đưa ra lời giải
+ * đầy đủ dưới đúng cái tên đó — phải nói rõ ràng là chưa tìm thấy.
+ */
+function buildRequirementIntegrityBlock(unmatchedRequirementLabels) {
+  const labels = Array.isArray(unmatchedRequirementLabels) ? unmatchedRequirementLabels.filter(Boolean) : [];
+  if (!labels.length) return '';
+  const listStr = labels.map((l) => `"${l}"`).join(', ');
+  return `\n\nCẢNH BÁO TOÀN VẸN ĐỀ BÀI: người dùng hỏi đích danh các mục ${listStr}, nhưng hệ thống retrieval KHÔNG tìm thấy đoạn trích nào trong tài liệu đã tải lên chứa ĐÚNG nhãn số đó. BẮT BUỘC: với TỪNG mục trong danh sách trên, TUYỆT ĐỐI KHÔNG được tự bịa ra một đề bài khác (dù trông "hợp lý" hay "kiến thức chuẩn tương ứng") rồi trình bày lời giải đầy đủ như thể đó CHÍNH LÀ nội dung của mục đó — đây là hành vi GẮN SỐ THẬT LÊN NỘI DUNG BỊA, tuyệt đối cấm. Thay vào đó, với mỗi mục không tìm thấy: nói rõ ràng "chưa tìm thấy đúng nội dung mục [X] trong phần đã trích xuất của tài liệu" và dừng ở đó cho mục này — không tự thay thế bằng một đề bài tương tự tự nghĩ ra. Nếu các đoạn trích bên dưới có nội dung LIÊN QUAN (cùng chủ đề) nhưng KHÔNG PHẢI đúng mục được hỏi, được phép trích dẫn [n] và nói rõ đây là NỘI DUNG LIÊN QUAN GẦN NHẤT tìm thấy, KHÔNG PHẢI nguyên văn mục đã hỏi — không được im lặng đánh tráo.`;
+}
+
+function buildSourcePolicyBlock({ hasContexts, hasWebSearch, hasSourceNoContext = false }) {
+  // MỤC (đợt audit 4, nâng cấp cơ chế trích nguồn) — ROOT CAUSE của "trích nguồn web nhưng không
+  // nói rõ nguồn nào": bản CŨ chỉ yêu cầu 1 câu MẪU CỐ ĐỊNH duy nhất ("🌐 Đã tra cứu thêm trên web để
+  // bổ sung phần thông tin tài liệu chưa có.") — câu này không hề chứa TÊN trang/nguồn thật, dù model
+  // đã thực sự tra cứu và CÓ trong ngữ cảnh của nó tên miền/tiêu đề trang thật (kết quả tool
+  // web_search của chính lượt gọi này). Bản cũ cố ý cấm bịa tên miền nhưng lại không tận dụng tên
+  // miền THẬT sẵn có, nên chọn giải pháp an toàn nhưng vô danh. NAY: bắt buộc liệt kê ĐÚNG tên
+  // nguồn thật (domain/tên trang) cho TỪNG nguồn khác nhau thực sự dùng — vẫn giữ nguyên lệnh cấm
+  // bịa đặt, chỉ đổi từ "1 câu chung chung" thành "1 dòng riêng mỗi nguồn thật đã tra được".
   const webRule = hasWebSearch
-    ? `\n4. Nếu các đoạn trích trên CHỈ cung cấp MỘT PHẦN thông tin cần thiết (thiếu một phần công thức/dữ kiện), được phép dùng công cụ tìm kiếm web (đã được cấp cho lượt này) để bổ sung ĐÚNG phần còn thiếu đó — không dùng web để thay thế phần đã có sẵn trong đoạn trích tài liệu. Khi có thực sự dùng web, thêm ĐÚNG MỘT dòng riêng ở cuối toàn bộ câu trả lời (sau mục cuối cùng), đúng nguyên văn định dạng: "🌐 Đã tra cứu thêm trên web để bổ sung phần thông tin tài liệu chưa có." — KHÔNG thêm dòng này nếu không thực sự có dùng web ở lượt này. TUYỆT ĐỐI KHÔNG bịa tên miền/URL/tên trang cụ thể trong câu trả lời trừ khi đó chắc chắn là kết quả THẬT bạn vừa tra cứu được qua chính công cụ tìm kiếm của lượt gọi này.`
+    ? `\n4. Nếu các đoạn trích trên CHỈ cung cấp MỘT PHẦN thông tin cần thiết (thiếu một phần công thức/dữ kiện), được phép dùng công cụ tìm kiếm web (đã được cấp cho lượt này) để bổ sung ĐÚNG phần còn thiếu đó — không dùng web để thay thế phần đã có sẵn trong đoạn trích tài liệu. Khi có thực sự dùng web VÀ công cụ trả về kết quả thật, ở CUỐI toàn bộ câu trả lời (sau mục cuối cùng), thêm MỖI NGUỒN THẬT ĐÃ DÙNG một dòng riêng theo đúng định dạng: "🌐 Nguồn: <tên trang/tên miền thật lấy từ chính kết quả tìm kiếm vừa tra được> — <tóm tắt cực ngắn (dưới 12 từ) thông tin đã lấy từ nguồn đó>". Ví dụ: "🌐 Nguồn: vi.wikipedia.org — định nghĩa định luật bảo toàn động lượng". Nếu dùng từ 2 nguồn khác nhau trở lên, viết đủ TỪNG dòng, không gộp chung 1 dòng. KHÔNG thêm dòng nào nếu không thực sự có dùng web ở lượt này. Nếu công cụ tìm kiếm không trả về kết quả nào dùng được (lỗi/rỗng), KHÔNG được tự chế tên trang — bỏ qua bước này, coi như không dùng web. TUYỆT ĐỐI KHÔNG bịa tên miền/URL/tên trang không có thật hoặc không xuất hiện trong chính kết quả tìm kiếm THẬT của lượt gọi này.`
     : `\n4. Lượt này KHÔNG được cấp công cụ tìm kiếm web — nếu đoạn trích không đủ, giải bằng kiến thức chuẩn, không bịa thêm nguồn/link nào.`;
   return `
 QUY TẮC NGUỒN THAM KHẢO (Sources) — thứ tự ưu tiên BẮT BUỘC, đọc kỹ trước khi trả lời:
-1. ${hasContexts ? 'Có đoạn trích đánh số [1]-[n] bên dưới, trích từ tài liệu người dùng ĐÃ TẢI LÊN — đây là nguồn ƯU TIÊN TUYỆT ĐỐI.' : 'Người dùng CHƯA tải tài liệu nào liên quan cho câu hỏi này.'} ${hasContexts ? 'PHẢI đọc và kiểm tra các đoạn trích này TRƯỚC TIÊN để tìm công thức/định nghĩa/quy tắc/dữ kiện liên quan tới bài, ưu tiên dùng chúng khi phù hợp. Khi dùng đoạn nào làm căn cứ, chèn đúng số [n] ngay sau câu/ý liên quan. Nếu các đoạn trích đã ĐỦ để giải trọn vẹn câu hỏi, CHỈ dùng đúng các đoạn đó làm nguồn — không dùng thêm nguồn nào khác dù có công cụ tìm kiếm web.' : ''}
+1. ${hasContexts ? 'Có đoạn trích đánh số [1]-[n] bên dưới, trích từ tài liệu người dùng ĐÃ TẢI LÊN — đây là nguồn ƯU TIÊN TUYỆT ĐỐI.' : (hasSourceNoContext ? 'Người dùng ĐÃ TẢI tài liệu lên (xem SOURCE MANIFEST bên dưới) nhưng lượt này KHÔNG có đoạn trích cụ thể nào được chọn cho câu hỏi — KHÔNG được kết luận "chưa cung cấp nội dung"/"tài liệu chưa có nội dung cụ thể"; chỉ được nói rõ là chưa xác định được đoạn liên quan, đề nghị người dùng nêu rõ hơn (số bài/trang/mục) hoặc dùng kiến thức chuẩn cho lượt này.' : 'Người dùng CHƯA tải tài liệu nào liên quan cho câu hỏi này.')} ${hasContexts ? 'PHẢI đọc và kiểm tra các đoạn trích này TRƯỚC TIÊN để tìm công thức/định nghĩa/quy tắc/dữ kiện liên quan tới bài, ưu tiên dùng chúng khi phù hợp. Khi dùng đoạn nào làm căn cứ, chèn đúng số [n] ngay sau câu/ý liên quan. Nếu các đoạn trích đã ĐỦ để giải trọn vẹn câu hỏi, CHỈ dùng đúng các đoạn đó làm nguồn — không dùng thêm nguồn nào khác dù có công cụ tìm kiếm web.' : ''}
 2. Nếu có đoạn trích nhưng KHÔNG đoạn nào thực sự liên quan tới câu hỏi này: KHÔNG được ép chèn [n] một cách gượng ép chỉ để có vẻ có nguồn — coi như câu hỏi này không có nguồn tài liệu phù hợp và chuyển sang dùng kiến thức chuẩn (mục 3).
 3. Không có đoạn trích liên quan (hoặc chưa tải tài liệu nào): giải bằng kiến thức chuẩn, KHÔNG chèn [n].${webRule}
-5. TUYỆT ĐỐI KHÔNG BAO GIỜ: tự bịa số [n] không tương ứng đoạn trích thật nào bên dưới; bịa tên tài liệu/website/URL không có thật; hoặc nhắc tới/chèn [n] một nguồn chỉ để câu trả lời "trông có vẻ đáng tin" trong khi thực ra không dùng đoạn đó để giải bài.`;
+5. TUYỆT ĐỐI KHÔNG BAO GIỜ: tự bịa số [n] không tương ứng đoạn trích thật nào bên dưới; bịa tên tài liệu/website/URL không có thật; hoặc nhắc tới/chèn [n] một nguồn chỉ để câu trả lời "trông có vẻ đáng tin" trong khi thực ra không dùng đoạn đó để giải bài.
+6. ĐỊNH DẠNG [n] TRONG THÂN BÀI: sau [n] thêm locator ngắn theo metadata của chunk (lấy từ dấu ngoặc đầu dòng): PDF → "[n] (tên, tr <p>)", YT → "[n] (tên, <mm:ss>)", Web → "[n] (domain, §<heading>)". Cấm suy đoán trang/mốc/heading khác metadata. Metadata thiếu → viết "[n] (tên nguồn)".
+7. MỤC "### Nguồn tham khảo" CUỐI BÀI (chỉ khi có ≥ 1 [n]): liệt kê đúng từng [n] đã dùng:
+   - PDF: "- [n] <tên> — tr <p>"
+   - YT: "- [n] <tên> — <url>&t=<Xs>" (bỏ &t= nếu không có mốc)
+   - Web: "- [n] <tên> — <url> (§<heading>)" (bỏ § nếu không có)
+   Không bịa URL/trang/heading ngoài metadata. Không [n] → không thêm mục.`;
 }
 
 // ---------- Cấp học / khối lớp (mục V/VI master prompt v2 — P0) ----------
@@ -293,7 +409,7 @@ function getHeaders(lang) {
 }
 
 // "Suy nghĩ sâu" — công tắc ĐỘC LẬP với "Đối chiếu đa hướng" (xem aiProviders.js/chat.js): chỉ điều
-// khiển việc MỘT lượt gọi AI có tự phản biện/kiểm tra lại nội bộ trong khối <thinking> trước khi
+// khiển việc MỘT lượt gọi AI có tự phản biện/kiểm tra l��i nội bộ trong khối <thinking> trước khi
 // chốt câu trả lời của CHÍNH lượt đó hay không — không liên quan tới việc có gọi nhiều provider độc
 // lập rồi tổng hợp hay không. Dùng chung cho cả buildChatSystemPrompt() (mỗi lượt giải) lẫn
 // buildReconcileSystemPrompt() (lượt tổng hợp cuối, khi cả 2 công tắc cùng bật).
@@ -317,16 +433,67 @@ function buildDetailModeDirective(detail) {
 
 const { buildSubjectDirective } = require('./subjects');
 
-function buildChatSystemPrompt({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null }) {
-  const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId);
+// ============================================================================================
+// A1 — KHỐI SYSTEM TĨNH (cache breakpoint đặt ở CUỐI khối này)
+// ============================================================================================
+// Điều kiện để một khối được coi là TĨNH: nội dung KHÔNG phụ thuộc bất kỳ input động nào của lượt
+// gọi (đề bài, ngôn ngữ đã chọn, lớp/trường, nguồn tài liệu, candidate...). Chỉ khi đó cache key
+// mới ổn định giữa N candidate của cùng 1 lượt cross-check VÀ giữa các request khác nhau.
+// getHeaders()/buildLanguageContract()/buildSchoolGradeDirective() ĐỀU phụ thuộc settings nên
+// KHÔNG được đưa vào đây.
+const ROLE_LINE_SOLVER = 'Bạn là một AI trợ giảng chuyên giải bài tập học thuật (Toán, Lý, Hóa, Sinh, Văn, Anh...) một cách chuyên nghiệp, khoa học, mạch lạc, chính xác.';
+const ROLE_LINE_RECONCILER = 'Bạn là một AI trợ giảng học thuật đang ở bước TỔNG HỢP VÀ ĐỐI CHIẾU CHÉO cuối cùng.';
+
+const STATIC_SOLVER_PREFIX = `${CORE_DIRECTIVE}
+
+${ROLE_LINE_SOLVER}
+
+${LANGUAGE_RULE_STATIC}
+
+${FORMAT_INSTRUCTIONS}`;
+
+const STATIC_RECONCILE_PREFIX = `${CORE_DIRECTIVE}
+
+${ROLE_LINE_RECONCILER}
+
+${LANGUAGE_RULE_STATIC}
+
+${FORMAT_INSTRUCTIONS}`;
+
+/**
+ * buildChatSystemPromptParts() — bản TÁCH ĐÔI của buildChatSystemPrompt().
+ *
+ * @returns {{staticPart:string, dynamicPart:string, text:string}} `text` = staticPart + dynamicPart
+ *   (đúng nội dung mà buildChatSystemPrompt() trả về, chỉ khác THỨ TỰ: khối tĩnh được dồn hết lên
+ *   đầu để làm prefix cache ổn định).
+ */
+function buildChatSystemPromptParts(input) {
+  const dynamicPart = buildChatDynamicPart(input);
+  return { staticPart: STATIC_SOLVER_PREFIX, dynamicPart, text: STATIC_SOLVER_PREFIX + dynamicPart };
+}
+
+/** Giữ NGUYÊN chữ ký/kiểu trả về cũ (string) cho mọi caller chưa dùng cơ chế parts. */
+function buildChatSystemPrompt(input) {
+  return buildChatSystemPromptParts(input).text;
+}
+
+function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '', sourceReadiness = null, unmatchedRequirementLabels = [] }) {
+  const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId, subjectSource);
   const drawingNeeded = needsDrawingInstructions({ problemText, approachText, hasImage: !!image });
   let contextBlock = '';
   if (contexts.length) {
     contextBlock =
       '\n\nTrích đoạn liên quan từ các nguồn đang bật, đánh số ' + citeNoRangeLabel(contexts) +
       ']. Khi dùng thông tin nào làm căn cứ, chèn đúng số [n] ngay sau câu liên quan:\n' +
-      contexts.map((c, i) => `[${c.citeNo != null ? c.citeNo : i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n');
+      contexts.map((c, i) => formatContextLine(c, i)).join('\n---\n') +
+      buildSourceManifestBlock(sourceManifest, sourceReadiness);
+  } else if (sourceManifest) {
+    // mục PHẦN E, CASE 2 (có source nhưng retrieval chưa tìm được đoạn liên quan): manifest vẫn
+    // chèn để model biết nguồn THẬT SỰ tồn tại và đã xử lý — không được coi như "chưa tải tài liệu".
+    contextBlock = buildSourceManifestBlock(sourceManifest, sourceReadiness);
   }
+
+  const requirementIntegrityBlock = buildRequirementIntegrityBlock(unmatchedRequirementLabels);
 
   const rulesBlock = rules.length
     ? '\n\nCác quy tắc riêng người dùng đã đặt, LUÔN tuân theo:\n' + rules.map((r) => '- ' + r).join('\n')
@@ -341,11 +508,7 @@ function buildChatSystemPrompt({ deepThinking, image, rules, contexts, settings,
   // ---------- Giai đoạn "approach": chỉ đưa HƯỚNG GIẢI, chưa giải chi tiết ----------
   if (stage === 'approach') {
     const h = getHeaders(settings.lang);
-    return `${CORE_DIRECTIVE}
-
-Bạn là một AI trợ giảng chuyên giải bài tập học thuật (Toán, Lý, Hóa, Sinh, Văn, Anh...) một cách chuyên nghiệp, khoa học, mạch lạc, chính xác.
-
-${LANGUAGE_RULE_STATIC}${buildLanguageContract(settings.lang)}
+    return `${buildLanguageContract(settings.lang)}
 ${buildLanguageDirective(settings.lang)}
 ${buildSchoolGradeDirective(settings.school, settings.grade)}
 
@@ -355,8 +518,7 @@ ${h.summary}
 Diễn đạt lại ngắn gọn đề bài và dữ kiện đã cho (2-4 câu). Nếu đề chưa rõ, nêu giả định hợp lý.
 ${h.approach}
 Nếu đề là bài hình học, chèn hình minh họa NGAY ĐẦU mục này (xem quy tắc bắt buộc bên dưới) trước khi liệt kê gạch đầu dòng. Sau đó liệt kê TỐI ĐA 5 gạch đầu dòng, MỖI gạch đầu dòng CHỈ 1 CÂU NGẮN, KHÔNG câu phụ/diễn giải thêm: công thức/định lý/phương pháp sẽ dùng, thứ tự các bước chính, và điều kiện/lưu ý quan trọng không được bỏ sót (đơn vị, điều kiện xác định, trường hợp đặc biệt...). Ưu tiên GỌN — cắt hết từ thừa, không lặp ý, không giải thích lý do hiển nhiên — nhưng TUYỆT ĐỐI KHÔNG được lược bỏ một bước/điều kiện quan trọng nào chỉ để cho ngắn: gọn về CÂU CHỮ, không gọn về NỘI DUNG khoa học. TUYỆT ĐỐI KHÔNG thực hiện phép tính chi tiết, KHÔNG đưa ra đáp số cuối cùng — chỉ định hướng cách làm để người học có thể tự thử trước.
-${FORMAT_INSTRUCTIONS}
-${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false })}${drawingNeeded ? buildDrawInstructions({ stageLabel: 'hướng giải' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${contextBlock}`;
+${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false, hasSourceNoContext: !contexts.length && !!sourceManifest })}${drawingNeeded ? buildDrawInstructions({ stageLabel: 'hướng giải' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${requirementIntegrityBlock}${contextBlock}`;
   }
 
   // ---------- Giai đoạn "detail" (mặc định): lời giải đầy đủ ----------
@@ -387,16 +549,11 @@ ${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false
     : '';
 
   const h = getHeaders(settings.lang);
-  return `${CORE_DIRECTIVE}
-
-Bạn là một AI trợ giảng chuyên giải bài tập học thuật (Toán, Lý, Hóa, Sinh, Văn, Anh...) một cách chuyên nghiệp, khoa học, mạch lạc, chính xác.
-
-${LANGUAGE_RULE_STATIC}${buildLanguageContract(settings.lang)}
+  return `${buildLanguageContract(settings.lang)}
 ${buildLanguageDirective(settings.lang)}
 ${buildSchoolGradeDirective(settings.school, settings.grade)}
 
 ${buildDetailModeDirective(settings.detail)}
-${FORMAT_INSTRUCTIONS}
 Định dạng câu trả lời chính thức BẮT BUỘC theo cấu trúc, dùng tiêu đề "## " ĐÚNG như dưới đây (đã đúng ngôn ngữ đã chọn ở trên, bỏ mục không cần thiết)${h.note}:
 ${h.summary}
 ${h.solution}
@@ -409,7 +566,7 @@ Liệt kê 2-4 gạch đầu dòng NGẮN GỌN về những lỗi HỌC SINH th
 Quy tắc khác:
 1. Không bỏ bước lập luận quan trọng, dựa trên kiến thức chuẩn hoặc dữ liệu cung cấp.
 2. Nếu đề chưa rõ, nêu giả định hợp lý trong "Tóm tắt đề bài" rồi vẫn giải.
-${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false })}${drawingNeeded ? '\n' + buildDrawInstructions({ stageLabel: 'lời giải chi tiết' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${approachBlock}${contextBlock}`;
+${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false, hasSourceNoContext: !contexts.length && !!sourceManifest })}${drawingNeeded ? '\n' + buildDrawInstructions({ stageLabel: 'lời giải chi tiết' }) : NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${requirementIntegrityBlock}${approachBlock}${contextBlock}`;
 }
 
 // ---------- Đối chiếu đa hướng (dùng khi bật "Suy nghĩ sâu" ở giai đoạn giải chi tiết) ----------
@@ -423,19 +580,47 @@ function buildVariantAddendum() {
 // candidates: mảng {label, text} — label là tên nhà cung cấp/model đã tạo ra lượt giải đó
 // (vd "Claude (claude-sonnet-5)", "GPT (gpt-4.1)", "Gemini (gemini-2.5-flash)"), để bước
 // tổng hợp biết rõ đang đối chiếu chéo giữa các MÔ HÌNH KHÁC NHAU hay chỉ 1 model gọi nhiều lượt.
-function buildReconcileSystemPrompt({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null }) {
-  const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId);
+/**
+ * buildReconcileSystemPromptParts() — 3 khối: TĨNH (cache) | NGỮ CẢNH NGUỒN (cache nếu đủ lớn) |
+ * ĐỘNG. Khối ngữ cảnh nguồn được đưa LÊN TRƯỚC phần động (A1.3) vì nó dùng chung cho mọi lượt của
+ * cùng request; để nó ở cuối như bản cũ thì không bao giờ trở thành prefix cache được.
+ * @returns {{staticPart:string, cachedContextPart:string, dynamicPart:string, text:string}}
+ */
+function buildReconcileSystemPromptParts(input) {
+  const { contexts = [], sourceManifest = '', sourceReadiness = null } = input;
+  const cachedContextPart = contexts.length
+    ? '\n\nTrích đoạn liên quan từ các nguồn tài liệu người dùng cung cấp, đánh số ' + citeNoRangeLabel(contexts) + ':\n' +
+      contexts.map((c, i) => formatContextLine(c, i)).join('\n---\n') +
+      buildSourceManifestBlock(sourceManifest, sourceReadiness)
+    : buildSourceManifestBlock(sourceManifest, sourceReadiness);
+  const dynamicPart = buildReconcileDynamicPart(input);
+  return {
+    staticPart: STATIC_RECONCILE_PREFIX,
+    cachedContextPart,
+    dynamicPart,
+    text: STATIC_RECONCILE_PREFIX + cachedContextPart + dynamicPart
+  };
+}
+
+/** Giữ NGUYÊN chữ ký/kiểu trả về cũ (string). */
+function buildReconcileSystemPrompt(input) {
+  return buildReconcileSystemPromptParts(input).text;
+}
+
+function buildReconcileDynamicPart({ candidates, contexts, settings, hasWebSearch, deepThinking, agreement, subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '', sourceReadiness = null }) {
+  // Manual hard lock (mục 1): reconcile TUYỆT ĐỐI không được để candidate/secondarySubjectId kéo
+  // môn khác vào bước tổng hợp — ép secondarySubjectId về null bất kể caller truyền gì vào khi
+  // subjectSource === 'manual', rồi mới build directive (buildSubjectDirective tự chọn nhánh lock).
+  const effectiveSecondary = subjectSource === 'manual' ? null : secondarySubjectId;
+  const subjectBlock = buildSubjectDirective(subjectId, effectiveSecondary, subjectSource);
   // Dữ liệu thô của các đoạn trích (nếu có) — tách riêng khỏi phần CHỈ THỊ ưu tiên nguồn (đã gộp
   // chung 1 chỗ ở buildSourcePolicyBlock, dùng đồng nhất với cả 2 giai đoạn approach/detail, để sửa
   // 1 nơi áp dụng cho mọi model/mọi giai đoạn).
-  const contextDataBlock = contexts.length
-    ? '\n\nTrích đoạn liên quan từ các nguồn tài liệu người dùng cung cấp, đánh số ' + citeNoRangeLabel(contexts) + ':\n' +
-      contexts.map((c, i) => `[${c.citeNo != null ? c.citeNo : i + 1}] (Nguồn: ${c.doc}, đoạn ${c.id}) ${c.text}`).join('\n---\n')
-    : '';
+  // Khối dữ liệu đoạn trích nay nằm ở `cachedContextPart` (A1.3) — xem buildReconcileSystemPromptParts().
   // hasWebSearch giờ KHÔNG còn đồng nghĩa với "không có tài liệu" (xem chat.js) — công cụ web_search
   // có thể được cấp CÙNG LÚC với đoạn trích tài liệu, dùng để bổ sung phần tài liệu còn thiếu (quy
   // tắc ưu tiên #4 trong buildSourcePolicyBlock) hoặc dùng để xác minh khi hoàn toàn không có tài liệu.
-  const sourcePolicyBlock = buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch });
+  const sourcePolicyBlock = buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch, hasSourceNoContext: !contexts.length && !!sourceManifest });
 
   const distinctModels = new Set(candidates.map((c) => c.label)).size > 1;
   const introLine = distinctModels
@@ -447,20 +632,18 @@ function buildReconcileSystemPrompt({ candidates, contexts, settings, hasWebSear
     .join('\n\n');
 
   const h = getHeaders(settings.lang);
-  return `${CORE_DIRECTIVE}
-
-Bạn là một AI trợ giảng học thuật đang ở bước TỔNG HỢP VÀ ĐỐI CHIẾU CHÉO cuối cùng. ${introLine}
+  return `
+${introLine}
 
 ${candidatesBlock}
 ===== HẾT =====
 
-NHIỆM VỤ: so sánh các lượt giải, kiểm tra chéo từng công thức và từng bước tính toán, phát hiện và loại bỏ sai sót (nếu có), rồi viết lại MỘT lời giải cuối cùng chính xác nhất — không đơn thuần chọn một lượt mà thực sự đối chiếu và tổng hợp. Nếu tất cả đồng nhất và đều hợp lý, hãy trình bày lại gọn gàng theo đúng phương pháp đó. Nếu phát hiện một lượt sai, dùng (các) lượt đúng làm cơ sở. Nếu tất cả đều thiếu sót, tự giải lại đúng. Nếu các lượt giải bên trên đều TỪ CHỐI vì yêu cầu gốc không phải bài tập học thuật (đúng theo MỆNH LỆNH DUY NHẤT ở trên), lượt tổng hợp này CŨNG PHẢI từ chối tương tự — KHÔNG được "cố gắng giúp" bằng cách tự bịa ra một bài tập hay câu trả lời nào khác.${agreement ? '\n\nMỤC 5A — CÁC LƯỢT GIẢI ĐÃ ĐỒNG THUẬN VỀ ĐÁP SỐ CUỐI CÙNG (đã kiểm tra tự động trước khi tới lượt bạn): KHÔNG cần giải lại từ đầu — chỉ cần đối chiếu nhanh phương pháp có nhất quán không, chọn lượt trình bày rõ ràng nhất làm nền, polish lại câu chữ/format cho gọn, và xác nhận. Việc này giúp tiết kiệm token — đừng viết dài hơn mức cần thiết.' : ''}
+NHIỆM VỤ: so sánh các lượt giải, kiểm tra chéo từng công thức và từng bước tính toán, phát hiện và loại bỏ sai sót (nếu có), rồi viết lại MỘT lời giải cuối cùng chính xác nhất — không đơn thuần chọn một lượt mà thực sự đối chiếu và tổng hợp. Nếu tất cả đồng nhất và đều hợp lý, hãy trình bày lại gọn gàng theo đúng phương pháp đó. Nếu phát hiện một lượt sai, dùng (các) lượt đúng làm cơ sở. Nếu tất cả đều thiếu sót, tự giải lại đúng. Nếu các lượt giải bên trên đều TỪ CHỐI vì yêu cầu gốc không phải bài tập học thuật (đúng theo MỆNH LỆNH DUY NHẤT ở trên), lượt tổng hợp này CŨNG PHẢI từ chối tương tự — KHÔNG được "cố gắng giúp" bằng cách tự bịa ra một bài tập hay câu trả lời nào khác.${agreement ? '\n\nMỤC 5A — CÁC LƯỢT GIẢI ĐÃ ĐỒNG THUẬN VỀ ĐÁP SỐ CUỐI CÙNG (đã kiểm tra tự động trước khi tới lượt bạn): KHÔNG cần giải lại từ đầu — ch��� cần đối chiếu nhanh phương pháp có nhất quán không, chọn lượt trình bày rõ ràng nhất làm nền, polish lại câu chữ/format cho gọn, và xác nhận. Việc này giúp tiết kiệm token — đừng viết dài hơn mức cần thiết.' : ''}
 
-${LANGUAGE_RULE_STATIC}${buildLanguageContract(settings.lang)}
+${buildLanguageContract(settings.lang)}
 ${buildLanguageDirective(settings.lang)} (Lưu ý: các LƯỢT GIẢI ở trên có thể đã được viết bằng ngôn ngữ khác — bạn vẫn PHẢI viết lại câu trả lời tổng hợp cuối cùng đúng theo ngôn ngữ chỉ định ở đây, không giữ nguyên ngôn ngữ của lượt giải gốc.)
 ${buildSchoolGradeDirective(settings.school, settings.grade)}
 
-${FORMAT_INSTRUCTIONS}
 Định dạng BẮT BUỘC theo cấu trúc, dùng tiêu đề "## " ĐÚNG như dưới đây (đã đúng ngôn ngữ đã chọn ở trên)${h.note}:
 ${h.summary}
 ${h.solution}
@@ -472,7 +655,7 @@ Liệt kê 2-4 gạch đầu dòng NGẮN GỌN về những lỗi HỌC SINH th
 ${h.reconcile}
 1-2 câu ngắn gọn nêu: các lượt giải có khớp nhau không, có phát hiện/sửa sai sót gì không (nếu không có gì cần sửa thì ghi "Các hướng giải độc lập cho kết quả khớp nhau.").
 Nếu (các) lượt giải bên trên đã có hình vẽ (khối \`shape\`/\`solid3d\`) và hình đó đúng, hãy giữ lại/chèn lại hình đó (cùng cách đặt tên điểm) trong lời giải tổng hợp cuối cùng thay vì bỏ đi.
-${sourcePolicyBlock}${DRAW_INSTRUCTIONS}${subjectBlock}${buildDeepThinkingBlock(deepThinking)}${contextDataBlock}`;
+${sourcePolicyBlock}${DRAW_INSTRUCTIONS}${subjectBlock}${buildDeepThinkingBlock(deepThinking)}`;
 }
 
 function buildFlashcardSystemPrompt() {
@@ -498,7 +681,7 @@ QUY TẮC BẮT BUỘC:
 2. Mỗi nhánh gán ĐÚNG 1 "color" khác nhau, chọn xoay vòng trong danh sách cho phép ở trên (không bịa màu khác, không để trống) — 2 nhánh liền kề nên khác màu nhau để dễ phân biệt.
 3. Mỗi nhánh có 2-5 "children" (ý con cấp 2); mỗi ý con có thể có thêm 0-4 "children" (ý cháu cấp 3, chỉ thêm khi thực sự cần chi tiết hơn, KHÔNG bắt buộc phải có ở mọi ý con). KHÔNG tạo thêm cấp sâu hơn cấp 3 dưới gốc.
 4. Chữ trong mỗi "label" phải NGẮN GỌN, súc tích, đúng số từ giới hạn ghi trong schema (không viết cả câu dài) — đây là nhãn hiển thị trên 1 ô nhỏ trong sơ đồ, không phải đoạn văn.
-5. TUYỆT ĐỐI KHÔNG bịa thêm kiến thức không có căn cứ trong nội dung nguồn; chỉ được sắp xếp lại/tóm gọn/hệ thống hóa đúng nội dung đã cung cấp. Nếu nội dung không đủ để chia đủ 3 nhánh trở lên, được phép chỉ tạo số nhánh phù hợp thực tế (tối thiểu 2).
+5. TUYỆT ��ỐI KHÔNG bịa thêm kiến thức không có căn cứ trong nội dung nguồn; chỉ được sắp xếp lại/tóm gọn/hệ thống hóa đúng nội dung đã cung cấp. Nếu nội dung không đủ để chia đủ 3 nhánh trở lên, được phép chỉ tạo số nhánh phù hợp thực tế (tối thiểu 2).
 6. Công thức toán (nếu có trong label) viết bằng chữ/ký hiệu thường, KHÔNG dùng cú pháp LaTeX hay dấu $ (ô sơ đồ không hiển thị được LaTeX).
 7. Dùng đúng ngôn ngữ của nội dung nguồn được cung cấp (thường là tiếng Việt).`;
 }
@@ -563,12 +746,21 @@ QUY TẮC BẮT BUỘC:
 // v6: siết lại chỉ thị "## Hướng giải" (stage=approach) — tối đa 5 gạch đầu dòng, mỗi gạch 1 câu
 // ngắn, không câu phụ — để hướng giải GỌN hơn nhưng vẫn giữ đủ ý khoa học (công thức/bước/điều
 // kiện). Thay đổi output rõ rệt so với v5 => bump để không trả nhầm hướng giải dài kiểu cũ từ cache.
-const PROMPT_VERSION = 'chat-prompt-v6';
+const PROMPT_VERSION = 'chat-prompt-v9'; // v9 (mục 1 audit HARD SUBJECT LOCK): manual subject giờ chèn
+// khối RÀNG BUỘC MÔN HỌC (buildManualLockDirective trong subjects.js) khác hẳn nội dung mềm cũ —
+// output cho request manual subject đổi rõ rệt so với v8 => bump để cache L1/manual cũ (nếu có) không
+// bị trả nhầm câu trả lời chưa áp dụng hard lock.
+// v8 (B12): bump sau A1/A2/A3 — bố cục system prompt đổi (khối tĩnh dồn lên đầu để cache), trần
+// reasoning theo model, và explicit request override được setting 'never'. Cache cũ tạo TRƯỚC các
+// fix này KHÔNG được tái sử dụng (khác chính sách reasoning/visual => khác kết quả).
 
 module.exports = {
   citeNoRangeLabel,
+  buildSourceReadinessBlock,
+  buildRequirementIntegrityBlock,
   PROMPT_VERSION,
   buildChatSystemPrompt,
+  buildChatSystemPromptParts,
   buildFlashcardSystemPrompt,
   buildOutlineSystemPrompt,
   buildMindmapSystemPrompt,
@@ -576,6 +768,7 @@ module.exports = {
   MINDMAP_COLOR_KEYS,
   buildVariantAddendum,
   buildReconcileSystemPrompt,
+  buildReconcileSystemPromptParts,
   buildSourcePolicyBlock,
   buildSchoolGradeDirective
 };

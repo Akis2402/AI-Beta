@@ -203,8 +203,33 @@ function resolveSubject({ manualSubjectId, problemText, hasImage }) {
 // ý cột bảng phù hợp (phối hợp với cơ chế bảng ở mục 13). Với 'math', khối này CHỦ Ý ngắn để không
 // chồng chéo/mâu thuẫn với phần hướng dẫn Toán chi tiết đã có sẵn trong promptBuilder.js (14.18).
 // secondarySubjectId (14.7): khi có, yêu cầu AI áp dụng REASONING KẾT HỢP của cả 2 môn thay vì chỉ 1.
-function buildSubjectDirective(subjectId, secondarySubjectId) {
+// (Manual hard lock) khi user tự chọn 1 môn cụ thể, khối chỉ dẫn PHẢI là RÀNG BUỘC CỨNG — không
+// dùng wording mơ hồ kiểu "ưu tiên". Model bị cấm tự chuyển môn, cấm suy ra secondary, và bị buộc
+// từ chối ngắn gọn nếu câu hỏi không thuộc môn đã chọn (thay vì cố giải sai môn).
+function buildManualLockDirective(subj) {
+  return `\n\n=== RÀNG BUỘC MÔN HỌC (HARD LOCK — BẮT BUỘC TUÂN THỦ TUYỆT ĐỐI) ===
+USER ĐÃ CHỈ ĐỊNH MÔN HỌC: ${subj.icon} ${subj.name}.
+ĐÂY LÀ MỘT RÀNG BUỘC CỨNG, KHÔNG PHẢI GỢI Ý.
+- CHỈ ĐƯỢC giải quyết câu hỏi thuộc đúng môn ${subj.name}.
+- KHÔNG ĐƯỢC tự chuyển sang môn khác dù nội dung có từ khóa/ký hiệu trùng với môn khác.
+- KHÔNG ĐƯỢC suy ra hay thêm môn phụ (secondary subject) dưới bất kỳ hình thức nào; toàn bộ reasoning chỉ dùng góc nhìn ${subj.name}.
+- Nếu đề bài THỰC SỰ cần kiến thức môn khác mới giải trọn vẹn được, hãy nói rõ giới hạn đó thay vì tự ý chuyển môn hay tự bổ sung reasoning liên môn.
+- NẾU NỘI DUNG CÂU HỎI KHÔNG THUỘC MÔN ${subj.name} (vd thuộc môn khác hoàn toàn): PHẢI TỪ CHỐI, trả lời NGẮN GỌN rằng môn hiện tại đang khóa là ${subj.name}, câu hỏi này không thuộc môn này, và đề nghị người dùng đổi sang môn đúng hoặc bật lại "Tự động" — TUYỆT ĐỐI KHÔNG được giải câu hỏi đó.
+- Quy tắc này áp dụng cho MỌI bước: tóm tắt đề, cách giải, đối chiếu/tổng hợp nhiều hướng giải, câu trả lời tiếp nối (continuation), và mọi câu hỏi phụ dùng lại ngữ cảnh cuộc hội thoại này.
+- Ưu tiên nội dung theo môn ${subj.name}: ${subj.priorities}
+- Gợi ý cột bảng nếu cần so sánh/đối chiếu: ${subj.tableRule}
+=== HẾT RÀNG BUỘC MÔN HỌC ===`;
+}
+
+function buildSubjectDirective(subjectId, secondarySubjectId, subjectSource) {
   const subj = getSubject(subjectId);
+
+  // Manual mode: HARD LOCK — bỏ qua hoàn toàn logic secondary/gợi ý mềm bên dưới, kể cả khi
+  // secondarySubjectId lỡ được truyền vào (phòng hờ caller cũ chưa dọn hết) — manual PHẢI luôn bỏ qua nó.
+  if (subjectSource === 'manual') {
+    return buildManualLockDirective(subj);
+  }
+
   const secondary = secondarySubjectId ? getSubject(secondarySubjectId) : null;
   const secondaryLine = secondary
     ? `\n- Câu hỏi này LIÊN QUAN CẢ MÔN PHỤ ${secondary.icon} ${secondary.name} — kết hợp reasoning của cả 2 môn (vd: dùng kiến thức ${secondary.name} để xác định/diễn giải dữ kiện, rồi áp dụng phương pháp ${subj.name} để tính toán/kết luận), KHÔNG bỏ sót khía cạnh nào; nếu tạo bảng, có thể cần thêm cột từ cả 2 phía (vd: ${secondary.tableRule}).`

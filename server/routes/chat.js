@@ -4,24 +4,78 @@ const express = require('express');
 const router = express.Router();
 const {
   getActiveProviders, ensureProvidersReady, callWithFailover, callFastest, streamWithFailover,
-  gatherCrossCheckCandidates
+  gatherCrossCheckCandidates, emptyUsageAccumulator, accumulateUsage
 } = require('../utils/aiProviders');
 // Timeout riêng cho LƯỢT TỔNG HỢP cuối (sau khi đã có candidates) — tách khỏi CROSS_CHECK_BUDGET_MS
 // (ngân sách đó chỉ tính cho bước THU THẬP lượt giải). Có timeout riêng, rõ ràng để lượt tổng hợp
 // không bị "thừa hưởng" một REQUEST_TIMEOUT_MS quá dài rồi cộng dồn vượt quá maxDuration của hosting.
 const RECONCILE_TIMEOUT_MS = Number(process.env.RECONCILE_TIMEOUT_MS) || 25000;
+// Ngân sách cho chú thích của đường "chỉ lấy hình": vài câu + danh sách thành phần, không hơn.
+const IMAGE_CAPTION_MAX_TOKENS = Number(process.env.IMAGE_CAPTION_MAX_TOKENS) || 600;
 const {
   buildChatSystemPrompt,
+  buildChatSystemPromptParts,
   buildVariantAddendum,
   buildReconcileSystemPrompt,
+  buildReconcileSystemPromptParts,
   PROMPT_VERSION
 } = require('../utils/promptBuilder');
+// A1: system prompt đi xuống provider dưới dạng PromptParts để khối TĨNH thực sự được prompt-cache
+// (Anthropic: cache_control tường minh; OpenAI/Gemini: prefix trùng => implicit cache).
+const { appendToSystem, systemToString, estimatePromptTokens } = require('../utils/systemPromptParts');
+// PHẦN BG/21: lưu vòng đời + KẾT QUẢ CUỐI của 1 lượt giải, độc lập với kết nối SSE tạo ra nó.
+const aiJobStore = require('../utils/aiJobStore');
+
+/**
+ * B10 — các field telemetry token MỚI, phẳng hoá để đi thẳng vào log (không lồng object).
+ * `cachedTokens`/`cacheSavedTokens` là số THẬT provider báo về (Anthropic: cache_read_input_tokens),
+ * không phải ước lượng — nhờ vậy báo cáo hiệu quả A1 là MEASURED chứ không phải ESTIMATED.
+ */
+/**
+ * MỤC 5/47 — MẪU HỌC BUDGET PHẢI ƯU TIÊN SỐ LIỆU THẬT CỦA PROVIDER.
+ * `text.length / 3.2` là ƯỚC LƯỢNG, không phải "token thật": nó chỉ được dùng khi provider KHÔNG trả
+ * usage, và khi đó mẫu bị đánh dấu `estimated:true` để tokenEconomy không cho nó điều khiển budget
+ * của các request sau (xem suggestBudgetOverride/MIN_MEASURED_SAMPLES).
+ * @returns {{actualTokens:number, estimated:boolean}}
+ */
+function outcomeSample(usage, text) {
+  const measured = usage && Number(usage.outputTokens);
+  if (Number.isFinite(measured) && measured > 0) return { actualTokens: measured, estimated: false };
+  return { actualTokens: Math.max(1, Math.round(String(text || '').length / 3.2)), estimated: true };
+}
+
+function usageTelemetryFields(usage) {
+  if (!usage) return {};
+  return {
+    providerInputTokens: usage.inputTokens,
+    providerOutputTokens: usage.outputTokens,
+    cachedTokens: usage.cachedTokens,
+    cacheCreationTokens: usage.cacheCreationTokens,
+    cacheSavedTokens: usage.cacheSavedTokens,
+    providerCalls: usage.calls
+  };
+}
 const { validateChatBody } = require('../utils/validators');
+// B5: nén representation của candidate cho lượt reconcile (dedup prose, GIỮ NGUYÊN mọi dữ kiện).
+const { compactCandidatesForReconcile } = require('../utils/verificationPacket');
+// Mục II master spec: "Hướng giải" (approach) phải ngắn/compact, độc lập với "Lời giải" — validator
+// + repair NGẮN (KHÔNG regenerate toàn bộ, KHÔNG retry vô hạn) khi model lỡ sinh approach quá dài/
+// leak đáp số/tính toán chi tiết.
+const {
+  validateApproachCompactness, buildApproachRepairPrompt, extractApproachSection,
+  MAX_CONTINUATION_TOKENS: APPROACH_MAX_CONTINUATION_TOKENS
+} = require('../utils/approachValidator');
 const { normalizeError } = require('../utils/errorNormalize');
-const { calculateAdaptiveBudget } = require('../utils/adaptiveBudget');
 const { compressHistoryForBudget } = require('../utils/semanticCompression');
+// PROMPT V5 — định tuyến bằng luật + ngân sách lệnh gọi AI + chú thích deterministic.
+const { routeIntent } = require('../utils/intentRouter');
+const aiBudget = require('../utils/aiCallBudget');
+const deterministicCaption = require('../utils/visual/deterministicCaption');
+const workingSetLib = require('../utils/source/sourceWorkingSet');
+const { planImages, imageMarker } = require('../utils/imageBudgetPlanner');
+const sourceBudgetPlanner = require('../utils/sourceBudgetPlanner');
 const { validateSolutionCompleteness, extractCoverageList } = require('../utils/completenessCheck');
-const { computeRecoveryBudget, appendContinuationTurn } = require('../utils/continuation');
+const { computeRecoveryBudget, appendContinuationTurn, classifyDeficit } = require('../utils/continuation');
 // PHẦN B/L: vòng RESUME/CONTINUATION dùng chung (checkpoint + resumable failover A->B->C->D).
 const { runResumableStream, runResumableNonStream } = require('../utils/resumableStream');
 // PHẦN D/E/F: nén ngữ cảnh loss-aware (chỉ INPUT side — không bao giờ giảm output budget).
@@ -31,13 +85,24 @@ const throughputStats = require('../utils/throughputStats');
 const { validateAllDrawingBlocks, checkCanonicalDrawingConsistency } = require('../utils/drawingValidator');
 // Vấn đề #1: citeNo ỔN ĐỊNH -> mới bật được dedupe context an toàn (xem citationIndex.js).
 const { buildCitationIndex } = require('../utils/citationIndex');
+const sourceProvenance = require('../utils/sourceProvenance');
 const { createRequestDeadline } = require('../utils/requestDeadline');
 const { STATES, isFinalSuccess, assertFinalResponseComplete, classifyFinalOutcome } = require('../utils/runtimeState');
 const { analyzeSourceCoverage } = require('../utils/sourceCoverage');
 const { createRequestLogger } = require('../utils/logger');
 const { extractFinalAnswer, normalizeAnswerString } = require('../utils/studyTasks');
 const { resolveThinkingMode } = require('../utils/thinkingRouter');
+// PHẦN 2/4: kế hoạch ngân sách TÁCH BẠCH reasoning / answer / recovery / visual.
+// A1 (SOURCE OF TRUTH): resolveBudget() là ĐƯỜNG DUY NHẤT tính ngân sách cho 1 lượt gọi provider.
+// chat.js KHÔNG còn gọi calculateAdaptiveBudget() trực tiếp — trước đây nó vừa gọi hàm đó với
+// `deepThinking: input.deepThinking` (hệ số ×1.35 dành cho reasoning nằm TRONG output) vừa cộng thêm
+// genericReasoningBudget() lên trên, tức phần suy luận bị tính HAI LẦN vào cùng một request.
+const { resolveBudget, genericReasoningBudget, reasoningBudgetFor } = require('../utils/budget/requestBudgetPlanner');
+// PHẦN 12-32: hệ thống hình minh hoạ (quyết định -> spec -> renderer -> validate -> cache).
+const visualSystem = require('../utils/visual');
 const tokenEconomy = require('../utils/tokenEconomy');
+// PHẦN B (mục 10/11/12): telemetry per-attempt + thống kê cấp request (token THẬT vs ƯỚC LƯỢNG).
+const tokenTelemetry = require('../utils/tokenTelemetry');
 const { resolveSubject } = require('../utils/subjects');
 
 // ---------- Mục 5/5A: candidate đã ĐỒNG THUẬN thì reconcile không cần sinh lại full solution ----------
@@ -49,6 +114,43 @@ function candidatesAgree(candidates) {
   const answers = candidates.map((c) => normalizeAnswerString(extractFinalAnswer(c.text) || ''));
   if (answers.some((a) => !a)) return false;
   return answers.every((a) => a === answers[0]);
+}
+
+/**
+ * maybeRepairApproach() — mục II: chỉ chạy khi stageName === 'approach'. Validator thuần (không AI)
+ * kiểm tra compactness; nếu vi phạm, gửi ĐÚNG 1 lượt repair prompt NGẮN (system tối giản, chỉ đúng
+ * approachText cũ + yêu cầu viết lại phần "Hướng giải" gọn hơn) — KHÔNG regenerate toàn bộ
+ * conversation, KHÔNG retry nếu lượt repair đó lỗi/timeout (mục II cấm "retry vô hạn"). Nếu repair
+ * thất bại vì bất kỳ lý do gì, giữ nguyên bản gốc — không để lỗi ở bước tối ưu này làm hỏng câu trả
+ * lời chính đã có.
+ */
+async function maybeRepairApproach({ stageName, text, activeProviders, requestId, signal, deadline, reqLogger }) {
+  if (stageName !== 'approach' || !text) return text;
+  const check = validateApproachCompactness(extractApproachSection(text));
+  if (check.ok) return text;
+  try {
+    const repairPrompt = buildApproachRepairPrompt(text, check.violations);
+    const repaired = await callWithFailover(
+      activeProviders,
+      {
+        system: 'Bạn là trợ lý sửa định dạng câu trả lời — chỉ thực hiện đúng yêu cầu rút gọn được nêu, không thêm/bớt nội dung khoa học nào khác.',
+        messages: [{ role: 'user', content: repairPrompt }],
+        maxTokens: 900,
+        requestId,
+        signal
+      },
+      { deadline }
+    );
+    const repairedText = repaired && repaired.text ? repaired.text.trim() : '';
+    if (repairedText.length > 40) {
+      const recheck = validateApproachCompactness(extractApproachSection(repairedText));
+      if (reqLogger) reqLogger.log({ stage: 'approach_repair', violations: check.violations, repairOk: recheck.ok });
+      return repairedText;
+    }
+  } catch (e) {
+    if (reqLogger) reqLogger.log({ stage: 'approach_repair_failed', violations: check.violations, error: e && e.message });
+  }
+  return text; // repair thất bại/không đủ dài -> giữ bản gốc, không retry thêm lần nào nữa
 }
 
 /**
@@ -91,6 +193,9 @@ function checkCompletenessWithDrawings(text, opts) {
 // DÙNG CHUNG — continuation chỉ chạy thêm nếu vẫn còn đủ ngân sách thời gian, không "cố thêm" rồi bị
 // nền tảng hủy ngang toàn bộ response (kể cả phần đã hoàn thành đúng).
 const GLOBAL_REQUEST_DEADLINE_MS = Number(process.env.GLOBAL_REQUEST_DEADLINE_MS) || 55000;
+// MỤC 15: chỉ những lớp bài mà độ trễ thật sự lớn mới đáng trả thêm 1 lệnh gọi để đua tốc độ.
+// MICRO/SHORT/STANDARD -> single call. Xem raceOpts ở nhánh direct.
+const RACE_ELIGIBLE_CLASSES = new Set(['COMPLEX', 'VERY_COMPLEX']);
 // createGlobalDeadline() nội bộ đã bị loại bỏ — dùng createRequestDeadline() dùng chung từ
 // requestDeadline.js (mục 4), truyền đúng 1 instance xuyên suốt toàn bộ pipeline của request này
 // (gatherCrossCheckCandidates/callWithFailover/callFastest/streamWithFailover/continuation/budgetOf).
@@ -128,7 +233,8 @@ async function ensureCompleteNonStream(callOnce, initialResult, ctx) {
   const evaluate = (text, sig) => checkCompletenessWithDrawings(text, {
     stage: ctx.stage, coverageList, approachText: ctx.approachText, contexts: ctx.contexts,
     finishReason: sig.finishReason, interrupted: sig.interrupted,
-    validCiteNos: ctx.validCiteNos, aliasOf: ctx.aliasOf
+    validCiteNos: ctx.validCiteNos, aliasOf: ctx.aliasOf,
+    sourceReadiness: ctx.sourceReadiness, unmatchedRequirementLabels: ctx.unmatchedRequirementLabels
   });
 
   const run = await runResumableNonStream({
@@ -174,30 +280,50 @@ async function ensureCompleteNonStream(callOnce, initialResult, ctx) {
  * lời bị cắt... không fail chỉ vì reserve cố định đã hết trong khi total request budget vẫn còn").
  *
  * @param {{completeness:object, reserveState:{budget:number, used:number}, recalcBudget:Function,
- *   deadline:object}} opts `recalcBudget()` => target budget hiện tại (gọi lại calculateAdaptiveBudget
+ *   deadline:object}} opts `recalcBudget()` => target budget hiện tại (gọi lại resolveBudget
  *   với remainingMs mới nhất — do caller cung cấp vì nó biết chính xác opts nào cần cho stage đó).
  * @returns {{allow:boolean, amount:number}}
  */
-function resolveReserveDecision({ completeness, reserveState, recalcBudget, deadline, deficitTokens }) {
+function resolveReserveDecision({ completeness, reserveState, recalcBudget, deadline, deficitTokens, reqLogger }) {
+  // ---------- MỤC 11: SỔ CÁI RESERVE ----------
+  // Mỗi lần cấp reserve phải ghi lại ĐỦ 5 con số (reserveBefore / requestedDelta / grantedDelta /
+  // reserveAfter / reason). Trước đây chỉ có `amount` trôi qua, nên khi một request "chưa đầy đủ sau
+  // khi khôi phục" thì không có cách nào truy ra reserve đã đi đâu.
+  const reserveBefore = Math.max(0, reserveState.budget - reserveState.used);
+  const ledger = (grantedDelta, reason) => {
+    if (reqLogger) {
+      reqLogger.log({
+        stage: 'reserve_grant',
+        reserveBefore,
+        requestedDelta: Number.isFinite(deficitTokens) ? Math.round(deficitTokens) : null,
+        grantedDelta,
+        reserveAfter: Math.max(0, reserveState.budget - reserveState.used - grantedDelta),
+        reason
+      });
+    }
+  };
   // PHẦN I FIX: truyền `deficitTokens` (ước lượng phần CÒN THIẾU, xem tokenEconomy.estimateRemainingWork)
   // để lô reserve được cấp ĐÚNG mức cần hoàn thành thay vì luôn là 50% reserve một cách mù quáng —
   // nguyên nhân trực tiếp khiến câu trả lời dài bị cắt lặp lại rồi cạn reserve dù deadline còn dư.
   const opts = Number.isFinite(deficitTokens) ? { deficitTokens } : {};
   let decision = tokenEconomy.shouldUseReserve(completeness, reserveState.used, reserveState.budget, opts);
-  if (decision.allow) return decision;
+  if (decision.allow) { ledger(decision.amount, 'granted_from_reserve'); return decision; }
   // Reserve báo KHÔNG cho phép — chỉ đáng thử MỞ RỘNG khi lý do là "đã dùng hết reserve hiện có" (chứ
   // không phải vì completeness là SOFT/COMPLETE, những trường hợp đó KHÔNG được đụng reserve dù còn
   // bao nhiêu — xem shouldUseReserve()) VÀ vẫn còn đủ thời gian cho ít nhất 1 lượt gọi nữa.
   const reserveWasTheBlocker = completeness && completeness.status !== 'COMPLETE' && completeness.severity !== 'SOFT';
-  if (!reserveWasTheBlocker) return decision;
-  if (!deadline || deadline.remaining() < 8000) return decision;
+  if (!reserveWasTheBlocker) { ledger(0, completeness && completeness.severity === 'SOFT' ? 'denied_soft_incomplete' : 'denied_already_complete'); return decision; }
+  // MỤC 11: hết THỜI GIAN thì cấm gọi tiếp, dù reserve còn — và phải ghi rõ đó là lý do.
+  if (!deadline || deadline.remaining() < 8000) { ledger(0, 'denied_deadline_exhausted'); return decision; }
   const recalculatedTarget = recalcBudget();
   const { extendedReserveBudget, extraGranted } = tokenEconomy.extendReserveIfTruncated({
     reserveBudget: reserveState.budget, reserveUsed: reserveState.used, recalculatedTarget
   });
-  if (extraGranted <= 0) return decision;
+  if (extraGranted <= 0) { ledger(0, 'denied_reserve_exhausted'); return decision; }
   reserveState.budget = extendedReserveBudget; // cập nhật để lần gọi sau (nếu có) thấy đúng phần đã mở rộng
-  return tokenEconomy.shouldUseReserve(completeness, reserveState.used, reserveState.budget, opts);
+  const extended = tokenEconomy.shouldUseReserve(completeness, reserveState.used, reserveState.budget, opts);
+  ledger(extended.allow ? extended.amount : 0, extended.allow ? 'granted_after_reserve_extension' : 'denied_after_reserve_extension');
+  return extended;
 }
 
 /**
@@ -212,7 +338,7 @@ function resolveReserveDecision({ completeness, reserveState, recalcBudget, dead
  * @param {{reserveState:{budget:number,used:number}, recalcTarget:Function, deadline:object}} cfg
  * @returns {Function} (completeness, session) => {allow:boolean, amount:number}
  */
-function makeRecoveryResolver({ reserveState, recalcTarget, deadline }) {
+function makeRecoveryResolver({ reserveState, recalcTarget, deadline, reqLogger, maxGrant }) {
   return (completeness, session) => {
     const expectedTotal = recalcTarget();
     const deficitTokens = tokenEconomy.estimateRemainingWork({
@@ -221,16 +347,124 @@ function makeRecoveryResolver({ reserveState, recalcTarget, deadline }) {
       missingSections: (completeness && completeness.missingCoverage) ? completeness.missingCoverage.length : 0,
       interrupted: !!(session && session.interrupted)
     });
-    const decision = resolveReserveDecision({
-      completeness, reserveState, deadline, deficitTokens,
+    let decision = resolveReserveDecision({
+      completeness, reserveState, deadline, deficitTokens, reqLogger,
       recalcBudget: recalcTarget
     });
     // QUAN TRỌNG: ghi nhận phần reserve ĐÃ CẤP ngay tại đây. resolveReserveDecision() chỉ QUYẾT
     // ĐỊNH, không trừ ngân sách — nếu nơi gọi quên trừ (lỗi rất dễ mắc khi vòng lặp nằm ở module
     // khác), reserve sẽ không bao giờ cạn và vòng recovery chạy tới safety cap ở MỌI request lỗi.
+    // MỤC 7: hợp đồng riêng của stage 'approach' — lô recovery bị kẹp cứng, approach bị cắt chỉ cần
+    // đóng nốt ý chứ không được mua ngân sách của một lời giải chi tiết.
+    if (decision && decision.allow && Number.isFinite(maxGrant) && decision.amount > maxGrant) {
+      decision = { ...decision, amount: maxGrant, cappedByStageContract: true };
+    }
     if (decision && decision.allow) reserveState.used += decision.amount;
     return decision;
   };
+}
+
+/**
+ * MỤC 1.6 — ĐƯỜNG "CHỈ LẤY HÌNH".
+ *
+ * Người dùng gõ "Tạo cho tôi hình ảnh cấu tạo con người" thì thứ họ muốn là BỨC HÌNH, kèm vài dòng
+ * giới thiệu — không phải một bài giảng hai giai đoạn. Đường này:
+ *   - Gọi AI ĐÚNG MỘT LƯỢT, ngân sách nhỏ, để sinh phần chú thích ngắn. Chính văn bản đó cũng là
+ *     nguồn dữ kiện cho visualSpecBuilder (tên các thành phần + mô tả), nên KHÔNG tốn lượt gọi thứ hai.
+ *   - Rồi chạy đúng pipeline hình sẵn có với userPreference='always' (yêu cầu tường minh của người
+ *     dùng, NECESSITY.USER_REQUESTED).
+ * Tổng cộng: 1 lượt gọi text + 1 lượt gọi ảnh. Không completeness check, không continuation — vì
+ * không có "lời giải" nào để mà thiếu, nên cũng không còn cảnh báo "CHƯA ĐẦY ĐỦ (finish_reason_length)"
+ * vốn chỉ là hệ quả của việc ép một yêu cầu tạo ảnh đi qua khuôn lời giải dài.
+ *
+ * @returns {Promise<{text:string, provider:object}>}
+ */
+async function generateImageCaption({ topic, language, activeProviders, deadline, requestId, signal }) {
+  const isEnglish = /english/i.test(String(language || ''));
+  const system = isEnglish
+    ? 'You write the short caption that accompanies an illustration. Be factual and concise.'
+    : 'Bạn viết phần chú thích ngắn đi kèm một hình minh hoạ. Chính xác, ngắn gọn, không lan man.';
+  const prompt = isEnglish
+    ? `Write a SHORT introduction (2-3 sentences) for an illustration of: "${topic}".\n`
+      + 'Then list 4-6 main components as bullets in the form "- Name: one short sentence".\n'
+      + 'No solution, no steps, no headings. Nothing else.'
+    : `Viết phần GIỚI THIỆU NGẮN (2-3 câu) cho một hình minh hoạ về: "${topic}".\n`
+      + 'Sau đó liệt kê 4-6 thành phần chính dưới dạng gạch đầu dòng theo mẫu "- Tên: một câu ngắn".\n'
+      + 'Không giải bài, không chia bước, không tiêu đề. Không viết gì thêm.';
+  const result = await callWithFailover(
+    activeProviders,
+    {
+      system,
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens: IMAGE_CAPTION_MAX_TOKENS,
+      // Không bật native reasoning: đây là một đoạn mô tả, không phải bài toán cần suy luận.
+      reasoningBudget: 0,
+      deepThinking: false,
+      telemetryStage: 'image_only_caption',
+      requestId,
+      signal
+    },
+    { deadline }
+  );
+  return { text: (result && result.text ? result.text.trim() : ''), provider: result && result.provider };
+}
+
+/**
+ * Kết quả hình phụ thuộc trạng thái Auth Puter CỦA NGƯỜI GỌI (bỏ im lặng hình tuỳ chọn / thẻ "cần Auth")
+ * KHÔNG được vào cache text DÙNG CHUNG: người dùng đã Auth hỏi cùng câu sẽ nhận nhầm kết quả "không hình".
+ */
+function isAuthDependentVisualRun(run) { return !!(run && run.telemetry && run.telemetry.visualAuthRequired); }
+
+/**
+ * runVisualsFor() — điểm gọi DUY NHẤT của hệ thống hình minh hoạ trong route (PHẦN 20/24/30/32).
+ *
+ * Bất biến bắt buộc:
+ *   - CHỈ chạy SAU KHI text answer đã hoàn tất (PHẦN 24: hình dựng từ FINAL VERIFIED FACTS).
+ *   - KHÔNG BAO GIỜ throw ra ngoài: mọi lỗi ảnh -> trả visuals rỗng, text answer giữ nguyên.
+ *   - KHÔNG BAO GIỜ làm response bị FAILED (PHẦN 32) và không ăn deadline của text (PHẦN 30).
+ */
+async function runVisualsFor(opts) {
+  try {
+    const result = await visualSystem.runVisualPipeline(opts);
+    // MỤC 33: vòng đời nào SINH RA hình thì chính nó ghi canonical state — Detail sau đó chỉ đọc.
+    // Ghi sau khi đã externalize (visuals mang asset reference, không mang base64 — mục 56).
+    if (opts.visualKey && visualSystem.stageMayGenerate(opts.stage)
+      && ((result.visuals && result.visuals.length) || result.visualJob)) {
+      try {
+        await visualSystem.stateStore.saveVisualState(opts.visualKey, {
+          visuals: result.visuals && result.visuals.length ? result.visuals : [result.visualJob],
+          status: result.status, stage: opts.stage,
+          lifecycleCount: result.telemetry ? result.telemetry.visualGenerationLifecycleCount : 1
+        });
+      } catch (e) { /* state chỉ để TIẾT KIỆM lượt sau — hỏng cũng không được ảnh hưởng response này */ }
+    }
+    if (opts.reqLogger) opts.reqLogger.log({ stage: 'visual_pipeline', status: result.status, ...result.telemetry });
+    return result;
+  } catch (e) {
+    // Lớp phòng thủ thứ 2 (visualPipeline đã tự bắt mọi lỗi) — tuyệt đối không để ảnh giết text.
+    if (opts.reqLogger) opts.reqLogger.log({ stage: 'visual_pipeline', status: 'failed', visualError: e && e.message });
+    return { status: 'failed', decision: null, visuals: [], telemetry: { visualError: 'route_guard' } };
+  }
+}
+
+/**
+ * reasoningFor() — ngân sách reasoning kèm theo MỘT lượt gọi cụ thể (PHẦN 2).
+ * `mode` đến từ resumableStream (INITIAL/CONTINUATION/RESUME): lượt tiếp nối KHÔNG cần suy luận lại
+ * từ đầu (ngữ cảnh tối thiểu đã chứa mọi kết quả trung gian) nên dùng phase='recovery'.
+ */
+function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode, problemClass, completeness }) {
+  const isRecovery = !!(mode && mode !== 'INITIAL' && mode !== 'initial');
+  // MỤC 10: lượt tiếp nối chỉ thiếu ĐỊNH DẠNG (kết luận/tiêu đề/số trích dẫn) thì KHÔNG cấp reasoning
+  // — không còn gì để suy luận, phần suy luận đã xong ở lượt trước. Thiếu NỘI DUNG (phép biến đổi,
+  // chứng minh, ý chưa trả lời) thì vẫn cấp bình thường theo phase='recovery'.
+  if (isRecovery && completeness) {
+    const deficit = classifyDeficit(completeness);
+    if (!deficit.needsReasoning) return 0;
+  }
+  return genericReasoningBudget({
+    answerBudget, complexityLevel, deepThinking: !!deepThinking, problemClass,
+    phase: isRecovery ? 'recovery' : 'initial'
+  });
 }
 
 // ---------- Tiện ích SSE (Server-Sent Events) dùng cho phản hồi streaming ----------
@@ -238,6 +472,10 @@ function makeRecoveryResolver({ reserveState, recalcTarget, deadline }) {
 // đang đối chiếu đa hướng ở chế độ Sâu — không có delta nào trong lúc này), "done" (kết thúc
 // thành công, kèm metadata provider/crossChecked), "error" (kết thúc do lỗi).
 function sseWrite(res, event, data) {
+  // PHẦN BG/21: mọi nhánh `done`/`error` của pipeline (cache hit, direct, cross-check, visual...)
+  // đều đi qua đúng hàm này — ghi nhận job ở ĐÂY nên không thể sót nhánh return nào, và không phải
+  // sửa rải rác trong handler. Ghi vào store là best-effort, không chặn luồng ghi SSE.
+  if (res.__aiJob) { try { aiJobStore.observeSseEvent(res.__aiJob, event, data); } catch (e) { /* không được làm hỏng stream */ } }
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
@@ -268,6 +506,36 @@ function sseHeaders(res) {
   if (res.socket && typeof res.socket.setNoDelay === 'function') res.socket.setNoDelay(true);
 }
 
+/**
+ * MỤC 13 — recomputeForTarget: ngân sách của ĐÚNG target sắp được gọi.
+ *
+ * Ở tầng route, "provider" chỉ là POOL (rotation/failover chưa chọn ai). Con số tính từ
+ * `pool.some(supportsThinking)` là một kế hoạch, KHÔNG phải quyết định cuối — và nếu failover đưa
+ * request sang một target có capability khác hẳn thì kế hoạch đó sai. Hàm này được aiProviders gọi
+ * ngay trước `p.call()`/`p.callStream()` ở MỌI lượt (đầu tiên, failover, đua tốc độ), nên target nào
+ * cũng nhận ngân sách tính cho chính nó.
+ *
+ * @returns {Function} (target) => {maxTokens:number, reasoningBudget:number}
+ */
+function makeTargetBudgetRecomputer({ answerBudget, deepThinking, fastModel, complexityLevel, problemClass }) {
+  return (target) => {
+    if (!target) return undefined;
+    const caps = target.capabilities;
+    const reasoning = reasoningBudgetFor({
+      provider: target.providerKey, model: target.modelId, capabilities: caps,
+      deepThinking: !!deepThinking, fast: !!fastModel,
+      answerBudget, complexityLevel, problemClass
+    });
+    const maxOut = caps && Number(caps.maxOutputTokens);
+    // Kẹp phần answer theo trần output THẬT của target này. Không biết trần -> không kẹp (giữ
+    // nguyên hành vi cũ khi model discovery chưa biết gì về model).
+    const maxTokens = Number.isFinite(maxOut) && maxOut > 0
+      ? Math.max(1, Math.min(answerBudget, maxOut - (reasoning || 0)))
+      : answerBudget;
+    return { maxTokens, reasoningBudget: reasoning };
+  };
+}
+
 router.post('/', async (req, res, next) => {
   const wantsStream = req.body && req.body.stream === true;
   // Observability (mục LVIII): 1 requestId duy nhất cho cả request (kể cả nhiều lượt gọi AI bên
@@ -288,12 +556,50 @@ router.post('/', async (req, res, next) => {
   // dừng SỚM — không tiếp tục continuation/retry/reconcile, không ghi cache, không gửi "done".
   const abortController = new AbortController();
   let disconnected = false;
-  req.on('close', () => {
+  // ROOT CAUSE (bug "CANCELLED ngay sau status GENERATING"): `req.on('close')` KHÔNG có nghĩa là
+  // "client ngắt kết nối". Trên Node hiện đại, IncomingMessage phát 'close' NGAY SAU KHI thân request
+  // được đọc xong — tức là với mọi request POST bình thường. Trước đây lỗi này bị che đi hoàn toàn
+  // bởi thứ tự middleware (body-parser toàn cục đọc hết thân request TRƯỚC khi route kịp gắn
+  // listener, nên listener không bao giờ nhận được sự kiện đã phát); chỉ cần chèn thêm một middleware
+  // bất đồng bộ phía trước là pipeline tự huỷ mọi request. Tín hiệu ĐÚNG cho "client đóng kết nối"
+  // là 'close' của RESPONSE khi response chưa kết thúc.
+  res.on('close', () => {
     if (res.writableEnded) return; // response đã kết thúc bình thường — không phải disconnect thật
     disconnected = true;
+    // PHẦN BG: ghi đúng bản chất "client rời đi" vào job (KHÔNG phải "đã xong"). Phần ĐÃ tính xong
+    // trước đó vẫn nằm trong store nếu `done` đã kịp phát — tab mở lại vẫn lấy lại được.
+    if (res.__aiJob) { try { aiJobStore.markDisconnected(res.__aiJob); } catch (e) { /* ignore */ } }
     abortController.abort();
   });
   const signal = abortController.signal;
+
+  // ---------- PHẦN BG/20/21: JOB RECORD theo requestId DO CLIENT SINH ----------
+  // Client (conversationTaskManager) sinh requestId TRƯỚC khi gọi, nên sau reload nó biết chính xác
+  // phải hỏi lại job nào: GET /api/chat/jobs/:requestId. Không có requestId (client cũ) -> null,
+  // toàn bộ phần này trở thành no-op, hành vi giữ nguyên như trước.
+  const clientRequestId = (req.body && typeof req.body.clientRequestId === 'string') ? req.body.clientRequestId.trim() : '';
+  if (clientRequestId) {
+    res.__aiJob = aiJobStore.createJob({
+      requestId: clientRequestId,
+      conversationId: (req.body && typeof req.body.conversationId === 'string') ? req.body.conversationId : null,
+      stage: (req.body && req.body.stage) || null,
+      query: (req.body && typeof req.body.query === 'string') ? req.body.query : '',
+      serverRequestId: reqLogger.requestId,
+      logger: reqLogger
+    });
+    // Nhánh KHÔNG streaming trả về bằng res.json() — bọc 1 lần ở đây để job cũng được ghi đầy đủ,
+    // thay vì chỉ ghi cho nhánh SSE (hai đường trả kết quả phải ghi nhận NHƯ NHAU).
+    const originalJson = res.json.bind(res);
+    res.json = (payload) => {
+      try {
+        if (res.__aiJob) {
+          if (res.statusCode >= 400) aiJobStore.finishJob(res.__aiJob, { status: aiJobStore.STATUS.FAILED, error: (payload && (payload.code || payload.error)) || 'error' });
+          else aiJobStore.finishJob(res.__aiJob, { status: aiJobStore.STATUS.COMPLETED, result: payload });
+        }
+      } catch (e) { /* không được làm hỏng response */ }
+      return originalJson(payload);
+    };
+  }
 
   try {
     // PHẦN 13 FIX: TRƯỚC ĐÂY globalDeadline được tạo SAU ensureProvidersReady() (discovery) + body
@@ -305,6 +611,53 @@ router.post('/', async (req, res, next) => {
     // generation -> validation -> continuation -> finalization.
     const globalDeadline = createRequestDeadline(GLOBAL_REQUEST_DEADLINE_MS);
     const input = validateChatBody(req.body);
+
+    // ============================================================================================
+    // PROMPT V5 — PHẦN E/F: ĐỊNH TUYẾN BẰNG LUẬT + EARLY EXIT, TRƯỚC MỌI CHUẨN BỊ TỐN KÉM
+    // ============================================================================================
+    // Trước đây nhánh "chỉ lấy hình" nằm SAU nén history, nén context, retrieval và token-economy
+    // pipeline — nghĩa là một câu "Tạo cho tôi hình ảnh cấu tạo tế bào" vẫn kéo theo toàn bộ công
+    // việc chuẩn bị nguồn của một bài giải, rồi mới rẽ sang tạo ảnh và vứt hết phần vừa chuẩn bị.
+    // Với 1 PDF 134 trang đang mở, đó là hàng chục nghìn token context bị dựng ra để không dùng.
+    // Nay ý định được xác định NGAY sau validate (0 token, 0 I/O) và các đầu vào không liên quan
+    // được cắt tại gốc — mọi tầng phía sau tự nhiên có chi phí bằng 0 thay vì phải nhớ tự tắt.
+    const intentPlan = routeIntent({
+      query: input.query,
+      images: input.sourceImages,
+      activeSources: (input.sourceStatus || []).map((s0) => ({ id: s0.sourceId, forced: false }))
+    });
+    // MỤC 6: admission controller BIẾT stage — ma trận stage × purpose nằm trong aiCallBudget.js,
+    // không rải thành các câu `if` trong route.
+    const aiCallBudget = aiBudget.createCallBudget({
+      intent: intentPlan.intent,
+      stage: intentPlan.imageOnly ? 'image_only' : input.stage
+    });
+    let earlyExitTelemetry = null;
+    if (intentPlan.imageOnly && !intentPlan.usesSource) {
+      earlyExitTelemetry = {
+        droppedContexts: input.contexts.length,
+        droppedSourceImages: input.sourceImages.length,
+        droppedHistoryTurns: input.history.length
+      };
+      // PHẦN CX: cắt có KHAI BÁO — telemetry ghi rõ đã bỏ bao nhiêu và vì lý do gì, không im lặng.
+      input.contexts = [];
+      input.sourceImages = [];
+      input.history = [];
+      input.sourceManifest = '';
+      input.requirementLabels = [];
+      input.unmatchedRequirementLabels = [];
+    }
+    reqLogger.log({
+      stage: 'intent_route',
+      intent: intentPlan.intent,
+      imageOnly: intentPlan.imageOnly,
+      usesSource: intentPlan.usesSource,
+      usesWeb: intentPlan.usesWeb,
+      usesYoutube: intentPlan.usesYoutube,
+      aiCallBaseline: aiCallBudget.baseline,
+      ...(earlyExitTelemetry ? { earlyExit: 'image_only', ...earlyExitTelemetry } : {})
+    });
+
     await ensureProvidersReady();
     const activeProviders = getActiveProviders();
     if (!activeProviders.length) {
@@ -315,11 +668,53 @@ router.post('/', async (req, res, next) => {
       throw err;
     }
 
+    // ============================================================================================
+    // PROMPT V5 — PHẦN T/U/V/X/Y/AC: NGÂN SÁCH ẢNH NGƯỜI DÙNG (imageBudgetPlanner)
+    // ============================================================================================
+    // Trước đây chỉ có `input.image` số ít — "nhiều ảnh" chưa thật sự tồn tại ở tầng server. Nay
+    // validators.js đã gộp `image` + `images[]` thành MỘT danh sách có thứ tự (PHẦN AC). Ở đây:
+    //   1. DEDUPE theo fingerprint thật (PHẦN V/FC-8) — ảnh trùng (vd người dùng dán lại cùng 1 ảnh)
+    //      không được gửi hai lần cho model.
+    //   2. GIỮ ĐÚNG THỨ TỰ người dùng đính kèm (PHẦN X), gắn marker cực ngắn [IMG1]/[IMG2]... khi có
+    //      từ 2 ảnh trở lên để model phân biệt được "ảnh 2" khi người dùng hỏi follow-up.
+    // KHÔNG hạ độ phân giải ở đây: server không có thư viện xử lý ảnh (PHẦN DP — không thêm
+    // dependency lớn chỉ cho việc này), nên `tokenBudget` được đặt vô hạn để planImages() chỉ làm
+    // đúng phần có thể THỰC THI THẬT (dedupe + thứ tự + tier/telemetry) — không báo "đã giảm token"
+    // cho một việc chưa từng xảy ra (PHẦN EO: không giả vờ số ước lượng là số thật).
+    const imagePlan = planImages(
+      (input.images || []).map((img, i) => ({ id: `img${i + 1}`, base64: img.base64, mediaType: img.mediaType })),
+      { maxImages: 8, tokenBudget: Number.MAX_SAFE_INTEGER }
+    );
     const userContent = [];
-    if (input.image) {
-      userContent.push({
-        type: 'image',
-        source: { type: 'base64', media_type: input.image.mediaType, data: input.image.base64 }
+    if (imagePlan.selected.length) {
+      const multi = imagePlan.selected.length > 1;
+      imagePlan.selected.forEach((img) => {
+        if (multi) userContent.push({ type: 'text', text: imageMarker(img.order) });
+        userContent.push({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.base64 }
+        });
+      });
+    }
+    // PDF-chỉ-ảnh (scan, không trích được text): gửi thẳng từng trang cho model đọc bằng vision,
+    // ngay sau ảnh đề bài (nếu có) và trước phần text câu hỏi — model thấy ảnh trước khi đọc yêu cầu.
+    if (input.sourceImages && input.sourceImages.length) {
+      input.sourceImages.forEach((img) => {
+        userContent.push({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.base64 }
+        });
+      });
+    }
+    const hasAnyImage = imagePlan.selected.length > 0 || (input.sourceImages && input.sourceImages.length > 0);
+    if (imagePlan.duplicates.length || imagePlan.dropped.length) {
+      // PHẦN CX: không bao giờ âm thầm bỏ/gộp ảnh — mọi lần dedupe/drop đều có dòng log kèm lý do.
+      reqLogger.log({
+        stage: 'image_budget_plan',
+        imagesIn: (input.images || []).length,
+        imagesSent: imagePlan.selected.length,
+        duplicatesSkipped: imagePlan.duplicates.length,
+        dropped: imagePlan.dropped
       });
     }
     const problemText = input.query || 'Hãy đọc kỹ và giải chi tiết bài tập có trong hình ảnh này.';
@@ -330,10 +725,14 @@ router.post('/', async (req, res, next) => {
     // buildReconcileSystemPrompt bên dưới đều spread `input` nên tự động nhận subjectId, không phải
     // sửa từng điểm gọi riêng lẻ.
     const subjectResolved = resolveSubject({
-      manualSubjectId: input.settings.subject, problemText, hasImage: !!input.image
+      manualSubjectId: input.settings.subject, problemText, hasImage: hasAnyImage
     });
     input.subjectId = subjectResolved.subjectId;
     input.secondarySubjectId = subjectResolved.secondarySubjectId;
+    // Mục 1 (HARD LOCK): gắn subjectSource vào input để buildSubjectDirective (qua spread `input`
+    // ở buildChatSystemPrompt/buildChatSystemPromptParts) biết đây là manual hay auto — mọi stage
+    // (approach/detail/reconcile/continuation/retry) dùng lại đúng field này, không detect lại.
+    input.subjectSource = subjectResolved.subjectSource;
     reqLogger.log({
       stage: 'subject_detect', subjectId: subjectResolved.subjectId,
       confidence: subjectResolved.subjectConfidence, source: subjectResolved.subjectSource,
@@ -343,8 +742,14 @@ router.post('/', async (req, res, next) => {
     // metadata tin nhắn (lọc lịch sử theo môn) và hiển thị badge — xem các payload bên dưới.
     const subjectPayload = {
       subjectId: subjectResolved.subjectId, subjectConfidence: subjectResolved.subjectConfidence,
+      subjectSource: subjectResolved.subjectSource,
       secondarySubjectId: subjectResolved.secondarySubjectId,
-      secondarySubjectConfidence: subjectResolved.secondarySubjectConfidence
+      secondarySubjectConfidence: subjectResolved.secondarySubjectConfidence,
+      // PHẦN E: trang nguồn bị TỪ CHỐI ở validate luôn đi cùng MỌI payload (SSE lẫn JSON) — người
+      // dùng phải biết AI đã KHÔNG đọc trang nào, thay vì tin là đã đọc hết.
+      ...(input.sourceImagesRejected && input.sourceImagesRejected.length
+        ? { rejectedSourcePages: input.sourceImagesRejected }
+        : {})
     };
 
     // ---------- Semantic compression (mục IV/mục 8) trước khi ghép messages ----------
@@ -358,6 +763,57 @@ router.post('/', async (req, res, next) => {
     // nơi (prompt, completeness/citation validation, sourceCoverage, cache key, payload trả client)
     // đều dùng `effectiveContexts` — KHÔNG dùng `input.contexts` thô nữa, để 3 nơi sinh số citation
     // không thể lệch nhau được nữa.
+    // ---------- PHẦN C/VII/VIII: LỌC TRƯỚC KHI LÀM BẤT CỨ VIỆC GÌ KHÁC ----------
+    // Placeholder ("⏳ Đang đọc…") vẫn bị loại tuyệt đối. Evidence của nguồn CHƯA usableNow (chưa có
+    // bất kỳ evidence thật nào — không phải "chưa 100% verified") bị loại NGAY TẠI ĐÂY, trước cả
+    // citation index — nếu để lọt, chúng sẽ có citeNo hợp lệ và model có thể trích dẫn 1 dòng báo
+    // trạng thái như thể đó là nội dung tài liệu (TEST 13). Nguồn đang xử lý nền nhưng ĐÃ có evidence
+    // thật (PARTIAL) KHÔNG bị loại ở đây nữa (PHẦN VIII — root cause cũ đã sửa cả 2 phía client/server).
+    const provenanceFilter = sourceProvenance.filterUsableContexts(input.contexts, input.sourceStatus);
+    if (provenanceFilter.dropped.length) {
+      reqLogger.log({
+        stage: 'source_provenance_filter',
+        dropped: provenanceFilter.dropped.length,
+        reasons: [...new Set(provenanceFilter.dropped.map((d) => d.reason))]
+      });
+    }
+    input.contexts = provenanceFilter.usable;
+    const sourceReadiness = sourceProvenance.summarizeSourceReadiness(input.sourceStatus);
+    input.sourceReadiness = sourceReadiness;
+
+    // ============================================================================================
+    // PROMPT V5 — PHẦN O/P/AS: ADAPTIVE SOURCE TOKEN BUDGET, TRƯỚC citeNo
+    // ============================================================================================
+    // Trước đây trần DUY NHẤT cho lượng context vào prompt là trần BẢO MẬT (chặn DoS, xem
+    // validators.js SECURITY_MAX_CONTEXTS/SECURITY_MAX_CONTEXT_LEN) — không phân biệt "Đáp án câu 1
+    // là gì?" với "Đối chiếu 1.9-1.20 giữa PDF/Web/YouTube". Ở ĐÂY, TRƯỚC buildCitationIndex (để
+    // citeNo luôn khớp đúng tập context thật sự gửi đi — không có citation trỏ vào chỗ đã bị cắt),
+    // ngân sách được co theo độ khó CÂU HỎI THẬT (không phải theo môn/độ dài context thô).
+    const sourceIdSet = new Set((input.contexts || []).map((c) => c.sourceId || c.doc).filter(Boolean));
+    const sourceDifficulty = sourceBudgetPlanner.classifyDifficulty({
+      query: input.query,
+      requirementLabels: input.requirementLabels,
+      unmatchedRequirementLabels: input.unmatchedRequirementLabels,
+      sourceCount: sourceIdSet.size || 1
+    });
+    const sourceBudgetPlan = sourceBudgetPlanner.planSourceContexts(input.contexts, {
+      charBudget: sourceDifficulty.charBudget,
+      requirementLabels: input.requirementLabels
+    });
+    if (!sourceBudgetPlan.withinBudgetAlready) {
+      // PHẦN CX: cắt CÓ KHAI BÁO — không bao giờ âm thầm.
+      reqLogger.log({
+        stage: 'source_budget_plan',
+        tier: sourceDifficulty.tier,
+        budgetChars: sourceDifficulty.charBudget,
+        totalCharsBefore: sourceBudgetPlan.totalChars,
+        contextsBefore: input.contexts.length,
+        contextsAfter: sourceBudgetPlan.contexts.length,
+        droppedCount: sourceBudgetPlan.dropped.length
+      });
+    }
+    input.contexts = sourceBudgetPlan.contexts;
+
     const citationIndex = buildCitationIndex(input.contexts);
     // ---------- Vấn đề #2: nén NỘI DUNG đoạn trích (header/footer trang lặp lại giữa các đoạn) ----------
     // Chạy SAU buildCitationIndex để citeNo đã cố định (nén nội dung không bao giờ đổi số trích dẫn),
@@ -365,6 +821,41 @@ router.post('/', async (req, res, next) => {
     const excerptPack = contextCompressor.compressSourceExcerpts(citationIndex.effectiveContexts);
     const effectiveContexts = excerptPack.contexts;
     input.contexts = effectiveContexts;
+
+    // ============================================================================================
+    // PROMPT V5 — PHẦN M/DV/FC-5: SOURCE WORKING SET ĐƯỢC ĐÔNG CỨNG ĐÚNG MỘT LẦN
+    // ============================================================================================
+    // Từ điểm này trở đi, "câu hỏi này cần đúng những bằng chứng nào" đã được chốt. Mọi giai đoạn
+    // sau (continuation, reconcile, cross-check, failover sang provider khác) dùng lại CHÍNH tập
+    // này — không giai đoạn nào được phép đi hỏi nguồn lần nữa. Working set là object đã Object.freeze
+    // nên ràng buộc đó được ngôn ngữ bảo đảm, không phụ thuộc vào việc người sửa code sau này có nhớ hay không.
+    const sourceWorkingSet = effectiveContexts.length
+      ? workingSetLib.createWorkingSet({
+        requestId: reqLogger.requestId,
+        query: input.query,
+        subject: subjectResolved.subjectId,
+        language: input.settings.lang,
+        evidence: effectiveContexts,
+        requirementLabels: input.requirementLabels,
+        citationMap: citationIndex.citationMap,
+        sourceVersion: String((input.sourceStatus || []).map((s0) => `${s0.sourceId}:${s0.extractionVersion}`).sort().join('|'))
+      })
+      : null;
+    const workingSetTracker = workingSetLib.createReuseTracker(sourceWorkingSet);
+    if (sourceWorkingSet) {
+      workingSetTracker.use('answer');
+      const coverage = workingSetLib.coverageMatrix(sourceWorkingSet.selectedEvidence, sourceWorkingSet.requirementLabels);
+      reqLogger.log({
+        stage: 'source_working_set',
+        workingSetId: sourceWorkingSet.workingSetId,
+        evidenceCount: sourceWorkingSet.selectedEvidence.length,
+        pages: sourceWorkingSet.selectedPages.length,
+        requirementsCovered: coverage.covered,
+        requirementsTotal: coverage.total,
+        completeForQuery: sourceWorkingSet.completeForQuery,
+        workingSetTokenEstimate: sourceWorkingSet.tokenEstimate
+      });
+    }
     if (citationIndex.duplicatesMerged) {
       reqLogger.log({
         stage: 'context_dedupe',
@@ -404,8 +895,22 @@ router.post('/', async (req, res, next) => {
     const rawSystemPrompt = buildChatSystemPrompt({
       ...input, problemText, contexts: citationIndex.effectiveContexts
     });
-    const preSystemPrompt = buildChatSystemPrompt({ ...input, problemText });
-    const systemPack = contextCompressor.compressSystemPrompt(preSystemPrompt);
+    // ---------- A1: NÉN CHỈ PHẦN ĐỘNG, GIỮ NGUYÊN TỪNG KÝ TỰ PHẦN TĨNH ----------
+    // compressSystemPrompt() chuẩn hoá khoảng trắng + dedupe dòng lặp. Nếu cho nó chạm vào khối
+    // TĨNH, khối đó sẽ khác nhau tuỳ nội dung xung quanh -> cache key KHÔNG ổn định -> toàn bộ lợi
+    // ích prompt caching biến mất. Khối tĩnh vốn không có dòng lặp nên cũng chẳng nén được gì.
+    const preParts = buildChatSystemPromptParts({ ...input, problemText });
+    const dynamicPack = contextCompressor.compressSystemPrompt(preParts.dynamicPart);
+    const staticTokens = estimatePromptTokens(preParts.staticPart);
+    const systemPack = {
+      // Telemetry nén phải cộng CẢ phần tĩnh vào raw lẫn compressed, nếu không tỷ lệ nén báo cáo sẽ
+      // bị thổi phồng (raw có tĩnh, compressed thì không).
+      rawTokens: dynamicPack.rawTokens + staticTokens,
+      compressedTokens: dynamicPack.compressedTokens + staticTokens,
+      rolledBack: dynamicPack.rolledBack,
+      text: preParts.staticPart + dynamicPack.text,
+      parts: { staticPart: preParts.staticPart, dynamicPart: dynamicPack.text }
+    };
     const historyItems = contextCompressor.assignTiers(compressedHistory);
 
     const rawHistoryTokens = historyItems.reduce((acc, it) => acc + Math.ceil(String(it.text).length / 3.2), 0);
@@ -425,7 +930,7 @@ router.post('/', async (req, res, next) => {
 
     // PHẦN E: compression CHỈ tối ưu phía INPUT. Các con số dưới đây đi vào TELEMETRY và KHÔNG BAO
     // GIỜ được dùng để suy ra maxTokens/output budget — budget output vẫn tính hoàn toàn theo độ
-    // phức tạp bài + deadline (budgetOf/calculateAdaptiveBudget), xem PHẦN E trong báo cáo.
+    // phức tạp bài + deadline (budgetOf -> resolveBudget), xem PHẦN E trong báo cáo.
     const estimatedCompressedInput =
       systemPack.compressedTokens
       + Math.ceil(problemText.length / 3.2)
@@ -460,18 +965,67 @@ router.post('/', async (req, res, next) => {
     // coreBudget/reserveBudget (allocateCoreReserve của chính tokenEconomy.js) — lượt gọi ĐẦU TIÊN
     // dùng đúng coreBudget (70%), reserve (30%) CHỈ được cấp phát khi completeness FAIL và theo lô
     // nhỏ (xem shouldUseReserve() ở các vòng continuation bên dưới), không phải totalBudget ngay từ đầu.
+    // problemClass được tokenEconomy.classifyProblem() xác định ở tePlan bên dưới. budgetPlanOf()
+    // CHỈ được GỌI sau khi tePlan đã dựng xong (nhánh cross-check/direct/JSON đều nằm sau), nên đọc
+    // qua biến này là an toàn; nếu vì lý do nào đó chưa có, giá trị null giữ nguyên hành vi cũ.
+    let currentProblemClass = null;
+
+    // ---------- A3: PROVIDER-AWARE ngay từ bước lập kế hoạch (không dùng generic làm nguồn cuối) ----------
+    // Ở thời điểm này rotation/failover CHƯA chọn target, nên "provider-aware" ở tầng route nghĩa là:
+    // đọc capability THẬT của POOL đang khả dụng (executionTargets.js đã merge provider-level +
+    // model-level từ modelDiscovery) để biết cơ chế reasoning nào sẽ được dùng — native hay
+    // prompt-based. Con số cuối cùng vẫn được HIỆU CHỈNH LẠI ở tầng client, nơi đã biết chắc model
+    // (fitReasoningToModel) — nên đây là kế hoạch, không phải quyết định cuối.
+    const poolCaps = (activeProviders || []).map((p) => p && p.capabilities).filter(Boolean);
+    const poolProviderKeys = new Set((activeProviders || []).map((p) => p && p.providerKey).filter(Boolean));
+    // Chỉ khẳng định provider khi TOÀN BỘ pool cùng một hãng; pool hỗn hợp -> để undefined và dùng
+    // chính sách chung (mỗi client vẫn tự gate theo capability của mình).
+    const representativeProvider = poolProviderKeys.size === 1 ? [...poolProviderKeys][0] : undefined;
+    // KHÔNG đưa maxOutputTokens vào đây: trần output khác nhau theo từng model trong pool, kẹp theo
+    // model nhỏ nhất sẽ bóp nghẹt model lớn. Việc kẹp diễn ra ở tầng client, nơi biết ĐÚNG model.
+    const representativeCapabilities = poolCaps.length
+      ? {
+        supportsThinking: poolCaps.some((c) => c.supportsThinking),
+        supportsAdaptiveThinking: poolCaps.some((c) => c.supportsAdaptiveThinking)
+      }
+      : undefined;
+
     const budgetPlanOf = (stage) => {
-      const base = calculateAdaptiveBudget({
+      // ---------- SOURCE OF TRUTH DUY NHẤT: resolveBudget() ----------
+      // Nó tự quyết định có nhân hệ số ×1.35 hay không dựa trên CƠ CHẾ reasoning thật của provider:
+      //   - native reasoning (Anthropic/OpenAI/Gemini)  -> answer budget KHÔNG nhân, reasoning cấp riêng
+      //   - prompt-based (provider không có native)     -> vẫn nhân ×1.35 vì khối suy luận nằm TRONG output
+      // Nhờ vậy cùng một phần suy luận không bao giờ được cộng hai lần nữa.
+      const plan = resolveBudget({
+        // Chưa biết target nào sẽ thắng rotation ở thời điểm này -> không truyền provider/model;
+        // mỗi client sẽ HIỆU CHỈNH LẠI theo capability thật của model nó đang gọi (xem
+        // anthropicClient/geminiClient/openaiClient + fitReasoningToModel).
+        provider: representativeProvider,
+        capabilities: representativeCapabilities,
         stage, problemText, historyText, contextsText, approachText: input.approachText,
-        hasImage: !!input.image, deepThinking: input.deepThinking, crossCheck: input.crossCheck,
+        hasImage: hasAnyImage, deepThinking: !!input.deepThinking, crossCheck: !!input.crossCheck,
+        problemClass: currentProblemClass,
         remainingMs: globalDeadline.remaining(),
         // PHẦN J: throughput ĐO THẬT của các target đang khả dụng thay cho hằng số 60 tok/s — quyết
         // định "trong thời gian còn lại model kịp sinh bao nhiêu token" phải khác nhau giữa 1
         // provider 110 tok/s và 1 provider 30 tok/s, nếu không sẽ hoặc cắt sớm hoặc timeout giữa stream.
         throughputTokensPerSec: throughputStats.getRepresentativeThroughput(activeProviders)
       });
-      const { coreBudget, reserveBudget, totalBudget } = tokenEconomy.allocateCoreReserve(base.target);
-      return { ...base, coreBudget, reserveBudget, totalBudget };
+      // Ánh xạ sang TÊN TRƯỜNG CŨ để mọi call-site hiện có (sessionInit, resolveRecovery, log...)
+      // không phải đổi. TỔNG ngân sách answer đến từ resolveBudget() (source of truth duy nhất);
+      // việc CHIA tổng đó thành core (lượt đầu) / reserve (dự phòng continuation) vẫn do
+      // tokenEconomy.allocateCoreReserve() đảm nhiệm — giữ đúng 1 nơi định nghĩa tỷ lệ 70/30.
+      const answerTotal = plan.answerBudget + plan.recoveryBudget;
+      const { coreBudget, reserveBudget, totalBudget } = tokenEconomy.allocateCoreReserve(answerTotal);
+      const reasoningBudget = plan.reasoningBudget;
+      return {
+        ...plan,
+        coreBudget, reserveBudget, totalBudget, reasoningBudget,
+        target: totalBudget,
+        min: Math.max(200, Math.round(totalBudget * 0.35)),
+        max: totalBudget,
+        complexityLevel: plan.complexity.level
+      };
     };
     // Giữ tên cũ cho các nơi vẫn cần {min,target,max} thô (vd budget hiển thị debug) — KHÔNG còn
     // dùng .target trực tiếp làm maxTokens của lượt gọi model thật (xem trên).
@@ -486,46 +1040,232 @@ router.post('/', async (req, res, next) => {
     // có thể trả NHẦM kết quả đã cache của nhau). Ảnh: bypass hẳn L1 (xem tokenEconomy.js).
     const requirementsList = extractCoverageList(problemText);
     const teTelemetry = new tokenEconomy.TelemetryRecorder();
+    // B10/A1.8: usage THẬT cộng dồn cho CẢ request (candidate + reconcile + continuation), gồm
+    // cachedTokens/cacheSavedTokens do provider báo về — đo hiệu quả prompt caching (MEASURED).
+    const requestUsage = emptyUsageAccumulator();
+    // PHẦN B mục 11/12: recorder được đăng ký theo requestId -> aiProviders.logAttempt() tự ghi TỪNG
+    // lượt gọi provider vào đây (không phải luồn tham số qua mọi chữ ký hàm, tránh lặp lại bug B2).
+    const attemptTelemetry = tokenTelemetry.createRequestTelemetry(reqLogger.requestId);
+    res.on('close', () => tokenTelemetry.releaseRequestTelemetry(reqLogger.requestId));
     const sourceIdsFp = effectiveContexts.map((c) => `${c.doc}#${c.id}#${c.citeNo}`).sort().join(',');
     const tePlan = tokenEconomy.runTokenEconomyPipeline({
       problemText, historyText, contextsText, approachText: input.approachText,
       contexts: input.contexts, history: compressedHistory, stage: input.stage,
-      hasImage: !!input.image, hasDrawing: /```(shape|solid3d|plot)/.test(problemText + input.approachText),
+      hasImage: hasAnyImage, hasDrawing: /```(shape|solid3d|plot)/.test(problemText + input.approachText),
       deepThinking: !!input.deepThinking, crossCheck: !!input.crossCheck,
       remainingMs: globalDeadline.remaining(), requirements: requirementsList,
       cacheKeyExtra: {
         promptVersion: PROMPT_VERSION,
+        // BUG FIX (P0 — phát hiện qua audit Puter phase final, test/puter-visualjob-cache-e2e.test.js):
+        // TRƯỚC ĐÂY có `requestId: reqLogger.requestId` ở đây. `_keyOf()` trong TokenEconomyCache
+        // (server/utils/tokenEconomy.js) băm TẤT CẢ field của object này để tạo cache key — nhét một
+        // giá trị DUY NHẤT THEO TỪNG REQUEST vào đúng object dùng làm cache key khiến 2 request giống
+        // hệt nhau (cùng câu hỏi/settings/model) không BAO GIỜ cache-hit được, vì mỗi request luôn có
+        // 1 requestId khác nhau -> vô hiệu hoá hoàn toàn L1/L2 result cache trong thực tế production.
+        // reqLogger.requestId vẫn sẵn có trực tiếp ở mọi nơi cần log/telemetry (không cần đi qua đây).
+        // ---------- MỤC 29: CACHE KEY PHẢI MANG CHÍNH SÁCH MODEL THẬT ----------
+        // `modelTier` (đã có sẵn trong key) chỉ là NHÃN độ phức tạp, không phải model. Hai request
+        // giống hệt nhau nhưng pool đã đổi (thêm/bớt API key, model discovery chọn revision khác,
+        // một hãng đang cooldown) có thể cho output khác hẳn — dùng lại cache cũ là trả lời bằng
+        // chính sách của một cấu hình không còn tồn tại. `executionPolicyFp` băm TẬP TARGET khả
+        // dụng (providerKey:modelId, đã sắp xếp) nên rotation đổi đáng kể -> cache tự vô hiệu.
+        executionPolicyFp: tokenEconomy.fingerprint(
+          (activeProviders || []).map((pv) => `${pv && pv.providerKey}:${pv && pv.modelId}`).sort().join(',')
+        ),
+        // Cơ chế reasoning THẬT sẽ được dùng (native vs prompt-based) cũng đổi hình dạng output.
+        reasoningMechanism: representativeCapabilities
+          ? `${representativeProvider || 'mixed'}:${representativeCapabilities.supportsThinking ? 'native' : 'prompt'}`
+          : 'unknown',
         lang: input.settings.lang,
         detail: input.settings.detail,
         school: input.settings.school,
         grade: input.settings.grade,
         subjectId: input.subjectId,
         secondarySubjectId: input.secondarySubjectId,
+        // Mục 1 (HARD LOCK): subjectSource PHẢI nằm trong cache key — nếu không, 1 request manual
+        // (vd Toán) có cùng subjectId với 1 request auto detect ra đúng 'math' có thể vô tình dùng
+        // chung cache dù prompt thực tế khác nhau (manual có thêm khối RÀNG BUỘC MÔN HỌC hard lock).
+        subjectSource: input.subjectSource,
+        // PHẦN 27: setting hình minh hoạ PHẢI nằm trong cache key — nếu không, người chọn "Never"
+        // sẽ nhận lại response đã cache kèm hình của người chọn "Auto".
+        visualMode: input.settings.visual,
         approachFp: tokenEconomy.fingerprint(input.approachText),
         rulesFp: tokenEconomy.fingerprint(input.rules.join('|')),
         sourceIdsFp: tokenEconomy.fingerprint(sourceIdsFp),
         contextsFp: tokenEconomy.fingerprint(contextsText),
-        // PHẦN 20 FIX: fingerprint THẬT (SHA-256) của đúng ảnh này khi có — cho phép cache an toàn
-        // theo từng ảnh cụ thể thay vì bypass hoàn toàn L1 (xem tokenEconomy.runTokenEconomyPipeline).
-        ...(input.image ? { imageFp: tokenEconomy.imageFingerprint(input.image.base64, input.image.mediaType) } : {})
+        // PHẦN T: nếu evidence/phiên bản trích xuất của nguồn thay đổi (đọc thêm trang, đổi thuật
+        // toán extraction), cache CŨ tuyệt đối không được dùng lại — chữ ký này gồm cả
+        // extractionVersion lẫn coverage thật của từng nguồn.
+        sourceVersionFp: tokenEconomy.fingerprint(sourceProvenance.sourceVersionSignature(input.sourceStatus)),
+        evidenceFp: tokenEconomy.fingerprint(effectiveContexts.map((c) => c.evidenceId || `${c.doc}#${c.page}#${c.id}`).join('|')),
+        // PHẦN 20 FIX + PHẦN I (query fingerprint): fingerprint THẬT (SHA-256) của TOÀN BỘ ảnh người
+        // dùng đính kèm, theo đúng thứ tự (PHẦN X) — trước đây chỉ hash `input.image` đầu tiên, nên
+        // 2 request khác nhau CHỈ ở ảnh thứ 2/3 trở đi vẫn trùng cache key (bug im lặng, trả nhầm
+        // câu trả lời của ảnh khác). sourceImages (PDF-chỉ-ảnh) gộp riêng, không lẫn với ảnh người dùng.
+        ...(input.images && input.images.length
+          ? { imageFp: tokenEconomy.fingerprint(
+              input.images.map((img) => tokenEconomy.imageFingerprint(img.base64, img.mediaType)).join('|')
+            ) }
+          : {}),
+        ...(input.sourceImages && input.sourceImages.length
+          ? { sourceImagesFp: tokenEconomy.fingerprint(
+              input.sourceImages.map((img) => tokenEconomy.imageFingerprint(img.base64, img.mediaType)).join('|')
+            ) }
+          : {})
       }
+    });
+    // A5: từ đây trở đi budgetPlanOf() biết lớp bài -> câu MICRO không còn mua ngân sách native
+    // reasoning (sàn 1024 token) chỉ vì người dùng bật Deep Thinking.
+    // A5.2: dùng `intrinsicClass` (độ khó của CHÍNH đề bài), KHÔNG dùng `problemClass` — nhãn đầy đủ
+    // đã cộng +1 điểm cho chính cờ deepThinking, nên nếu lấy nó thì bật "Suy nghĩ sâu" khiến KHÔNG
+    // câu nào còn là MICRO và cổng tiết kiệm token không bao giờ kích hoạt. Đề ngắn nhưng khó
+    // (chứng minh, tích phân, giới hạn…) đã được nâng tối thiểu lên SHORT ở classifyProblem().
+    currentProblemClass = tePlan.classification.intrinsicClass;
+    // ---------- PHẦN S: OBSERVABILITY 1 DÒNG/REQUEST ----------
+    // retrievedEvidenceCount là số evidence THỰC SỰ đi vào request này (sau dedupe/lọc provenance),
+    // KHÔNG phải tổng số chunk tồn tại trong IndexedDB — nhầm 2 con số này là cách nhanh nhất để
+    // tưởng rằng mình đang gửi ít token trong khi thực tế thì không.
+    reqLogger.log({
+      stage: 'source_retrieval',
+      sourceReady: sourceReadiness.allReady,
+      sourceCount: (input.sourceStatus || []).length,
+      sourceCoverage: sourceReadiness.coveragePercent,
+      retrievedEvidenceCount: effectiveContexts.length,
+      retrievedPages: sourceProvenance.countRetrievedPages(effectiveContexts),
+      contextsDroppedByProvenance: provenanceFilter.dropped.length,
+      historyTurnsRaw: input.historyTurnsRaw || (input.history || []).length,
+      historyTurnsSent: finalHistory.length,
+      sourceRetrievalTokens: Math.ceil(contextsText.length / 3.2),
+      historyTokens: compressedResult.stats.compressedTokens,
+      systemTokens: systemPack.compressedTokens
     });
     reqLogger.log({
       stage: 'token_economy_classify', problemClass: tePlan.classification.problemClass,
+      intrinsicClass: tePlan.classification.intrinsicClass,
       modelTier: tePlan.modelTier, cacheHit: tePlan.cacheHit, coreBudget: tePlan.budget.coreBudget,
       reserveBudget: tePlan.budget.reserveBudget
     });
 
+    // ============================================================================================
+    // MỤC 31/32/33 — MỘT REQUEST = MỘT VÒNG ĐỜI HÌNH, DETAIL CHỈ DÙNG LẠI
+    // ============================================================================================
+    // `visualKey` là danh tính ỔN ĐỊNH của "bài toán này" xuyên suốt Approach -> Detail: cùng câu
+    // hỏi + cùng hướng giải + cùng phiên bản prompt/ngôn ngữ/ảnh đính kèm -> cùng một vòng đời hình.
+    // Nhờ nó, Detail KHÔNG cần client gửi visualId vẫn tìm lại được state của Approach (client cũ
+    // chưa cập nhật vẫn hưởng lợi); client mới gửi thêm `visualId` thì server ưu tiên khớp đúng hình đó.
+    const visualKey = tokenEconomy.fingerprint([
+      PROMPT_VERSION,
+      tokenEconomy.fingerprint(problemText),
+      tokenEconomy.fingerprint(input.approachText || ''),
+      input.settings.lang, input.settings.visual, input.subjectId || '',
+      (input.images && input.images.length)
+        ? tokenEconomy.fingerprint(input.images.map((img) => tokenEconomy.imageFingerprint(img.base64, img.mediaType)).join('|'))
+        : ''
+    ].join('|'));
+    const visualStageAllowsGeneration = visualSystem.stageMayGenerate(
+      intentPlan.imageOnly ? 'image_only' : input.stage
+    );
+    // Stage KHÔNG được sinh hình -> nạp state canonical đã lưu (KV nếu có, RAM nếu không) để dùng lại.
+    let reusableVisuals = null;
+    if (!visualStageAllowsGeneration) {
+      const saved = await visualSystem.stateStore.loadVisualState(visualKey);
+      if (saved && Array.isArray(saved.visuals) && saved.visuals.length) {
+        reusableVisuals = input.visualId
+          ? [visualSystem.stateStore.findVisualById(saved, input.visualId)].filter(Boolean)
+          : saved.visuals;
+        if (!reusableVisuals.length) reusableVisuals = saved.visuals;
+      }
+      reqLogger.log({
+        stage: 'visual_lifecycle_lock',
+        visualStage: input.stage,
+        reusedVisuals: reusableVisuals ? reusableVisuals.length : 0,
+        visualStateDurable: visualSystem.stateStore.isDurable()
+      });
+    }
+
+    // Ngữ cảnh CỐ ĐỊNH của hệ thống hình cho request này — dựng 1 lần, dùng lại ở cả 4 nhánh.
+    const visualBase = {
+      // MỤC 32: stage đi kèm MỌI lệnh gọi pipeline — khoá nằm trong chính pipeline, không phải ở đây.
+      stage: intentPlan.imageOnly ? 'image_only' : input.stage,
+      existingVisuals: reusableVisuals,
+      visualKey,
+      question: problemText,
+      // ROOT CAUSE B: ở stage 'detail', `finalAnswer` chỉ là output của lượt gọi thứ hai. Nội dung
+      // Hướng giải (nơi thường liệt kê các thực thể cần vẽ) phải được đưa vào làm NGUỒN TRÍCH XUẤT
+      // cho spec hình — nếu không, spec rỗng và pipeline báo 'failed'.
+      approachText: input.approachText || '',
+      subject: input.subjectId,
+      language: input.settings.lang,
+      grade: input.settings.grade,
+      complexity: tePlan.budget && tePlan.budget.complexity ? tePlan.budget.complexity.level : 'medium',
+      userPreference: input.settings.visual,
+      // Hybrid Visual Engine: trạng thái Auth Puter do client báo (gợi ý, mặc định 'unknown').
+      puterAuth: (input.clientCaps && input.clientCaps.puterAuth) || 'unknown',
+      deadline: globalDeadline,
+      signal,
+      reqLogger,
+      cacheKeyExtra: {
+        promptVersion: PROMPT_VERSION,
+        sourceFingerprint: tokenEconomy.fingerprint(sourceIdsFp),
+        imageFingerprint: (input.images && input.images.length)
+          ? tokenEconomy.fingerprint(input.images.map((img) => tokenEconomy.imageFingerprint(img.base64, img.mediaType)).join('|'))
+          : ''
+      },
+      inputImageIds: input.imageIds || [],
+      // ---------- PHẦN 25 — TẦNG 3: model judge CHỈ cho case borderline ----------
+      // visualPipeline tự gate: nó chỉ gọi `judge` khi decisionEngine.needsModelJudgement() true
+      // (điểm nằm sát ngưỡng). Với bộ chuẩn hiện tại chỉ ~4% câu rơi vào vùng đó, nên chi phí trung
+      // bình gần bằng 0 — đúng tinh thần "không tạo reasoning loop khổng lồ chỉ để quyết định vẽ hay không".
+      // MỤC 6/24: judge đi qua admission controller. Ở stage 'detail' ma trận trả DENY nên lệnh gọi
+      // KHÔNG BAO GIỜ rời khỏi máy chủ — hai lớp khoá độc lập (pipeline chặn theo stage, admission
+      // chặn theo purpose), hỏng một lớp vẫn còn lớp kia.
+      judge: visualSystem.judge.createVisualJudge({
+        callFn: (args) => {
+          const verdict = aiCallBudget.admitAndRecord(aiBudget.PURPOSE.JUDGE, {
+            stage: intentPlan.imageOnly ? 'image_only' : input.stage,
+            reason: 'visual decision borderline (needsModelJudgement)'
+          });
+          if (!verdict.allowed) {
+            reqLogger.log({ stage: 'ai_call_denied', purpose: 'judge', reason: verdict.reason });
+            return Promise.reject(Object.assign(new Error('judge_denied'), { denied: true }));
+          }
+          return callWithFailover(activeProviders, args, { deadline: globalDeadline });
+        },
+        deadline: globalDeadline, signal, requestId: reqLogger.requestId, logger: reqLogger
+      })
+    };
+
     // ---------- Cache hit: trả thẳng response đã tính trước, KHÔNG gọi lại AI (mục 21.18) ----------
-    if (tePlan.cacheHit && tePlan.cachedValue) {
-      reqLogger.log({ stage: 'token_economy_cache_hit' });
+    // MỤC 28: L1 (đồng bộ, trong tePlan) miss -> thử L2 BỀN VỮNG. L2 là best-effort tuyệt đối: lỗi
+    // hoặc chậm thì coi như miss, không bao giờ làm request chính treo (xem CacheAdapter.getAsync).
+    let resultCacheHit = !!(tePlan.cacheHit && tePlan.cachedValue);
+    let resultCacheValue = tePlan.cachedValue;
+    let resultCacheLevel = resultCacheHit ? 'L1' : null;
+    const cacheLevels = tokenEconomy.cacheLevelsStatus();
+    if (!resultCacheHit && !tePlan.cacheBypassed && cacheLevels.l2) {
+      const cold = await tokenEconomy.globalCache.getAsync('L1', tePlan.cacheKeyParts);
+      if (cold) { resultCacheHit = true; resultCacheValue = cold; resultCacheLevel = 'L2'; }
+    }
+    attemptTelemetry.recordCache(resultCacheHit);
+    reqLogger.log({ stage: 'result_cache_lookup', resultCacheHit, resultCacheLevel, l2Enabled: cacheLevels.l2, l2Reason: cacheLevels.reason });
+    if (resultCacheHit && resultCacheValue) {
+      reqLogger.log({ stage: 'token_economy_cache_hit', resultCacheLevel });
       if (wantsStream) {
         sseHeaders(res);
-        sseWrite(res, 'delta', { text: tePlan.cachedValue.text });
-        sseWrite(res, 'done', { ...tePlan.cachedValue, fromCache: true });
+        sseWrite(res, 'delta', { text: resultCacheValue.text });
+        sseWrite(res, 'done', { ...resultCacheValue, fromCache: true, cacheLevel: resultCacheLevel });
+        // BUG FIX (P0 — Puter phase final §3): text cache hit trước đây chỉ gửi "done" rồi đóng SSE
+        // ngay — client CHỈ enqueue Puter qua đúng 1 sự kiện "visual:request" (xem apiPostStream()
+        // trong app.js), "done" mang field visualJob không tự kích hoạt gì cả. Không phát lại sự
+        // kiện này thì mọi cache-hit (kể cả cùng nội dung câu hỏi) vĩnh viễn KHÔNG có hình, đúng bug
+        // "text cache hit == no visual" mà yêu cầu cấm tuyệt đối. renderer === 'puter_image' đảm bảo
+        // chỉ áp dụng cho nhánh client-primary — không đụng tới legacy server_fallback.
+        if (resultCacheValue.visualJob && resultCacheValue.visualJob.renderer === 'puter_image') {
+          sseWrite(res, 'visual:request', resultCacheValue.visualJob);
+        }
         return res.end();
       }
-      return res.json({ ...tePlan.cachedValue, fromCache: true });
+      return res.json({ ...resultCacheValue, fromCache: true, cacheLevel: resultCacheLevel });
     }
 
     // ============================================================================================
@@ -536,26 +1276,115 @@ router.post('/', async (req, res, next) => {
     // cùng (thứ người dùng thực sự đọc) được stream, các lượt thu thập trước đó báo tiến trình qua
     // sự kiện "status" vì bản thân chúng không hiển thị trực tiếp lên giao diện.
     // ============================================================================================
+    // ============================================================================================
+    // MỤC 1.6 — NHÁNH "CHỈ LẤY HÌNH": trả lời đúng thứ người dùng hỏi, không hơn
+    // ============================================================================================
+    // Đặt TRƯỚC mọi nhánh giải bài (kể cả cross-check) và SAU cache-hit, nên nó không đụng gì tới
+    // các đường hiện có: câu hỏi không phải dạng "tạo cho tôi hình ảnh X" sẽ không bao giờ vào đây.
+    // Ý định đã được quyết ở đầu request (routeIntent) — nhánh dưới chỉ THỰC THI, không phân loại lại.
+    const imageOnly = { imageOnly: intentPlan.imageOnly, topic: intentPlan.topic, reason: intentPlan.reason };
+    if (imageOnly.imageOnly) {
+      reqLogger.log({ stage: 'image_only_request', topic: imageOnly.topic.length, reason: imageOnly.reason });
+      const imageVisualBase = { ...visualBase, userPreference: 'always', question: imageOnly.topic || problemText, rawQuestion: problemText };
+
+      if (wantsStream) {
+        sseHeaders(res);
+        res.on('close', () => { try { res.end(); } catch (e) { /* đã đóng — bỏ qua */ } });
+      }
+      try {
+        if (wantsStream) sseWrite(res, 'status', { state: STATES.GENERATING, message: 'Đang chuẩn bị hình minh hoạ…' });
+        // PHẦN AE: chú thích mặc định là DETERMINISTIC — image-only = ĐÚNG 1 lệnh gọi AI (sinh ảnh).
+        // Lệnh gọi model cho caption chỉ tồn tại khi bật tường minh IMAGE_CAPTION_MODEL=1.
+        const caption = deterministicCaption.captionModelEnabled()
+          ? await (async () => {
+            // MỤC 6/36: caption model là lệnh gọi CÓ ĐIỀU KIỆN — phải qua cửa admit trước.
+            const verdict = aiCallBudget.admitAndRecord(aiBudget.PURPOSE.CAPTION, {
+              stage: 'image_only', reason: 'IMAGE_CAPTION_MODEL=1 (bật tường minh)'
+            });
+            if (!verdict.allowed) {
+              reqLogger.log({ stage: 'ai_call_denied', purpose: 'caption', reason: verdict.reason });
+              return deterministicCaption.buildDeterministicCaption({
+                topic: imageOnly.topic || problemText,
+                language: input.settings.lang,
+                subjectId: subjectResolved.subjectId
+              });
+            }
+            return generateImageCaption({
+              topic: imageOnly.topic || problemText,
+              language: input.settings.lang,
+              activeProviders, deadline: globalDeadline, requestId: reqLogger.requestId, signal
+            });
+          })()
+          : deterministicCaption.buildDeterministicCaption({
+            topic: imageOnly.topic || problemText,
+            language: input.settings.lang,
+            subjectId: subjectResolved.subjectId
+          });
+        if (disconnected) return;
+        const captionText = caption.text || '';
+        if (wantsStream && captionText) sseWrite(res, 'delta', { text: captionText });
+
+        const payload = {
+          ...subjectPayload,
+          // Yêu cầu tạo hình KHÔNG có khái niệm "lời giải thiếu ý": luôn COMPLETED, nên giao diện
+          // không bao giờ hiện cảnh báo "CHƯA ĐẦY ĐỦ" cho loại yêu cầu này nữa.
+          state: STATES.COMPLETED,
+          partial: false,
+          text: captionText,
+          imageOnly: true,
+          provider: caption.provider ? caption.provider.label : 'unknown',
+          completeness: 'COMPLETE',
+          continuations: 0
+        };
+
+        if (wantsStream) {
+          sseWrite(res, 'done', { ...payload, visualPending: true });
+          const run = await runVisualsFor({
+            ...imageVisualBase, finalAnswer: captionText, answerComplete: true,
+            onEvent: (ev) => { const { type, ...rest } = ev; sseWrite(res, type, rest); }
+          });
+          payload.visuals = run.visuals;
+          payload.visualStatus = run.status;
+          if (!run.visuals || !run.visuals.length) {
+            // Người dùng hỏi ĐÚNG một bức hình mà hệ thống không dựng được — phải nói thẳng, không
+            // để họ nhìn một khoảng trống và tự đoán.
+            sseWrite(res, 'status', {
+              message: 'Chưa tạo được hình cho yêu cầu này. Máy chủ có thể chưa cấu hình nhà cung cấp ảnh.'
+            });
+          }
+          reqLogger.log({ stage: 'image_only_done', ...attemptTelemetry.snapshot(), ...run.telemetry, ...aiCallBudget.snapshot() });
+          return res.end();
+        }
+
+        const run = await runVisualsFor({ ...imageVisualBase, finalAnswer: captionText, answerComplete: true });
+        payload.visuals = run.visuals;
+        payload.visualStatus = run.status;
+        reqLogger.log({ stage: 'image_only_done', ...attemptTelemetry.snapshot(), ...run.telemetry });
+        return res.json(payload);
+      } catch (e) {
+        if (e && e.cancelled) return;
+        const norm = normalizeError(e);
+        reqLogger.log({ stage: 'image_only_failed', error: norm.code });
+        if (wantsStream) { sseWrite(res, 'error', { message: norm.userMessage, code: norm.code }); return res.end(); }
+        return res.status(norm.status || 502).json({ error: norm.userMessage, code: norm.code });
+      }
+    }
+
     if (wantsStream) {
       sseHeaders(res);
-      req.on('close', () => { try { res.end(); } catch (e) { /* đã đóng — bỏ qua */ } });
+      res.on('close', () => { try { res.end(); } catch (e) { /* đã đóng — bỏ qua */ } });
 
       try {
         if (input.crossCheck && input.stage === 'detail') {
           // PHẦN D (TIER 4): dùng system prompt ĐÃ nén boilerplate (systemPack) thay vì dựng lại —
           // vừa hiện thực hoá phần token tiết kiệm được, vừa bỏ 1 lần build prompt trùng lặp.
-          const system = systemPack.text;
-          const variantSystem = system + buildVariantAddendum();
+          const system = systemPack.parts;
+          const variantSystem = appendToSystem(system, buildVariantAddendum());
 
-          // PHẦN 10 FIX: crossCheckPolicy() nay THỰC SỰ điều khiển số candidate thu thập — trước đây
-          // được tính (dead code) nhưng route luôn gọi cứng CROSS_CHECK_MAX_CANDIDATES bất kể risk.
-          // Người dùng vẫn được tôn trọng lựa chọn bật "Đối chiếu đa hướng" (KHÔNG bỏ qua cross-check
-          // hoàn toàn — vẫn >= 2 candidate để có gì đó đối chiếu), chỉ risk LOW mới giảm từ 3 -> 2.
-          const ccPolicy = tokenEconomy.crossCheckPolicy({
-            problemClass: tePlan.classification.problemClass,
-            hasGeometryProof: tokenEconomy.detectGeometryProofHint(problemText)
-          });
-          const ccMaxCandidates = ccPolicy.risk === 'LOW' ? 2 : undefined; // undefined = giữ CROSS_CHECK_MAX_CANDIDATES mặc định
+          // Mục XII/XXII (spec token-compression v2): KHÔNG được giảm SỐ LƯỢNG candidate cross-check
+          // chỉ vì risk thấp — token saving CHỈ được đến từ nén representation/context, không phải
+          // giảm verification. Luôn dùng CROSS_CHECK_MAX_CANDIDATES mặc định (>=2, tôn trọng lựa
+          // chọn "Đối chiếu đa hướng" của người dùng đầy đủ, mọi problemClass).
 
           sseWrite(res, 'status', { message: 'Đang đối chiếu đa hướng…' });
 
@@ -568,15 +1397,29 @@ router.post('/', async (req, res, next) => {
           let candidates;
           try {
             const gathered = await gatherCrossCheckCandidates(activeProviders, {
-              system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget, requestId: reqLogger.requestId,
+              system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget,
+              reasoningBudget: budgetOf('candidate').reasoningBudget,
+              requestId: reqLogger.requestId,
               deepThinking: input.deepThinking,
               onStatus: (message) => sseWrite(res, 'status', { message }),
               deadline: globalDeadline, // mục 4/6: dùng chung 1 đồng hồ với toàn bộ request, không tự tạo riêng
-              requireVision: !!input.image,
-              ...(ccMaxCandidates ? { maxCandidates: ccMaxCandidates } : {}),
+              requireVision: hasAnyImage,
               signal
             });
             candidates = gathered.candidates;
+            accumulateUsage(requestUsage, gathered.usage && { ...gathered.usage });
+            // FIX (audit mục 15/20): PARTICIPANT ACCOUNTING THẬT — log để trả lời chính xác câu hỏi
+            // "cấu hình N AI thì thực tế bao nhiêu AI chạy?", và báo UI đúng số THẬT (không phải số
+            // "trông có vẻ nhiều") khi kết quả bị degraded (pool khỏe quá ít để đối chiếu đầy đủ).
+            reqLogger.log({ stage: 'cross_check_accounting', ...gathered.accounting });
+            if (gathered.accounting) {
+              const { successfulTargets, eligibleTargets, degraded } = gathered.accounting;
+              sseWrite(res, 'status', {
+                message: degraded
+                  ? `Đối chiếu đa hướng: ${successfulTargets}/${eligibleTargets} AI tham gia (đã suy giảm — pool AI khỏe hiện còn ít).`
+                  : `Đối chiếu đa hướng: ${successfulTargets}/${eligibleTargets} AI đã tham gia.`
+              });
+            }
           } finally {
             clearInterval(heartbeat);
           }
@@ -595,21 +1438,39 @@ router.post('/', async (req, res, next) => {
           const hasWebSearch = sourceCoverage.webRequired;
           const agreement = candidatesAgree(candidates);
           const reconcileStage = agreement ? 'reconcileLight' : 'reconcile';
-          const reconcileSystem = buildReconcileSystemPrompt({
+          // B5: candidate DÀI được thay bằng VERIFICATION PACKET (đáp số/công thức/bước/điều kiện/
+          // dữ kiện — giữ nguyên văn), bỏ prose không phục vụ verification. Candidate ngắn giữ
+          // nguyên văn. Đây là token saving bằng DEDUP, không phải cắt suy luận.
+          const packed = compactCandidatesForReconcile(candidates);
+          reqLogger.log({ stage: 'verification_packet', ...packed.stats });
+          const reconcileSystem = buildReconcileSystemPromptParts({
             // candidates ở đây đã được strip <thinking>/<think> ngay từ gatherCrossCheckCandidates()
             // (xem server/utils/aiProviders.js) — không cần strip lại ở đây.
-            candidates,
+            candidates: packed.candidates,
             contexts: input.contexts,
             settings: input.settings,
             hasWebSearch,
             deepThinking: input.deepThinking,
             agreement,
-            subjectId: input.subjectId
+            subjectId: input.subjectId,
+            secondarySubjectId: input.secondarySubjectId,
+            subjectSource: input.subjectSource,
+            sourceManifest: input.sourceManifest
           });
 
           sseWrite(res, 'status', { message: agreement ? 'Các hướng giải đã khớp nhau, đang trình bày lại…' : 'Đang tổng hợp lời giải cuối cùng…' });
 
           sseWrite(res, 'status', { state: STATES.GENERATING, message: 'Đang tổng hợp lời giải cuối cùng…' });
+
+          const reconcileAdmission = aiCallBudget.admit(aiBudget.PURPOSE.RECONCILE, 'detail', { reason: 'cross_check_reconciliation' });
+          if (reconcileAdmission && reconcileAdmission.decision === aiBudget.DECISION.DENY) {
+            sseWrite(res, 'error', {
+              message: 'Lượt tổng hợp đối chiếu bị từ chối bởi ngân sách lệnh gọi.',
+              code: 'AI_CALL_BUDGET_DENIED'
+            });
+            return res.end();
+          }
+          aiCallBudget.record(aiBudget.PURPOSE.RECONCILE, { stage: 'detail', reason: 'cross_check_reconciliation' });
 
           // ---------- PHẦN B/L: RESUMABLE STREAM (checkpoint + failover A->B->C->D) ----------
           // Toàn bộ vòng continuation trước đây (viết tay tại đây, không đọc partialError, không
@@ -630,20 +1491,35 @@ router.post('/', async (req, res, next) => {
               inputTokens: compressionTelemetry.rawInputTokens,
               compressedInputTokens: compressionTelemetry.compressedInputTokens
             },
-            buildArgs: ({ messages: msgs, maxTokens }) => ({
+            buildArgs: ({ messages: msgs, maxTokens, mode, completeness: recoveryCompleteness }) => ({
               system: reconcileSystem, messages: msgs, maxTokens,
+              telemetryStage: mode && mode !== 'INITIAL' ? 'reconcile_recovery' : 'reconcile',
+              telemetryRecovery: !!(mode && mode !== 'INITIAL'),
+              reasoningBudget: reasoningFor({
+                deepThinking: input.deepThinking, answerBudget: maxTokens,
+                complexityLevel: budgetOf(reconcileStage).complexityLevel,
+                problemClass: currentProblemClass, mode, completeness: recoveryCompleteness
+              }),
+              // MỤC 13: lượt tổng hợp cũng có thể failover sang target khác hãng — ngân sách phải
+              // tính lại theo capability của chính target đó.
+              recomputeForTarget: makeTargetBudgetRecomputer({
+                answerBudget: maxTokens, deepThinking: input.deepThinking, fastModel: false,
+                complexityLevel: budgetOf(reconcileStage).complexityLevel,
+                problemClass: currentProblemClass
+              }),
               webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS,
               requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal
             }),
-            streamOpts: { preferWebSearch: hasWebSearch, requireVision: !!input.image },
+            streamOpts: { preferWebSearch: hasWebSearch, requireVision: hasAnyImage },
             onDelta: (piece) => sseWrite(res, 'delta', { text: piece }),
             onStatus: (st) => sseWrite(res, 'status', { state: STATES.RECOVERING, message: st.message }),
             evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
               stage: 'detail', coverageList, approachText: input.approachText,
               contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted,
-              validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf
+              validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness, unmatchedRequirementLabels: input.unmatchedRequirementLabels
             }),
             resolveRecovery: makeRecoveryResolver({
+              reqLogger,
               reserveState: reconcileReserveState, deadline: globalDeadline,
               recalcTarget: () => budgetOf(reconcileStage).target
             }),
@@ -693,20 +1569,37 @@ router.post('/', async (req, res, next) => {
             resumes: reconcileRun.resumes,
             citationMap: citationIndex.citationMap
           };
+          // ---------- PHẦN 21/24: TEXT xong -> gửi "done" NGAY, hình đi bằng SỰ KIỆN RIÊNG ----------
+          // Người dùng đọc được lời giải đầy đủ trước, hình tới sau (hoặc không bao giờ tới) mà
+          // KHÔNG ảnh hưởng gì. Với cross-check, tới đây candidates đã được reconcile xong nên hình
+          // chắc chắn dựng từ FINAL VERIFIED FACTS, không phải candidate đầu tiên.
+          sseWrite(res, 'done', { ...donePayload, visualPending: true });
+          const visualRun = await runVisualsFor({
+            ...visualBase, finalAnswer: full, answerComplete: !outcome.partial, candidates,
+            onEvent: (ev) => { const { type, ...rest } = ev; sseWrite(res, type, rest); }
+          });
+          donePayload.visuals = visualRun.visuals;
+          donePayload.visualStatus = visualRun.status;
+          // BUG FIX (P0 — Puter phase final §3/§4): visualJob (client_primary, status 'pending')
+          // KHÔNG BAO GIỜ được set ở đây trước đây — cả stream lẫn giá trị bị cache đều mất khả
+          // năng tạo ảnh Puter phía client. Đây LÀ payload được ghi thẳng vào tokenEconomy L1/L2
+          // (dòng ngay dưới), nên field này phải có mặt để một cache-hit sau này vẫn mang đủ job.
+          donePayload.visualJob = visualRun.visualJob || null;
+
           // PHẦN P: KHÔNG BAO GIỜ cache response PARTIAL/interrupted/chưa validate — chỉ cache khi
           // thực sự COMPLETED (partial=false), nếu không lần sau sẽ trả lại đúng câu trả lời bị cắt.
-          if (!tePlan.cacheBypassed && !outcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, donePayload);
-          if (!outcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, full.length / 3.2);
+          if (reconcileRun.resumes || continuations) workingSetTracker.use('continuation'); // KHÔNG retrieval lại
+          if (!tePlan.cacheBypassed && !outcome.partial && !isAuthDependentVisualRun(visualRun)) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, donePayload);
+          if (!outcome.partial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: reconcileStage, provider: reconciler && reconciler.providerKey, model: reconciler && reconciler.modelId, ...outcomeSample(requestUsage, full), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
           teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
           teTelemetry.record('outputTokens', full.length / 3.2);
           teTelemetry.record('continuationTokens', reconcileRun.session.continuationTokens);
-          reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry });
-          sseWrite(res, 'done', donePayload);
+          reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot(), ...compressionTelemetry, ...visualRun.telemetry, ...workingSetTracker.snapshot(), ...aiCallBudget.snapshot() });
           return res.end();
         }
 
         // ---------- Giai đoạn "hướng giải" hoặc chế độ "Nhanh": stream trực tiếp 1 lượt duy nhất ----------
-        const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
+        const system = systemPack.parts; // PHẦN D (TIER 4): bản đã nén boilerplate (A1: dạng PromptParts)
         // LỖI GỐC (ảnh người dùng gửi): giai đoạn "hướng giải" (approach) bị cắt ngang giữa
         // câu ("- Khai thác tính") vì maxTokens cố định 700 bất kể độ dài đề bài/deepThinking. FIX:
         // dùng ADAPTIVE TOKEN BUDGET (mục III, xem adaptiveBudget.js) thay vì hằng số cố định.
@@ -733,20 +1626,35 @@ router.post('/', async (req, res, next) => {
             inputTokens: compressionTelemetry.rawInputTokens,
             compressedInputTokens: compressionTelemetry.compressedInputTokens
           },
-          buildArgs: ({ messages: msgs, maxTokens }) => ({
+          buildArgs: ({ messages: msgs, maxTokens, mode, completeness: recoveryCompleteness }) => ({
             system, messages: msgs, maxTokens, fast: useFastModel,
+            telemetryStage: mode && mode !== 'INITIAL' ? `${directStageName}_recovery` : directStageName,
+            telemetryRecovery: !!(mode && mode !== 'INITIAL'),
+            reasoningBudget: reasoningFor({
+              deepThinking: input.deepThinking, answerBudget: maxTokens,
+              complexityLevel: directBudget.complexityLevel,
+              problemClass: currentProblemClass, mode, completeness: recoveryCompleteness
+            }),
+            // MỤC 13: mỗi target (kể cả target được failover tới) tự tính lại ngân sách của mình.
+            recomputeForTarget: makeTargetBudgetRecomputer({
+              answerBudget: maxTokens, deepThinking: input.deepThinking, fastModel: false,
+              complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass
+            }),
             deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal
           }),
-          streamOpts: { requireVision: !!input.image },
+          streamOpts: { requireVision: hasAnyImage },
           onDelta: (piece) => sseWrite(res, 'delta', { text: piece }),
           onStatus: (st) => sseWrite(res, 'status', { state: STATES.RECOVERING, message: st.message }),
           evaluate: (text, sig) => checkCompletenessWithDrawings(text, {
             stage: input.stage, coverageList, approachText: input.approachText,
             contexts: input.contexts, finishReason: sig.finishReason, interrupted: sig.interrupted,
-            validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf
+            validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness, unmatchedRequirementLabels: input.unmatchedRequirementLabels
           }),
           resolveRecovery: makeRecoveryResolver({
+            reqLogger,
             reserveState: directReserveState, deadline: globalDeadline,
+            // MỤC 7: stage 'approach' có trần recovery riêng, không dùng chính sách của Detail.
+            maxGrant: directStageName === 'approach' ? APPROACH_MAX_CONTINUATION_TOKENS : undefined,
             recalcTarget: () => budgetOf(directStageName).target
           }),
           deadline: globalDeadline,
@@ -754,7 +1662,7 @@ router.post('/', async (req, res, next) => {
           isDisconnected: () => disconnected
         });
 
-        const full = directRun.text;
+        let full = directRun.text;
         const completeness = directRun.completeness;
         const continuations = directRun.continuations;
         const provider = directRun.provider || { label: 'unknown' };
@@ -777,6 +1685,12 @@ router.post('/', async (req, res, next) => {
           return res.end();
         }
 
+        // Mục II: chỉ áp dụng cho stage 'approach' — repair NGẮN nếu vi phạm compactness contract.
+        full = await maybeRepairApproach({
+          stageName: directStageName, text: full, activeProviders,
+          requestId: reqLogger.requestId, signal, deadline: globalDeadline, reqLogger
+        });
+
         const directDonePayload = {
           ...subjectPayload,
           state: directOutcome.state,
@@ -789,14 +1703,24 @@ router.post('/', async (req, res, next) => {
           resumes: directRun.resumes,
           citationMap: citationIndex.citationMap
         };
+        // PHẦN 21: text xong -> "done" ngay; hình đi bằng sự kiện riêng, không chèn vào text stream.
+        sseWrite(res, 'done', { ...directDonePayload, visualPending: true });
+        const directVisualRun = await runVisualsFor({
+          ...visualBase, finalAnswer: full, answerComplete: !directOutcome.partial,
+          onEvent: (ev) => { const { type, ...rest } = ev; sseWrite(res, type, rest); }
+        });
+        directDonePayload.visuals = directVisualRun.visuals;
+        directDonePayload.visualStatus = directVisualRun.status;
+        // BUG FIX (P0 — Puter phase final §3/§4): xem giải thích đầy đủ ở nhánh cross-check phía trên.
+        directDonePayload.visualJob = directVisualRun.visualJob || null;
+
         // PHẦN P: chỉ cache khi COMPLETED thật (không cache partial/interrupted).
-        if (!tePlan.cacheBypassed && !directOutcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, directDonePayload);
-        if (!directOutcome.partial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, directStageName, full.length / 3.2);
+        if (!tePlan.cacheBypassed && !directOutcome.partial && !isAuthDependentVisualRun(directVisualRun)) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, directDonePayload);
+        if (!directOutcome.partial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: directStageName, provider: directRun.provider && directRun.provider.providerKey, model: directRun.provider && directRun.provider.modelId, ...outcomeSample(requestUsage, full), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
         teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
         teTelemetry.record('outputTokens', full.length / 3.2);
         teTelemetry.record('continuationTokens', directRun.session.continuationTokens);
-        reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot(), ...compressionTelemetry });
-        sseWrite(res, 'done', directDonePayload);
+        reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot(), ...compressionTelemetry, ...directVisualRun.telemetry });
         return res.end();
       } catch (streamErr) {
         // Header SSE đã gửi (200 text/event-stream) — không thể chuyển sang next(err) để trả JSON
@@ -832,24 +1756,23 @@ router.post('/', async (req, res, next) => {
     // ngân sách thời gian tổng + thử lại provider lỗi SONG SONG) để tránh lặp logic và tránh cộng
     // dồn thời gian chờ tuần tự — xem giải thích chi tiết ở đầu server/utils/aiProviders.js.
     if (input.crossCheck && input.stage === 'detail') {
-      const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
-      const variantSystem = system + buildVariantAddendum();
+      const system = systemPack.parts; // PHẦN D (TIER 4): bản đã nén boilerplate (A1: dạng PromptParts)
+      const variantSystem = appendToSystem(system, buildVariantAddendum());
 
-      // PHẦN 10 FIX: xem giải thích đầy đủ ở nhánh streaming phía trên — cùng logic, cùng lý do.
-      const ccPolicy = tokenEconomy.crossCheckPolicy({
-        problemClass: tePlan.classification.problemClass,
-        hasGeometryProof: tokenEconomy.detectGeometryProofHint(problemText)
-      });
-      const ccMaxCandidates = ccPolicy.risk === 'LOW' ? 2 : undefined;
-
-      const { candidates } = await gatherCrossCheckCandidates(activeProviders, {
-        system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget, requestId: reqLogger.requestId,
+      // Mục XII/XXII: xem giải thích đầy đủ ở nhánh streaming phía trên — không giảm số candidate
+      // theo risk, luôn dùng CROSS_CHECK_MAX_CANDIDATES mặc định.
+      const { candidates, usage: crossCheckUsage, accounting: crossCheckAccounting } = await gatherCrossCheckCandidates(activeProviders, {
+        system, variantSystem, messages, maxTokens: budgetOf('candidate').coreBudget,
+        reasoningBudget: budgetOf('candidate').reasoningBudget,
+        requestId: reqLogger.requestId,
         deepThinking: input.deepThinking,
         deadline: globalDeadline, // mục 4/6
-        requireVision: !!input.image,
-        ...(ccMaxCandidates ? { maxCandidates: ccMaxCandidates } : {}),
+        requireVision: hasAnyImage,
         signal
       });
+      accumulateUsage(requestUsage, crossCheckUsage && { ...crossCheckUsage });
+      // FIX (audit mục 15): participant accounting thật, log kể cả nhánh JSON (không chỉ SSE).
+      reqLogger.log({ stage: 'cross_check_accounting', ...crossCheckAccounting });
 
       if (!candidates.length) {
         const err = new Error('Tất cả nhà cung cấp AI đã cấu hình đều gặp lỗi khi giải bài. Vui lòng kiểm tra lại API key trong .env.');
@@ -862,43 +1785,49 @@ router.post('/', async (req, res, next) => {
       const hasWebSearch = sourceCoverage.webRequired;
       const agreement = candidatesAgree(candidates);
       const reconcileStage = agreement ? 'reconcileLight' : 'reconcile';
-      const reconcileSystem = buildReconcileSystemPrompt({
+      const packed = compactCandidatesForReconcile(candidates); // B5 — xem nhánh streaming ở trên
+      reqLogger.log({ stage: 'verification_packet', ...packed.stats });
+      const reconcileSystem = buildReconcileSystemPromptParts({
         // candidates ở đây đã được strip <thinking>/<think> ngay từ gatherCrossCheckCandidates()
         // (xem server/utils/aiProviders.js) — không cần strip lại ở đây.
-        candidates,
+        candidates: packed.candidates,
         contexts: input.contexts,
         settings: input.settings,
         hasWebSearch,
         deepThinking: input.deepThinking,
         agreement,
-        subjectId: input.subjectId
+        subjectId: input.subjectId,
+        secondarySubjectId: input.secondarySubjectId,
+        subjectSource: input.subjectSource,
+        sourceManifest: input.sourceManifest
       });
 
       const initial = await callWithFailover(
         activeProviders,
-        { system: reconcileSystem, messages, maxTokens: budgetOf(reconcileStage).coreBudget, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
-        { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image } // mục 4/6
+        { system: reconcileSystem, messages, maxTokens: budgetOf(reconcileStage).coreBudget, reasoningBudget: budgetOf(reconcileStage).reasoningBudget, telemetryStage: 'reconcile', webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
+        { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: hasAnyImage } // mục 4/6
       );
 
       // FIX PHẦN 3/6 + mục 4 audit continuation: continuation dùng RESERVE (lô nhỏ dần), có thể MỞ
       // RỘNG động khi thực sự cần (xem resolveReserveDecision) thay vì hard-cap 30% cố định.
       const jsonReconcileReserveState = { budget: budgetOf(reconcileStage).reserveBudget, used: 0 };
       const jsonReconcileRecovery = makeRecoveryResolver({
+        reqLogger,
         reserveState: jsonReconcileReserveState, deadline: globalDeadline,
         recalcTarget: () => budgetOf(reconcileStage).target
       });
       const { text: finalText, completeness, continuations, provider: reconciler, partial: reconcilePartial } = await ensureCompleteNonStream(
-        (msgs, _currentCompleteness, grantedMaxTokens) => callWithFailover(
+        (msgs, recoveryCompleteness, grantedMaxTokens) => callWithFailover(
           activeProviders,
-          { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
-          { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: !!input.image }
+          { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'reconcile_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: budgetOf(reconcileStage).complexityLevel, problemClass: currentProblemClass, mode: 'CONTINUATION', completeness: recoveryCompleteness }), webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
+          { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: hasAnyImage }
         ),
         initial,
         {
           messages, problemText, stage: 'detail', deadline: globalDeadline,
           approachText: input.approachText, contexts: input.contexts, signal,
           requestId: reqLogger.requestId,
-          validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf,
+          validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness, unmatchedRequirementLabels: input.unmatchedRequirementLabels,
           resolveRecovery: jsonReconcileRecovery,
           isDisconnected: () => disconnected
         }
@@ -923,10 +1852,20 @@ router.post('/', async (req, res, next) => {
         continuations,
         citationMap: citationIndex.citationMap
       };
-      if (!tePlan.cacheBypassed && !reconcilePartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
-      if (!reconcilePartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, reconcileStage, finalText.length / 3.2);
+      // Nhánh JSON không có stream nên hình phải sẵn sàng TRƯỚC khi trả về — vẫn bị chặn bởi
+      // VISUAL_DEADLINE_MS riêng, không bao giờ kéo dài quá deadline của text (PHẦN 30).
+      const jsonVisualRun = await runVisualsFor({
+        ...visualBase, finalAnswer: finalText, answerComplete: !reconcilePartial, candidates
+      });
+      jsonDonePayload.visuals = jsonVisualRun.visuals;
+      jsonDonePayload.visualStatus = jsonVisualRun.status;
+      // BUG FIX (P0 — Puter phase final §3/§4): JSON non-stream là nơi bug rõ nhất — không có
+      // event SSE nào khác để bù, nếu thiếu field này thì visuals:[] là đường cụt hoàn toàn.
+      jsonDonePayload.visualJob = jsonVisualRun.visualJob || null;
+      if (!tePlan.cacheBypassed && !reconcilePartial && !isAuthDependentVisualRun(jsonVisualRun)) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
+      if (!reconcilePartial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: reconcileStage, provider: reconciler && reconciler.providerKey, model: reconciler && reconciler.modelId, ...outcomeSample(requestUsage, finalText), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
       teTelemetry.record('outputTokens', finalText.length / 3.2);
-      reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot() });
+      reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });
       return res.json(jsonDonePayload);
     }
 
@@ -940,36 +1879,55 @@ router.post('/', async (req, res, next) => {
     // nhưng SAI tinh thần "Suy nghĩ sâu" (ưu tiên capability, không phải tốc độ). deepThinking=true
     // chuyển sang callWithFailover() — vẫn tự động failover khi lỗi, nhưng thử TUẦN TỰ theo rotation
     // công bằng với model ĐẦY ĐỦ (fast:false) thay vì đua nhiều target bằng model nhẹ.
-    const system = systemPack.text; // PHẦN D (TIER 4): bản đã nén boilerplate
+    const system = systemPack.parts; // PHẦN D (TIER 4): bản đã nén boilerplate (A1: dạng PromptParts)
     const directBudget = budgetOf(input.stage === 'approach' ? 'approach' : 'detail');
     const directCaller = callMode.fast ? callFastest : callWithFailover;
     // PHẦN 8 FIX: modelTier THỰC SỰ ảnh hưởng lựa chọn model (trước đây chỉ log — dead optimization).
     const useFastModel = callMode.fast && tokenEconomy.tierUsesFastModel(tePlan.modelTier);
+    // ---------- MỤC 15: KHI NÀO ĐƯỢC ĐUA ----------
+    // `callFastest()` đua 2 target song song = trả tiền 2 lần cho 1 câu trả lời. Với MICRO/SHORT/
+    // STANDARD, độ trễ vốn đã thấp nên phần latency tiết kiệm được không đáng một lệnh gọi thừa.
+    // `raceSize: 1` là hợp đồng "KHÔNG BAO GIỜ đua" mà callFastest() đã tôn trọng sẵn (xem
+    // racingAllowed) — nó vẫn failover bình thường khi target đầu lỗi, chỉ là không bắn song song.
+    const raceOpts = RACE_ELIGIBLE_CLASSES.has(String(currentProblemClass || '').toUpperCase())
+      ? {}
+      : { raceSize: 1 };
     const initialDirect = await directCaller(
       activeProviders,
-      { system, messages, maxTokens: directBudget.coreBudget, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
-      { deadline: globalDeadline, requireVision: !!input.image } // mục 4/6
+      {
+        system, messages, maxTokens: directBudget.coreBudget,
+        reasoningBudget: directBudget.reasoningBudget, telemetryStage: 'direct',
+        recomputeForTarget: makeTargetBudgetRecomputer({
+          answerBudget: directBudget.coreBudget, deepThinking: input.deepThinking,
+          fastModel: useFastModel, complexityLevel: directBudget.complexityLevel,
+          problemClass: currentProblemClass
+        }),
+        fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal
+      },
+      { deadline: globalDeadline, requireVision: hasAnyImage, ...raceOpts } // mục 4/6/15
     );
 
     // FIX PHẦN 3/6 + mục 4 audit continuation: continuation dùng RESERVE (lô nhỏ dần), có thể MỞ
     // RỘNG động khi thực sự cần (xem resolveReserveDecision) thay vì hard-cap 30% cố định.
     const jsonDirectReserveState = { budget: directBudget.reserveBudget, used: 0 };
     const jsonDirectRecovery = makeRecoveryResolver({
+      reqLogger,
       reserveState: jsonDirectReserveState, deadline: globalDeadline,
+      maxGrant: input.stage === 'approach' ? APPROACH_MAX_CONTINUATION_TOKENS : undefined,
       recalcTarget: () => budgetOf(input.stage === 'approach' ? 'approach' : 'detail').target
     });
-    const { text, completeness, continuations, provider, partial: directJsonPartial } = await ensureCompleteNonStream(
-      (msgs, _currentCompleteness, grantedMaxTokens) => directCaller(
+    let { text, completeness, continuations, provider, partial: directJsonPartial } = await ensureCompleteNonStream(
+      (msgs, recoveryCompleteness, grantedMaxTokens) => directCaller(
         activeProviders,
-        { system, messages: msgs, maxTokens: grantedMaxTokens, fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
-        { deadline: globalDeadline, requireVision: !!input.image }
+        { system, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'direct_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass, mode: 'CONTINUATION', completeness: recoveryCompleteness }), recomputeForTarget: makeTargetBudgetRecomputer({ answerBudget: grantedMaxTokens, deepThinking: input.deepThinking, fastModel: useFastModel, complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass }), fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
+        { deadline: globalDeadline, requireVision: hasAnyImage }
       ),
       initialDirect,
       {
         messages, problemText, stage: input.stage, deadline: globalDeadline,
         approachText: input.approachText, contexts: input.contexts, signal,
         requestId: reqLogger.requestId,
-        validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf,
+        validCiteNos: citationIndex.validCiteNos, aliasOf: citationIndex.aliasOf, sourceReadiness, unmatchedRequirementLabels: input.unmatchedRequirementLabels,
         resolveRecovery: jsonDirectRecovery,
         isDisconnected: () => disconnected
       }
@@ -978,13 +1936,26 @@ router.post('/', async (req, res, next) => {
     // mục 4: xem giải thích ở nhánh cross-check JSON phía trên — cùng lý do.
     if (disconnected) return;
 
+    // Mục II: repair NGẮN cho stage 'approach' nếu vi phạm compactness contract (xem streaming ở trên).
+    text = await maybeRepairApproach({
+      stageName: input.stage === 'approach' ? 'approach' : 'detail', text, activeProviders,
+      requestId: reqLogger.requestId, signal, deadline: globalDeadline, reqLogger
+    });
+
     // ensureCompleteNonStream() đã assertFinalResponseComplete() — chắc chắn COMPLETE tới đây.
     const finalJsonPayload = { ...subjectPayload, state: directJsonPartial ? STATES.PARTIAL : STATES.COMPLETED, partial: !!directJsonPartial, text, crossChecked: false, provider: provider.label, completeness: completeness.status, incompleteReasons: directJsonPartial ? (completeness.hardReasons || []) : [], citationValidation: completeness.citationValidation || null, continuations, citationMap: citationIndex.citationMap };
-    if (!tePlan.cacheBypassed && !directJsonPartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
-    if (!directJsonPartial) tokenEconomy.recordOutcome(tePlan.classification.problemClass, input.stage === 'approach' ? 'approach' : 'detail', text.length / 3.2);
+    const directJsonVisualRun = await runVisualsFor({
+      ...visualBase, finalAnswer: text, answerComplete: !directJsonPartial
+    });
+    finalJsonPayload.visuals = directJsonVisualRun.visuals;
+    finalJsonPayload.visualStatus = directJsonVisualRun.status;
+    // BUG FIX (P0 — Puter phase final §3/§4): xem giải thích đầy đủ ở nhánh cross-check JSON phía trên.
+    finalJsonPayload.visualJob = directJsonVisualRun.visualJob || null;
+    if (!tePlan.cacheBypassed && !directJsonPartial && !isAuthDependentVisualRun(directJsonVisualRun)) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
+    if (!directJsonPartial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: input.stage === 'approach' ? 'approach' : 'detail', provider: provider && provider.providerKey, model: provider && provider.modelId, ...outcomeSample(requestUsage, text), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
     teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
     teTelemetry.record('outputTokens', text.length / 3.2);
-    reqLogger.log({ stage: 'token_economy_telemetry', ...teTelemetry.snapshot() });
+    reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });
     res.json(finalJsonPayload);
   } catch (err) {
     // mục 4: lỗi (bao gồm err.cancelled từ abortLink.js khi bị hủy) xảy ra SAU KHI client đã ngắt
@@ -993,6 +1964,33 @@ router.post('/', async (req, res, next) => {
     if (disconnected || (err && err.cancelled)) return;
     next(err);
   }
+});
+
+/* =====================================================================================
+   GET /api/chat/jobs/:requestId — PHẦN 21: kênh HỎI LẠI KẾT QUẢ, tách khỏi SSE.
+   SSE chỉ là kênh theo dõi realtime; khi tab bị đóng/reload, tab mới hỏi đúng requestId nó đã sinh
+   ra để lấy lại lời giải ĐÃ TÍNH XONG thay vì bắt AI giải lại (tốn token lần 2).
+
+   TRUNG THỰC: `durable=false` nghĩa là job chỉ nằm trong RAM của 1 instance — client PHẢI hiển thị
+   đúng như vậy chứ không được coi là bảo đảm. 404 nghĩa là "không tìm thấy", KHÔNG phải "thất bại".
+   ===================================================================================== */
+router.get('/jobs/:requestId', async (req, res) => {
+  const requestId = String(req.params.requestId || '').trim();
+  if (!requestId || requestId.length > 64) {
+    return res.status(400).json({ error: 'requestId không hợp lệ.', code: 'INVALID_INPUT' });
+  }
+  const job = await aiJobStore.getJob(requestId);
+  if (!job) {
+    return res.status(404).json({
+      found: false,
+      durable: aiJobStore.isDurable(),
+      code: 'JOB_NOT_FOUND',
+      error: aiJobStore.isDurable()
+        ? 'Không tìm thấy lượt giải này (có thể đã quá hạn lưu trữ).'
+        : 'Không tìm thấy lượt giải này. Máy chủ chưa bật KV nên kết quả chỉ sống trong phiên đang chạy.'
+    });
+  }
+  return res.json({ found: true, job: aiJobStore.toPublic(job) });
 });
 
 module.exports = router;

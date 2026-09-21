@@ -6,7 +6,7 @@
 const assert = require('assert');
 const { detectSubject, detectSubjects, resolveSubject, buildSubjectDirective, getSubject, ALLOWED_SUBJECT_IDS } = require('../server/utils/subjects');
 const { validateChatBody } = require('../server/utils/validators');
-const { buildChatSystemPrompt, PROMPT_VERSION } = require('../server/utils/promptBuilder');
+const { buildChatSystemPrompt, buildReconcileSystemPrompt, PROMPT_VERSION } = require('../server/utils/promptBuilder');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -169,12 +169,53 @@ test('20. PROMPT_VERSION đã bump khi thêm subject directive (tránh dùng nh�
   // ghi chú tại PROMPT_VERSION trong promptBuilder.js. Ý nghĩa của test này KHÔNG đổi: version phải
   // được bump mỗi khi cấu trúc/nội dung prompt thay đổi đủ để làm output khác đi, nếu không cache
   // L1 cũ bị dùng nhầm.
-  assert.strictEqual(PROMPT_VERSION, 'chat-prompt-v6');
+  // v8 (B12): bump vì A1 đổi bố cục system prompt (khối tĩnh dồn lên đầu để prompt cache hoạt động
+  // thật) + A2/A3 đổi chính sách reasoning cap và visual override -> output có thể khác bản trước.
+  // v9 (mục 1 audit HARD SUBJECT LOCK): manual subject directive đổi nội dung (buildManualLockDirective)
+  // -> bump để không trả nhầm câu trả lời cache từ trước khi có hard lock.
+  assert.strictEqual(PROMPT_VERSION, 'chat-prompt-v9');
 });
 
 // ---------- getSubject fallback ----------
 test('21. getSubject với id không tồn tại -> fallback "general", không throw', () => {
   assert.strictEqual(getSubject('khong-ton-tai').id, 'general');
+});
+
+// ---------- HARD SUBJECT LOCK (yêu cầu vá mới): manual mode phải chèn khối RÀNG BUỘC CỨNG ----------
+test('22. buildSubjectDirective(subjectSource=manual) chèn khối HARD LOCK, cấm đổi môn + buộc từ chối sai môn', () => {
+  const block = buildSubjectDirective('history', null, 'manual');
+  assert.ok(block.includes('HARD LOCK'));
+  assert.ok(block.includes('Lịch sử'));
+  assert.ok(block.includes('KHÔNG ĐƯỢC tự chuyển sang môn khác'));
+  assert.ok(block.includes('TỪ CHỐI'));
+});
+test('23. buildSubjectDirective(subjectSource=manual) BỎ QUA secondarySubjectId dù được truyền vào', () => {
+  const block = buildSubjectDirective('history', 'math', 'manual');
+  assert.ok(!block.includes('LIÊN QUAN CẢ MÔN PHỤ'));
+  assert.ok(!block.includes('Toán học'));
+});
+test('24. buildSubjectDirective(subjectSource=auto) KHÔNG chèn khối HARD LOCK (giữ hành vi mềm cũ)', () => {
+  const block = buildSubjectDirective('history', null, 'auto');
+  assert.ok(!block.includes('HARD LOCK'));
+});
+test('25. buildSubjectDirective không truyền subjectSource (backward-compat) vẫn coi như auto', () => {
+  const block = buildSubjectDirective('history', null);
+  assert.ok(!block.includes('HARD LOCK'));
+});
+test('26. buildSubjectDirective(math, manual) vẫn dùng HARD LOCK, không rơi vào nhánh "Giữ nguyên quy tắc" mềm cũ', () => {
+  const block = buildSubjectDirective('math', null, 'manual');
+  assert.ok(block.includes('HARD LOCK'));
+  assert.ok(block.includes('Toán học'));
+});
+test('27. buildReconcileDynamicPart (qua buildReconcileSystemPrompt) mang theo hard lock khi manual', () => {
+  const system = buildReconcileSystemPrompt({
+    candidates: [{ label: 'A', text: 'Lời giải A' }, { label: 'B', text: 'Lời giải B' }],
+    contexts: [], settings: { lang: 'Tiếng Việt', detail: 'tiêu chuẩn', school: 'thpt', grade: '10' },
+    hasWebSearch: false, deepThinking: false, agreement: true,
+    subjectId: 'history', secondarySubjectId: 'math', subjectSource: 'manual'
+  });
+  assert.ok(system.includes('HARD LOCK'));
+  assert.ok(!system.includes('LIÊN QUAN CẢ MÔN PHỤ'));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

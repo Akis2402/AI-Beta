@@ -82,16 +82,25 @@ function geminiModelsResponse(ids) {
     clearProviderEnv();
     setEnv({ ANTHROPIC_API_KEY: 'sk-ant-real' });
     const { aiProviders } = freshModules();
+    const modelsSeen = [];
     global.fetch = async (url, opts) => {
       if (url.includes('/v1/models')) return anthropicModelsResponse(['claude-sonnet-9', 'claude-haiku-9']);
       const body = JSON.parse(opts.body);
       assert.ok(body.model, 'phải có model cụ thể trong request thật, không undefined');
-      return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'ok' }] }) };
+      modelsSeen.push(body.model);
+      // Nội dung trả về phải là một câu trả lời THẬT: chuỗi xác nhận trống rỗng kiểu "ok"/"done"
+      // bị metaPlanningFilter loại (đúng thiết kế — xem test/visual-and-leak-fixes.test.js mục D),
+      // nên dùng nó làm fixture sẽ đo nhầm bộ lọc chứ không đo model discovery.
+      return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'Đáp số là 5.' }] }) };
     };
     await aiProviders.ensureProvidersReady();
     const targets = aiProviders.getActiveProviders();
     const { text } = await aiProviders.callFastest(targets, { system: 's', messages: [], maxTokens: 50, fast: true });
-    assert.strictEqual(text, 'ok');
+    assert.strictEqual(text, 'Đáp số là 5.');
+    // ROOT CAUSE đã vá ở executionTargets.js: không khai ANTHROPIC_MODEL_FAST thì fastModelOverride
+    // phải rơi về CHÍNH model đã discovery, không được để undefined (client sẽ ném assertModel).
+    assert.ok(modelsSeen.length > 0, 'phải thực sự gọi model');
+    modelsSeen.forEach((m) => assert.ok(['claude-sonnet-9', 'claude-haiku-9'].includes(m), 'model lạ: ' + m));
   });
 
   console.log('\n== E. Discovery lỗi ở 1 provider không làm hỏng provider khác (mục 22.E) ==');

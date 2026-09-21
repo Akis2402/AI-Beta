@@ -60,11 +60,47 @@ function computeRecoveryBudget({ remainingMs = Infinity, reserveRemaining = Infi
   return { allowed: true, reason: 'ok' };
 }
 
+// ============================================================================================
+// MỤC 10 — CONTINUATION PHẢI DEFICIT-AWARE: KHÔNG PHẢI LƯỢT NÀO CŨNG CẦN SUY LUẬN
+// ============================================================================================
+// Trước bản này mọi lượt continuation đều được cấp reasoning = 40% mức ban đầu (phase='recovery').
+// Nhưng một lượt chỉ thiếu ĐÚNG câu "Vậy x = 3" hoặc thiếu một tiêu đề thì không có gì để suy luận
+// cả — 40% của một ngân sách reasoning hàng nghìn token là tiền trả cho việc model nghĩ lại một thứ
+// nó đã nghĩ xong. Ngược lại, thiếu một phép biến đổi/chứng minh thì PHẢI có reasoning, và chỉ cho
+// đúng phần còn thiếu (không "suy luận từ đầu").
+//
+// Đây KHÔNG phải "cắt reasoning để tiết kiệm token" (mục 0 cấm): phân loại dựa trên CHÍNH lý do
+// incomplete do completenessCheck trả về, chứ không dựa trên áp lực chi phí.
+const FORMAT_ONLY_REASONS = new Set([
+  'missing_conclusion',          // thiếu từ khoá kết luận/1 câu kết
+  'invalid_citation',            // đặt sai số trích dẫn — sửa số, không suy luận lại
+  'source_absence_claim_while_incomplete'
+]);
+
+/**
+ * classifyDeficit() — phần còn thiếu thuộc loại nào.
+ * @param {{reasons?:string[], hardReasons?:string[], missingCoverage?:string[]}} completeness
+ * @returns {{kind:'format'|'content', needsReasoning:boolean, reasons:string[]}}
+ */
+function classifyDeficit(completeness) {
+  const reasons = [
+    ...((completeness && completeness.hardReasons) || []),
+    ...((completeness && completeness.reasons) || [])
+  ];
+  const unique = [...new Set(reasons.filter(Boolean))];
+  const missing = (completeness && completeness.missingCoverage) || [];
+  // Còn ý chưa trả lời = còn NỘI DUNG phải nghĩ, bất kể reason nào khác.
+  if (missing.length) return { kind: 'content', needsReasoning: true, reasons: unique };
+  if (!unique.length) return { kind: 'format', needsReasoning: false, reasons: unique };
+  const allFormat = unique.every((r) => FORMAT_ONLY_REASONS.has(r));
+  return { kind: allFormat ? 'format' : 'content', needsReasoning: !allFormat, reasons: unique };
+}
+
 /**
  * @param {{priorText:string, reasons:string[], missingCoverage:string[]}} args
  * @returns {string} Nội dung message user bổ sung, nối tiếp vào cuối mảng `messages` gửi cho provider.
  */
-function buildContinuationPrompt({ priorText, reasons = [], missingCoverage = [], drawingCanonicalErrors = [], citationValidation = null }) {
+function buildContinuationPrompt({ priorText, reasons = [], missingCoverage = [], drawingCanonicalErrors = [], citationValidation = null, fabricatedRequirementLabels = [] }) {
   const missingPart = missingCoverage.length
     ? `Các ý CHƯA được trả lời trong đề bài: ${missingCoverage.join(', ')}.`
     : '';
@@ -92,14 +128,23 @@ function buildContinuationPrompt({ priorText, reasons = [], missingCoverage = []
       '\nHãy in lại NGUYÊN VĂN khối vẽ, khôi phục đúng mọi điểm/phần tử đã có ở Hướng giải (giữ nguyên id/toạ độ/op), chỉ được bổ sung thêm phần tử MỚI nếu thực sự cần — KHÔNG được tự nghĩ ra toạ độ khác.'
     : '';
 
+  // PHẦN F BỔ SUNG — lỗi thật: model đã BỊA nội dung dưới đúng tên 1 bài không có evidence. Đây
+  // KHÔNG phải lỗi hình thức để "viết tiếp" — phần đã viết SAI VỀ SỰ THẬT, phải được THU HỒI công
+  // khai, không được lờ đi rồi viết tiếp như không có chuyện gì. Ghi đè hẳn hướng dẫn "viết tiếp"
+  // mặc định cho đúng những nhãn này.
+  const fabricationPart = fabricatedRequirementLabels.length
+    ? `CẢNH BÁO NGHIÊM TRỌNG: phần bạn vừa viết cho ${fabricatedRequirementLabels.map((l) => `"${l}"`).join(', ')} KHÔNG dựa trên bằng chứng thật từ tài liệu đã tải lên — hệ thống retrieval không tìm thấy đúng nội dung các mục này. Bạn phải viết THÊM ngay bây giờ 1 đoạn CẢI CHÍNH công khai, đặt ngay sau phần vừa rồi, với nguyên văn tinh thần: "Lưu ý: phần lời giải cho ${fabricatedRequirementLabels.join(', ')} ở trên KHÔNG dựa trên đúng đề bài trong tài liệu bạn đã tải lên (hệ thống chưa tìm thấy đúng nội dung các bài này) — vui lòng bỏ qua và cho mình biết chính xác đề bài, hoặc kiểm tra lại nguồn đã tải lên." KHÔNG được viết tiếp lời giải theo hướng cũ, KHÔNG được biện minh nội dung cũ là đúng.`
+    : '';
+
   return [
     'Câu trả lời phía trên của bạn CHƯA HOÀN CHỈNH' + (structuralHint.length ? ` (${structuralHint.join('; ')})` : '') + '.',
     'Phần bạn đã viết được giữ nguyên, KHÔNG được lặp lại nội dung đã hoàn thành, KHÔNG được viết lại từ đầu.',
     missingPart,
     citationPart,
     canonicalPart,
-    'Hãy viết TIẾP NGAY từ chỗ bị dừng (tiếp tục đúng câu/ý đang dở, hoặc bắt đầu ý còn thiếu tiếp theo), giữ nguyên cách đặt tên điểm/ẩn số/ký hiệu và các kết quả trung gian đã có ở phần trên, không tạo ra lời giải mâu thuẫn với phần đã viết. Nếu có khối hình vẽ (shape/solid3d/plot) đang dở, hãy đóng lại đúng cú pháp JSON đã dùng, KHÔNG đổi tên điểm/toạ độ đã có.',
-    'Nếu phần trước đã đủ nội dung và chỉ thiếu kết luận/đáp số, chỉ cần viết thêm phần kết luận/đáp số, không viết lại lời giải.'
+    fabricationPart,
+    fabricationPart ? '' : 'Hãy viết TIẾP NGAY từ chỗ bị dừng (tiếp tục đúng câu/ý đang dở, hoặc bắt đầu ý còn thiếu tiếp theo), giữ nguyên cách đặt tên điểm/ẩn số/ký hiệu và các kết quả trung gian đã có ở phần trên, không tạo ra lời giải mâu thuẫn với phần đã viết. Nếu có khối hình vẽ (shape/solid3d/plot) đang dở, hãy đóng lại đúng cú pháp JSON đã dùng, KHÔNG đổi tên điểm/toạ độ đã có.',
+    fabricationPart ? '' : 'Nếu phần trước đã đủ nội dung và chỉ thiếu kết luận/đáp số, chỉ cần viết thêm phần kết luận/đáp số, không viết lại lời giải.'
   ].filter(Boolean).join('\n');
 }
 
@@ -268,8 +313,26 @@ function compactPriorText(priorText, opts = {}) {
  */
 function buildResumePrompt({
   priorTail = '', reasons = [], missingCoverage = [], interrupted = false,
-  citationValidation = null, drawingCanonicalErrors = []
+  citationValidation = null, drawingCanonicalErrors = [],
+  // MỤC 3.3: phần trả lời đã có ĐÃ chứa section kết luận hay chưa. Khi CÓ, lượt viết tiếp phải biết
+  // rằng kết luận đó chỉ là TẠM THỜI — nếu không, model sẽ viết Bước còn thiếu rồi kết luận LẦN HAI.
+  hasConclusion = false,
+  // PHẦN F BỔ SUNG: nhãn model đã BỊA nội dung dưới tên bài không có evidence thật.
+  fabricatedRequirementLabels = []
 } = {}) {
+  // Lỗi bịa nội dung KHÔNG phải lỗi "viết chưa xong" — phần đã viết SAI VỀ SỰ THẬT, "viết tiếp" chỉ
+  // khiến model tiếp tục củng cố nội dung sai đó. Nhánh này THAY HẲN toàn bộ hướng dẫn "resume" mặc
+  // định bằng yêu cầu THU HỒI công khai.
+  if (fabricatedRequirementLabels.length) {
+    const labelsStr = fabricatedRequirementLabels.join(', ');
+    return [
+      `CẢNH BÁO NGHIÊM TRỌNG: nội dung bạn vừa viết cho ${labelsStr} KHÔNG dựa trên bằng chứng thật từ tài liệu đã tải lên — hệ thống retrieval không tìm thấy đúng nội dung các mục này trong nguồn.`,
+      'KHÔNG được viết tiếp theo hướng cũ. KHÔNG được biện minh nội dung cũ là đúng.',
+      `Viết THÊM ngay bây giờ 1 đoạn CẢI CHÍNH công khai, đặt ngay sau phần vừa rồi, với tinh thần: "Lưu ý: phần lời giải cho ${labelsStr} ở trên KHÔNG dựa trên đúng đề bài trong tài liệu bạn đã tải lên (hệ thống chưa tìm thấy đúng nội dung các bài này) — vui lòng bỏ qua và cho mình biết chính xác đề bài, hoặc kiểm tra lại nguồn đã tải lên."`,
+      'Chỉ viết đúng đoạn cải chính này, không viết lại lời giải, không thêm nội dung nào khác.'
+    ].join('\n');
+  }
+
   const lastChars = String(priorTail).slice(-160).replace(/\s+/g, ' ').trim();
 
   // ĐO THẬT rồi mới chốt độ dài (scripts/measure-tokens.js): bản nháp đầu tiên của prompt này dài
@@ -286,7 +349,12 @@ function buildResumePrompt({
     'GIỮ NGUYÊN ký hiệu/ẩn số/tên điểm, mọi kết quả trung gian và số liệu đã có; không tính lại theo cách khác.',
     'GIỮ NGUYÊN cách đánh số đang dùng và tiếp tục đúng số kế tiếp.',
     'Đóng đúng cú pháp mọi khối LaTeX/code/hình vẽ còn mở, không đổi toạ độ/tên điểm đã có.',
-    'Chỉ kết thúc khi đã trình bày đủ mọi yêu cầu của đề. Không thêm nội dung ngoài yêu cầu, không ghi chú về việc bị ngắt.'
+    'Chỉ kết thúc khi đã trình bày đủ mọi yêu cầu của đề. Không thêm nội dung ngoài yêu cầu, không ghi chú về việc bị ngắt.',
+    // Prompt là lớp phòng vệ THỨ NHẤT (giảm tần suất), answerOrdering.js là lớp THỨ HAI (bảo đảm
+    // kết quả). Không dựa vào riêng prompt — model vẫn có thể làm sai, và khi đó code phải tự sửa.
+    hasConclusion
+      ? 'Phần trả lời trên ĐÃ có mục kết luận nhưng đó chỉ là kết luận TẠM THỜI: hãy trình bày nốt các bước/mục còn thiếu, KHÔNG viết thêm một mục kết luận thứ hai.'
+      : ''
   ];
 
   if (missingCoverage.length) {
@@ -313,6 +381,14 @@ function buildResumePrompt({
  * @returns {{messages:Array, priorTokensBefore:number, priorTokensAfter:number, ratio:number,
  *   compacted:boolean}}
  */
+/** Phần trả lời đã có chứa một mục kết luận/đáp số hay chưa (dùng answerOrdering — một nguồn duy nhất). */
+function hasConclusionSection(text) {
+  try {
+    const { splitIntoBlocks } = require('./answerOrdering');
+    return splitIntoBlocks(text).some((b) => b.role === 'conclusion');
+  } catch (e) { return false; }
+}
+
 function buildMinimalContinuationContext({
   messages, priorText, completeness = {}, interrupted = false, tailChars, compact = true
 }) {
@@ -327,7 +403,10 @@ function buildMinimalContinuationContext({
     missingCoverage: completeness.missingCoverage || [],
     interrupted,
     citationValidation: completeness.citationValidation || null,
-    drawingCanonicalErrors: completeness.drawingCanonicalErrors || []
+    drawingCanonicalErrors: completeness.drawingCanonicalErrors || [],
+    fabricatedRequirementLabels: completeness.fabricatedRequirementLabels || [],
+    // Đọc TRỰC TIẾP từ nội dung đã có thay vì tin vào cờ của caller — chỉ có một nguồn sự thật.
+    hasConclusion: hasConclusionSection(raw)
   });
 
   const before = Math.ceil(raw.length / 3.2);
@@ -421,7 +500,8 @@ function joinContinuation(prior, next) {
 
 module.exports = {
   MAX_CONTINUATIONS, computeRecoveryBudget, buildContinuationPrompt, appendContinuationTurn,
-  buildMinimalContinuationContext, buildResumePrompt, compactPriorText, findSafeCutIndex,
+  classifyDeficit, FORMAT_ONLY_REASONS,
+  buildMinimalContinuationContext, buildResumePrompt, compactPriorText, findSafeCutIndex, hasConclusionSection,
   createSeamDedupe, joinContinuation, isStructuralOrDataLine,
   CONTINUATION_TAIL_CHARS
 };

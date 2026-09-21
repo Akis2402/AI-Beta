@@ -67,11 +67,25 @@ function buildCitationIndex(contexts) {
   const aliasOf = {};
   let duplicatesMerged = 0;
 
+  // PHẦN F — RÀO CHẮN PROVENANCE TRƯỚC KHI GỘP.
+  // jaccardSimilarity() làm việc trên TỪ đã chuẩn hoá (bỏ dấu, bỏ số ngắn), nên hai trang KHÁC NHAU
+  // của cùng một cuốn sách rất dễ đạt điểm giống nhau cao một cách giả tạo: chúng dùng chung bộ từ
+  // "trang/bài/chương/số...". Gộp nhầm như vậy làm citation trỏ sai trang — đúng thứ PHẦN F cấm.
+  // Vì vậy chỉ cho phép gộp khi hai đoạn CÙNG nguồn VÀ cùng trang (hoặc cả hai đều không có trang).
+  const samePlace = (a, b) => {
+    const sa = a.sourceId != null ? String(a.sourceId) : '';
+    const sb = b.sourceId != null ? String(b.sourceId) : '';
+    if (sa !== sb) return false;
+    const pa = a.page != null ? Number(a.page) : null;
+    const pb = b.page != null ? Number(b.page) : null;
+    return pa === pb;
+  };
+
   for (const item of withNo) {
     const fp = fingerprint(item.text);
-    let dupIdx = kept.findIndex((k) => k._fp === fp);
+    let dupIdx = kept.findIndex((k) => k._fp === fp && samePlace(k, item));
     if (dupIdx === -1) {
-      dupIdx = kept.findIndex((k) => jaccardSimilarity(k.text, item.text) >= NEAR_DUP_THRESHOLD);
+      dupIdx = kept.findIndex((k) => samePlace(k, item) && jaccardSimilarity(k.text, item.text) >= NEAR_DUP_THRESHOLD);
     }
 
     if (dupIdx === -1) {
@@ -110,7 +124,20 @@ function buildCitationIndex(contexts) {
       citeNo: c.citeNo,
       originalIndexes: c.originalIndexes || [],
       doc: c.doc || '',
-      id: c.id != null ? c.id : 1
+      id: c.id != null ? c.id : 1,
+      // mục A9: truyền page/startPage/endPage để frontend hiển thị đúng "trang X" trong khối trích
+      // dẫn khi mở lại hội thoại cũ (renderCitations() đọc từ citationMap đã lưu, không suy luận lại).
+      page: c.page != null ? c.page : null,
+      startPage: c.startPage != null ? c.startPage : null,
+      endPage: c.endPage != null ? c.endPage : null,
+      // PHẦN F: provenance ĐẦY ĐỦ đi kèm từng citeNo. Frontend KHÔNG được suy `contexts[n-1]` nữa —
+      // nó đọc thẳng các trường này, nên [5] luôn resolve về đúng evidence/trang server đã gửi.
+      sourceId: c.sourceId != null ? c.sourceId : null,
+      chunkIndex: c.chunkIndex != null ? c.chunkIndex : null,
+      totalChunks: c.totalChunks != null ? c.totalChunks : null,
+      evidenceId: c.evidenceId != null ? c.evidenceId : null,
+      extractionMethod: c.extractionMethod || 'unknown',
+      extractionStatus: c.extractionStatus || 'ok'
     })),
     validCiteNos: effectiveContexts.map((c) => c.citeNo),
     aliasOf,

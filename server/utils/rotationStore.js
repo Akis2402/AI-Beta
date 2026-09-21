@@ -146,7 +146,43 @@ function scheduleWrite() {
 //   request thứ k trên toàn hệ thống  ->  slot k  ->  target thứ (k mod n) trong danh sách eligible.
 // Khi store tắt/lỗi: trả null và rotation quay về LRU in-memory như cũ (không bao giờ chặn request).
 
+// ============================================================================================
+// PHẦN K — PHÂN LOẠI TRẠNG THÁI (bắt buộc, theo nguyên tắc #14)
+// ============================================================================================
+//   ADVISORY (best-effort, eventual):  selectionState / keyHealth / modelHealth / targetHealth.
+//     Mất mát = fairness lệch tạm thời và cooldown lan chậm hơn. KHÔNG sai kết quả, KHÔNG mất dữ
+//     liệu người dùng, KHÔNG tính tiền hai lần. Vì vậy write-behind + `unref()` là ĐÚNG ở đây: nếu
+//     instance bị đóng băng trước khi flush, cái mất đi chỉ là một bản cập nhật gợi ý.
+//   LOAD-BEARING (phải nguyên tử, không được mất): số thứ tự xoay toàn cục.
+//     Được cấp bằng INCR NGUYÊN TỬ ở đầu request và ĐƯỢC AWAIT (reserveRotationSlot bên dưới) —
+//     KHÔNG đi qua write-behind, KHÔNG phụ thuộc `unref()`.
+// Nói cách khác: không có dữ liệu load-bearing nào nằm trong đường write-behind. `flush()` bên dưới
+// dành cho môi trường chạy dài (local/VPS/test) muốn ép ghi ngay thay vì chờ debounce.
+
 const SLOT_KEY = `${STORE_KEY}:slot`;
+
+/**
+ * flush() — ép ghi NGAY bản snapshot đang chờ (huỷ debounce). Dùng ở test và ở môi trường 1 tiến
+ * trình; KHÔNG dùng trong đường request nóng của serverless (thêm 1 lượt đi mạng cho dữ liệu chỉ ở
+ * mức advisory là đánh đổi sai).
+ * @returns {Promise<boolean>} đã ghi được hay chưa.
+ */
+async function flush() {
+  if (!isEnabled() || !snapshotProvider) return false;
+  if (pendingWriteTimer) { clearTimeout(pendingWriteTimer); pendingWriteTimer = null; }
+  try {
+    const snap = snapshotProvider();
+    extraSnapshotProviders.forEach((e) => {
+      try { snap[e.name] = e.getSnapshot(); } catch (_) { /* module phụ lỗi không làm hỏng snapshot chính */ }
+    });
+    await restFetch(['set', STORE_KEY, ...(STORE_TTL_SEC ? ['EX', String(STORE_TTL_SEC)] : [])], JSON.stringify(snap));
+    stats.writes += 1;
+    return true;
+  } catch (e) {
+    stats.errors += 1; stats.lastError = e && e.message;
+    return false;
+  }
+}
 
 /**
  * reserveRotationSlot() — lấy 1 số thứ tự xoay DUY NHẤT toàn cục cho request hiện tại.
@@ -191,6 +227,11 @@ function _resetForTest() {
 }
 
 module.exports = {
-  isEnabled, register, registerExtra, hydrate, scheduleWrite, reserveRotationSlot,
-  getStoreStats, _resetForTest
+  isEnabled, register, registerExtra, hydrate, scheduleWrite, reserveRotationSlot, flush,
+  getStoreStats, _resetForTest,
+  /** Phân loại trạng thái — public để test kiểm chứng tài liệu khớp hành vi (PHẦN K). */
+  STATE_CLASSIFICATION: {
+    advisory: ['selectionState', 'keyHealth', 'modelHealth', 'targetHealth', 'calibration'],
+    loadBearing: ['rotationSlot']
+  }
 };

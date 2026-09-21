@@ -10,6 +10,14 @@ const HTTP_STATUS_CODE_MAP = {
   403: 'AUTH_CONFIG',
   404: 'MODEL_NOT_FOUND',
   408: 'TIMEOUT',
+  // FIX ROOT CAUSE (lỗi "Đã có lỗi xảy ra. Vui lòng thử lại." khi hỏi trích nguồn từ PDF scan dài
+  // còn dở vision-extraction): body-parser trả lỗi 413 khi ảnh
+  // gửi kèm (collectSourceImages() phía client) + contexts vượt trần — lỗi này xảy ra Ở TẦNG
+  // BODY-PARSER, TRƯỚC KHI vào tới route /api/chat, nên KHÔNG map status này trước đây khiến nó
+  // rơi vào nhánh mặc định 'UNKNOWN_ERROR' -> 'error.generic' ("Đã có lỗi xảy ra. Vui lòng thử
+  // lại.") — hoàn toàn không nói được NGUYÊN NHÂN THẬT cho người dùng tự khắc phục (giảm số nguồn/
+  // đợi AI đọc xong). Nay map riêng để client hiển thị đúng lý do (xem i18n.js/translations.js).
+  413: 'PAYLOAD_TOO_LARGE',
   429: 'RATE_LIMIT',
   499: 'CANCELLED', // quy ước Nginx cho "client closed request" — dùng cho abortLink.js (mục 4)
   500: 'SERVER_ERROR',
@@ -28,6 +36,7 @@ const GENERIC_MESSAGE_BY_CODE = {
   MODEL_NOT_FOUND: 'Không tìm thấy model phù hợp.',
   TIMEOUT: 'Yêu cầu vượt quá thời gian chờ.',
   RATE_LIMIT: 'Bạn đã gửi quá nhiều yêu cầu. Vui lòng thử lại sau ít phút.',
+  PAYLOAD_TOO_LARGE: 'Yêu cầu quá nặng (thường do gửi kèm nhiều ảnh trang nguồn scan chưa được AI đọc xong). Hãy đợi thanh tiến trình đọc AI của nguồn hoàn tất rồi hỏi lại, hoặc hỏi theo phạm vi hẹp hơn.',
   CANCELLED: 'Yêu cầu đã bị hủy.',
   SERVER_ERROR: 'Đã có lỗi xảy ra ở máy chủ.',
   PROVIDER_ERROR: 'Nhà cung cấp AI gặp lỗi khi trả lời. Vui lòng thử lại.',

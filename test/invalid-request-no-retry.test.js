@@ -103,14 +103,18 @@ function makeTransientThenOkTarget(id, providerKey, callCounter, { failFirst = t
       makeInvalidRequestTarget('t3', 'openai', callCounter),
       makeInvalidRequestTarget('t4', 'other', callCounter)
     ];
-    const { candidates } = await aiProviders.gatherCrossCheckCandidates(targets, {
+    const { candidates, accounting } = await aiProviders.gatherCrossCheckCandidates(targets, {
       system: 's', variantSystem: 's2', messages: [], maxTokens: 100, requestId: 'r1'
     });
     assert.strictEqual(candidates.length, 0);
-    // Chỉ round 1 (tối đa CROSS_CHECK_MAX_CANDIDATES=3 target mặc định) được gọi, KHÔNG có retry
-    // round (vì mọi lỗi đều invalid_request) và KHÔNG có survivor round.
-    assert.strictEqual(callCounter.count, aiProviders.CROSS_CHECK_MAX_CANDIDATES,
-      `chỉ round 1 được gọi (đúng ${aiProviders.CROSS_CHECK_MAX_CANDIDATES} lệnh), không retry thêm, thấy ${callCounter.count}`);
+    // FIX (audit): round 1 KHÔNG còn hard-cap ở CROSS_CHECK_MAX_CANDIDATES=3 — với 4 target eligible
+    // và không có cooldown/safety-cap nào chạm tới, round 1 phải mời ĐỦ CẢ 4 (adaptive, đúng pool
+    // thật), KHÔNG dừng lại ở 3. Vẫn KHÔNG có retry round (mọi lỗi đều invalid_request) và KHÔNG có
+    // survivor round.
+    assert.strictEqual(callCounter.count, targets.length,
+      `round 1 phải mời ĐỦ cả ${targets.length} target eligible (không hard-cap ở 3), không retry thêm, thấy ${callCounter.count}`);
+    assert.strictEqual(accounting.selectedTargets, targets.length);
+    assert.strictEqual(accounting.replacementTargets, 0, 'invalid_request không được retry');
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

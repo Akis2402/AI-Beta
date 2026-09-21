@@ -34,7 +34,7 @@ tro-giai-ai/
 │       ├── formulas.js     ← dữ liệu tĩnh: danh mục công thức cốt lõi theo môn/khối lớp
 │       ├── solid3d.js      ← vẽ hình học không gian 3D xoay được (three.js)
 │       └── app.js          ← toàn bộ logic giao diện, gọi backend qua fetch
-├── vercel.json             ← cấu hình deploy cho Vercel (routing + thời gian chạy function)
+├── vercel.json             ← cấu hình Next.js trên Vercel + thời gian chạy function
 ├── package.json
 ├── .env.example
 └── .gitignore
@@ -139,7 +139,7 @@ Vercel là nền tảng **serverless** — nó không chạy `app.listen()` như
 
 1. **Đẩy code lên GitHub** (hoặc GitLab/Bitbucket).
 2. Vào [vercel.com](https://vercel.com) → **Add New → Project** → chọn repo này.
-3. Vercel sẽ tự nhận diện (không cần chọn Framework Preset, để **"Other"** là được — không cần Build Command).
+3. Vercel phải dùng **Framework Preset: Next.js**. Giữ **Build Command** là `npm run build` và để trống **Output Directory** để Vercel dùng mặc định `.next`. Không đặt Output Directory thành `public`, vì `public` chỉ chứa tài nguyên tĩnh và không có `routes-manifest.json`.
 4. **Environment Variables** trong phần cài đặt project (Settings → Environment Variables), điền y hệt các biến trong `.env.example`:
    - `ANTHROPIC_API_KEY` — **bắt buộc**, khóa API thật của bạn.
    - `ALLOWED_ORIGINS` — thường **để trống là được**: server tự động cho phép origin cùng domain với chính nó (trường hợp mặc định — frontend & backend chung 1 domain Vercel). Chỉ điền vào đây nếu bạn có domain KHÁC cần gọi API (custom domain riêng, app di động...).
@@ -301,3 +301,12 @@ Mỗi khi gửi câu hỏi, khung nổi **"📚 Đề xuất ôn tập"** tự b
 - **Thêm/bớt trang ưu tiên**: sửa mảng `PRIORITY_SITES` trong `server/routes/recommend.js` (dùng chung cho cả lời nhắc tìm kiếm lẫn link dự phòng).
 - **Giới hạn tần suất**: biến `RATE_LIMIT_RECOMMEND` trong `.env` (mặc định 40 lượt/15 phút/IP, tách riêng khỏi `RATE_LIMIT_CHAT`).
 - **Tắt hẳn tính năng này**: xóa/không mount `app.use('/api/recommend', ...)` trong `server/app.js`, và bỏ lời gọi `scheduleRecommend(query)` trong `sendMessage()` (`public/js/app.js`) — phần UI (`#recommendPanel`) sẽ không bao giờ được kích hoạt nếu không có gì gọi nó.
+
+## 11. Hybrid Visual Engine (SVG tất định) + Auth Puter.js chỉ trong Settings
+
+Chi tiết đầy đủ, bảng kiểm chứng và giới hạn: xem **`HYBRID-VISUAL-PUTER-AUTH-RESULT.md`**.
+
+- **Chọn renderer**: `server/utils/visual/visualDeterminationEngine.js` là điểm quyết định duy nhất — *đề bài → (cần hình?) → SVG tất định dựng được chính xác? → SVG | ảnh AI (Puter) | không hình*. Toán/Lý/Hoá dựng được chính xác thì đi **SVG do code dựng** (`server/utils/visual/deterministic/`), 0 token, 0 lệnh gọi ảnh, **không cần Auth Puter**. Dữ kiện mâu thuẫn → không vẽ, hiện thẻ thông báo (không bịa).
+- **Auth Puter chỉ khi người dùng bấm nút trong Settings** (`public/js/ui/puterAuthUI.js` + `public/js/providers/puterAdapter.js`): không bao giờ tự popup lúc tải trang / SSE / retry / fallback provider. Lần đầu chưa Auth chỉ hiện *thông báo* (không phải popup Auth); "Không hiển thị lại hôm nay" tính theo **ngày lịch** của trình duyệt.
+- **Biến môi trường**: `PUTER_VISUAL_MODE` (mặc định `client_primary`), `PUTER_VISUAL_DEBUG=true` (log chẩn đoán phía server, không log token/đề bài). Phía client: `?puterDebug=1` hoặc `localStorage['tro-giai:puter-debug']='1'`.
+- **Test**: `npm test` (gồm `hybrid-svg-engine`, `puter-auth-flow`, `chat-route-harness`); E2E trình duyệt thật: `npm run e2e-hybrid` (cần `pip install playwright` + Chromium; SDK Puter được giả lập).

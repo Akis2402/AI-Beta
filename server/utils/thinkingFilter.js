@@ -38,6 +38,9 @@
 // ============================================================================================
 
 const { stripLeakedSafetyLabels } = require('./safetyLeakFilter');
+// LỚP 3 (xem metaPlanningFilter.js): nháp lập kế hoạch dạng văn xuôi, KHÔNG có thẻ bao quanh —
+// thường xuất hiện ở lượt tiếp nối, khi model nhại lại chỉ dẫn "viết tiếp, đừng lặp lại".
+const { stripMetaPlanning } = require('./metaPlanningFilter');
 
 const OPEN_TAGS = ['<thinking>', '<think>'];
 const CLOSE_TAGS = { '<thinking>': '</thinking>', '<think>': '</think>' };
@@ -50,7 +53,7 @@ function stripThinkingTags(text) {
   const withoutThinking = String(text || '')
     .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
     .replace(/<think>[\s\S]*?<\/think>/gi, '');
-  return stripLeakedSafetyLabels(withoutThinking);
+  return stripMetaPlanning(stripLeakedSafetyLabels(withoutThinking));
 }
 
 /**

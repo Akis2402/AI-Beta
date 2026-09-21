@@ -13,6 +13,7 @@
 <script src="/js/boot.js"></script>
 <!-- Vercel Web Analytics: tracks page views and user interactions -->
 <script src="/js/analytics.js"></script>
+<script src="/js/boot.29aa9029e5.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="alternate icon" href="/favicon.svg">
 <link rel="apple-touch-icon" href="/favicon.svg">
@@ -34,7 +35,7 @@
      'self' — không cần SRI (không còn nguy cơ MITM ở CDN thứ 3), không còn timeout/DNS/content-
      blocker/Safari-cache-bug nào có thể chặn được nữa. Version pin y hệt trước (KaTeX 0.16.9). -->
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/css/styles.css">
+<link rel="stylesheet" href="/css/styles.4db96a4990.css">
 </head>
 <body>
 <div id="app">
@@ -49,6 +50,7 @@
     <button id="newChatBtn" data-i18n="chat.newChat">＋ Buổi học mới</button>
 
     <div id="sidebarTabs">
+      <span class="tab-indicator" id="sbTabIndicator" aria-hidden="true"></span>
       <button class="sbtab active" data-tab="sources" data-i18n-title="tab.sourcesTitle" title="Nguồn tài liệu"><span class="sbtab-ic" id="icSources"></span><span data-i18n="tab.sources">Nguồn</span></button>
       <button class="sbtab" data-tab="history" data-i18n-title="tab.historyTitle" title="Lịch sử học"><span class="sbtab-ic" id="icHistory"></span><span data-i18n="tab.history">Lịch sử</span></button>
       <button class="sbtab" data-tab="notes" data-i18n-title="tab.notesTitle" title="Ghi chú"><span class="sbtab-ic" id="icNotes"></span><span data-i18n="tab.notes">Ghi chú</span></button>
@@ -113,6 +115,14 @@
       </div>
       <div class="right">
         <span class="status" id="statusText" data-i18n="chat.statusReady">SẴN SÀNG</span>
+        <!-- PHẦN BG: nút mở bảng theo dõi tác vụ AI chạy nền. Ẩn khi không có task nào (JS tự bật/tắt).
+             Badge = số task đang chạy + số kết quả chưa xem. Nhãn chữ luôn có (không chỉ dựa vào màu). -->
+        <button id="bgTaskBtn" class="iconbtn bgtask-btn" type="button" aria-expanded="false" aria-controls="bgTaskPanel"
+                data-i18n-title="background.title" data-i18n-aria-label="background.title" title="Tác vụ AI đang chạy" style="display:none">
+          <span class="bgtask-ic" aria-hidden="true">🤖</span>
+          <span class="bgtask-badge" id="bgTaskBadge" aria-hidden="true"></span>
+          <span class="bgtask-sr sr-only"></span>
+        </button>
         <button id="flashcardTopBtn" class="iconbtn" data-i18n-title="topbar.flashcard" data-i18n-aria-label="topbar.flashcard" title="Mở Flashcard ôn tập" aria-label="Mở Flashcard ôn tập"></button>
         <button id="recommendTopBtn" class="iconbtn" data-i18n-title="topbar.recommend" data-i18n-aria-label="topbar.recommend" title="Mở Đề xuất ôn tập" aria-label="Mở Đề xuất ôn tập"></button>
         <button id="themeBtn" class="iconbtn" data-i18n-title="topbar.theme" data-i18n-aria-label="topbar.theme" title="Đổi giao diện sáng/tối" aria-label="Đổi giao diện sáng/tối"></button>
@@ -128,8 +138,9 @@
         <div id="chatBar">
           <textarea id="qInput" rows="1" data-i18n-placeholder="input.placeholder" placeholder="Nhập câu hỏi, dán đề bài, dán ảnh (Ctrl+V), kéo-thả ảnh hoặc tải ảnh từ máy…"></textarea>
           <div id="chatBarTools">
-            <input type="file" id="imageInput" accept="image/*" style="display:none;">
+            <input type="file" id="imageInput" accept="image/*" multiple style="display:none;">
             <button id="attachBtn" type="button" class="tool-btn icon-only" data-i18n-title="upload.imageBtnTitle" data-i18n-aria-label="upload.imageBtn" title="Tải ảnh đề bài từ máy (hoặc kéo-thả / dán ảnh bằng Ctrl+V)" aria-label="Tải ảnh đề bài"></button>
+            <button id="micBtn" type="button" class="tool-btn icon-only" data-i18n-title="voice.micTitle" data-i18n-aria-label="voice.micAria" title="Nhập câu hỏi bằng giọng nói" aria-label="Nhập câu hỏi bằng giọng nói" aria-pressed="false"></button>
             <div id="subjectBtnWrap">
               <button id="subjectBtn" type="button" class="tool-btn" data-i18n-aria-label="composer.subjectAria" aria-label="Chọn môn học" aria-haspopup="true">✨ Tự động</button>
               <div id="subjectPopover"></div>
@@ -153,6 +164,7 @@
             <button id="stopBtn" type="button" style="display:none;" data-i18n="chat.stop">Dừng</button>
           </div>
         </div>
+        <div id="voiceStatus" role="status" aria-live="polite"><span class="voice-dot"></span><span id="voiceStatusText"></span><span id="voiceInterim" class="voice-interim"></span></div>
         <div id="hint" data-i18n="composer.hint">Enter để gửi · Shift+Enter xuống dòng · AI sẽ đưa hướng giải trước, bấm "Xem lời giải chi tiết" khi cần</div>
       </div>
     </div>
@@ -177,6 +189,14 @@
         </div>
       </div>
       <div class="set-row">
+        <label data-i18n="settings.visual">Hình minh họa</label>
+        <div class="chipset" id="visualChips">
+          <button class="chip active" data-val="auto" data-i18n="settings.visualAuto">Tự động</button>
+          <button class="chip" data-val="always" data-i18n="settings.visualAlways">Khi hữu ích</button>
+          <button class="chip" data-val="never" data-i18n="settings.visualNever">Không bao giờ</button>
+        </div>
+      </div>
+      <div class="set-row">
         <label data-i18n="settings.language">Ngôn ngữ trả lời</label>
         <div class="chipset" id="langChips">
           <button class="chip active" data-val="Tiếng Việt">Tiếng Việt</button>
@@ -191,6 +211,24 @@
           <button class="chip" id="setDarkBtn"><span class="chip-ic" id="icMoon"></span><span data-i18n="settings.themeDark">Tối</span></button>
         </div>
       </div>
+    </div>
+
+    <div class="set-section" id="puterAuthSection" data-status="unknown">
+      <h3 data-i18n="puter.settings.title">Tạo hình ảnh AI (Puter.js)</h3>
+      <p class="set-desc" data-i18n="puter.settings.desc">Hình ảnh AI cần Auth Puter.js — bạn chủ động bấm nút bên dưới, ứng dụng không tự mở cửa sổ đăng nhập. Sơ đồ Toán/Lý/Hóa dựng bằng SVG chính xác và mọi tính năng khác luôn dùng được kể cả khi chưa Auth.</p>
+      <div class="set-row">
+        <label data-i18n="puter.status.label">Trạng thái Puter.js</label>
+        <div class="puter-auth-status-wrap">
+          <span id="puterAuthStatus" class="puter-status" role="status" aria-live="polite" data-status="unknown">◌ Chưa kiểm tra</span>
+          <span id="puterAuthUser" class="puter-user" hidden></span>
+        </div>
+      </div>
+      <div class="puter-auth-actions">
+        <button type="button" class="chip puter-auth-btn" id="puterAuthBtn">Auth Puter.js</button>
+        <button type="button" class="chip" id="puterSignOutBtn" hidden data-i18n="puter.btn.signout">Đăng xuất Puter</button>
+        <button type="button" class="chip" id="puterRecheckBtn" hidden data-i18n="puter.btn.recheck">Kiểm tra lại</button>
+      </div>
+      <p class="puter-auth-help" id="puterAuthHelp" role="status" aria-live="polite" hidden></p>
     </div>
 
     <div class="set-section">
@@ -220,6 +258,43 @@
     <div class="set-section">
       <h3 data-i18n="settings.data">Dữ liệu</h3>
       <button class="danger-btn" id="clearHistoryBtn" data-i18n="settings.clearHistory">Xóa cuộc trò chuyện hiện tại</button>
+    </div>
+  </div>
+</div>
+
+<!-- PHẦN B: panel "Thêm nguồn" (upload + Nguồn gần đây, tối đa 3) — thay cho việc bấm nút cũ mở
+     thẳng file picker hệ điều hành. Dùng chung motion/CSS pattern với settings/note/practice
+     overlay (mục B9: responsive — modal giữa màn hình ở desktop, bottom-sheet full-width ở mobile;
+     mục B10: role=dialog/aria-modal, Esc + click backdrop để đóng, focus quay lại nút mở khi đóng). -->
+<div id="addSourceOverlay" role="dialog" aria-modal="true" aria-labelledby="addSourceTitle">
+  <div id="addSourceModal">
+    <div class="set-head">
+      <h2 id="addSourceTitle"><span class="modal-ic" id="icAddSourceModal"></span><span data-i18n="sources.add">＋ Thêm nguồn</span></h2>
+      <button class="set-close" id="addSourceCloseBtn" data-i18n-aria-label="a11y.closeDialog" aria-label="Đóng">✕</button>
+    </div>
+    <div class="set-section">
+      <div id="addSourceDropZone" tabindex="0" role="button"
+        data-i18n-aria-label="sources.dropTitle" aria-label="Thả tài liệu vào đây hoặc bấm để chọn file">
+        <span class="drop-ic" id="icAddSourceDrop"></span><br>
+        <b data-i18n="sources.dropTitle">Thả tài liệu vào đây</b><br>
+        <span class="drop-sub" data-i18n="sources.dropSub">PDF, DOCX hoặc TXT — hoặc bấm "Thêm nguồn"</span>
+      </div>
+    </div>
+    <!-- PHẦN AK/AO: thêm nguồn Web/YouTube qua URL — gọi thẳng /api/source/web|/youtube (SSRF-safe ở
+         server), KHÔNG qua state machine file (xem app.js: addUrlSource()). -->
+    <div class="set-section" id="urlSourceSection">
+      <h3>Thêm nguồn từ URL</h3>
+      <div class="url-source-row">
+        <input type="url" id="urlSourceInput" placeholder="Dán URL bài viết hoặc video YouTube..." autocomplete="off">
+        <button id="urlSourceAddBtn" type="button">Thêm</button>
+      </div>
+      <p class="set-empty" id="urlSourceStatus" style="display:none"></p>
+      <ul id="urlSourcesList" aria-label="Nguồn URL đã thêm"></ul>
+    </div>
+    <div class="set-section" id="recentSourcesSection">
+      <h3 data-i18n="recentSources.title">Nguồn gần đây</h3>
+      <ul id="recentSourcesList" aria-label="Nguồn gần đây"></ul>
+      <p class="set-empty" id="recentSourcesEmpty" data-i18n="recentSources.empty">Chưa có nguồn nào được dùng trước đây.</p>
     </div>
   </div>
 </div>
@@ -303,6 +378,26 @@
   </div>
 </aside>
 
+<!-- PHẦN BG — Bảng theo dõi tác vụ AI chạy nền (popup nổi, desktop bên phải; mobile = bottom sheet).
+     ĐÓNG BẢNG NÀY KHÔNG DỪNG TÁC VỤ NÀO (xem backgroundTaskUI.js, mục 25 của yêu cầu). -->
+<aside id="bgTaskPanel" role="dialog" aria-modal="false" aria-hidden="true" data-i18n-aria-label="background.title" aria-label="Tác vụ AI đang chạy">
+  <div class="rec-head">
+    <span class="rec-head-title"><span aria-hidden="true">🤖</span> <span data-i18n="background.title">Tác vụ AI đang chạy</span></span>
+    <button id="bgTaskCloseBtn" class="rec-close" type="button" data-i18n-title="background.close" data-i18n-aria-label="background.close" title="Đóng">✕</button>
+  </div>
+  <div class="bgtask-note" data-i18n="background.keepsRunning">Đóng bảng này hoặc chuyển tab sẽ KHÔNG dừng tác vụ.</div>
+  <ul id="bgTaskList" class="bgtask-list"></ul>
+  <div id="bgTaskEmpty" class="rec-empty" data-i18n="background.empty">Chưa có tác vụ nào. Khi bạn gửi câu hỏi, tiến trình sẽ hiện ở đây.</div>
+  <label class="bgtask-notify">
+    <input type="checkbox" id="bgTaskNotifyToggle">
+    <span data-i18n="background.notifyLabel">Thông báo khi AI giải xong</span>
+  </label>
+  <div id="bgTaskNotifyHint" class="bgtask-notify-hint" style="display:none"></div>
+</aside>
+
+<!-- Vùng chứa toast trong app (fallback khi không có quyền Notification — mục 13/15) -->
+<div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="false"></div>
+
 <!-- Thư viện phía client: đọc PDF/DOCX, hiển thị công thức toán, vẽ đồ thị, xuất DOCX, vẽ hình 3D -->
 <!-- FIX ROOT CAUSE (CDN là điểm lỗi trên iPhone/Safari — xem giải thích ở khối <link> KaTeX CSS
      phía trên): TỰ HOST cả 6 thư viện trong /public/vendor thay vì tải qua cdnjs/jsdelivr. Mỗi file
@@ -339,24 +434,29 @@
      'ACTIVE_3D' has already been declared" quan sát được). scripts/build.js (chạy TỰ ĐỘNG mỗi lần
      `npm run build`, tức MỖI LẦN Vercel deploy — xem vercel.json "buildCommand") gắn content-hash
      10 ký tự vào tên từng file NGAY TRƯỚC KHI ghi lại đúng các <script src> này (vd
-     "app.7f3a9c1e02.js"): nội dung đổi -> hash đổi -> URL đổi hẳn, không bao giờ trùng URL giữa 2
+     "app.js"): nội dung đổi -> hash đổi -> URL đổi hẳn, không bao giờ trùng URL giữa 2
      nội dung khác nhau -> an toàn cache "immutable" vĩnh viễn (xem vercel.json). File nguồn ở đây
      CỐ Ý giữ tên KHÔNG hash (đây là template — build step ghi đè bản có hash vào output deploy,
      KHÔNG commit ngược lại repo). -->
-<script src="/js/i18n/translations.js"></script>
-<script src="/js/i18n/languageStore.js"></script>
-<script src="/js/i18n/i18n.js"></script>
-<script src="/js/storage.js"></script>
-<script src="/js/imageStorage.js"></script>
-<script src="/js/config.js"></script>
-<script src="/js/formulas.js"></script>
-<script src="/js/subjects.js"></script>
-<script src="/js/solid3d.js"></script>
-<script src="/js/scene3d.js"></script>
-<script src="/js/providers/puterAdapter.js"></script>
-<script src="/js/providers/providerRouter.js"></script>
-<script src="/js/tasks/conversationTaskManager.js"></script>
-<script src="/js/geo2d-engine.js"></script>
-<script src="/js/app.js"></script>
+<script src="/js/i18n/translations.58819ae070.js"></script>
+<script src="/js/i18n/languageStore.763a541496.js"></script>
+<script src="/js/i18n/i18n.20d12a2b84.js"></script>
+<script src="/js/payloadBudget.c9bd656bea.js"></script>
+<script src="/js/storage.1d27028cd0.js"></script>
+<script src="/js/imageStorage.7f0da94f2b.js"></script>
+<script src="/js/config.7dce3170d3.js"></script>
+<script src="/js/formulas.8bbbb162bb.js"></script>
+<script src="/js/subjects.aa5a680318.js"></script>
+<script src="/js/solid3d.b9cfced17e.js"></script>
+<script src="/js/exprEval.b06b7b8995.js"></script>
+<script src="/js/scene3d.eab03768bc.js"></script>
+<script src="/js/providers/puterAdapter.e15c261080.js"></script>
+<script src="/js/providers/providerRouter.a9eab4f87c.js"></script>
+<script src="/js/visual/puterVisualManager.6162700d9b.js"></script>
+<script src="/js/ui/puterAuthUI.5384d8ecb0.js"></script>
+<script src="/js/tasks/conversationTaskManager.1eb7e20b62.js"></script>
+<script src="/js/tasks/backgroundTaskUI.915a2a6d32.js"></script>
+<script src="/js/voiceInput.66463c87c2.js"></script>
+<script src="/js/app.14935bacef.js"></script>
 </body>
 </html>

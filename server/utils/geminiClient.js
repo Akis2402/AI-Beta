@@ -1,7 +1,13 @@
 'use strict';
 
+// A1: chấp nhận cả string lẫn PromptParts — Gemini 2.5+ có implicit caching cho prefix trùng nên
+// chỉ cần ghép đúng thứ tự TĨNH -> CONTEXT -> ĐỘNG (systemToString làm đúng việc đó).
+const { systemToString } = require('./systemPromptParts');
+const { maxReasoningForModel } = require('./budget/reasoningPolicy');
+
 const { iterateSSELines } = require('./sseParse');
 const { createLinkedAbort, makeCancelledError } = require('./abortLink');
+const { thinkingLevelFromBudget, fitReasoningToModel } = require('./budget/reasoningPolicy');
 const { normalizeFinishReason } = require('./finishReason');
 
 // Client gọi Google Gemini API (generativelanguage.googleapis.com) bằng khóa API phía
@@ -70,17 +76,48 @@ function toGeminiContents(messages) {
 // (không phải 3.x/2.5.x) thì fail-safe: KHÔNG gửi cấu hình native thinking mù (mục F.3).
 // @param {{modelId:string, capabilities?:object, deepThinking:boolean, fast:boolean}} args
 // @returns {{thinkingLevel:string,includeThoughts:boolean}|{thinkingBudget:number,includeThoughts:boolean}|null}
-function resolveGeminiThinkingConfig({ modelId, capabilities, deepThinking, fast }) {
+function resolveGeminiThinkingConfig({ modelId, capabilities, deepThinking, fast, reasoningBudget, maxTokens }) {
   if (!deepThinking || fast) return null;
   const capsKnown = capabilities && typeof capabilities === 'object';
   const thinkingCapable = capsKnown ? !!(capabilities.supportsThinking || capabilities.supportsAdaptiveThinking) : true;
   if (!thinkingCapable) return null;
+  // A5: reasoningBudget = 0 TƯỜNG MINH nghĩa là "không dùng native reasoning cho lượt này" (lớp bài
+  // MICRO / model quá nhỏ). `undefined` vẫn giữ hành vi legacy (thinkingBudget động).
+  if (reasoningBudget === 0 || (Number.isFinite(reasoningBudget) && reasoningBudget <= 0)) return null;
   const id = String(modelId || '');
+  // ---------- PHẦN 1/2 ROOT-CAUSE FIX: thinkingBudget: -1 là NGUY HIỂM ----------
+  // Thinking token của Gemini CŨNG tính vào maxOutputTokens. `thinkingBudget:-1` (dynamic) cho phép
+  // model tiêu TOÀN BỘ maxOutputTokens cho suy luận và trả về text RỖNG kèm finishReason=MAX_TOKENS
+  // — đúng triệu chứng "Suy nghĩ sâu thường lỗi" trong khi "Suy nghĩ nhanh" (không bật thinking)
+  // hoạt động ổn định. Khi caller truyền `reasoningBudget` tường minh (budget/requestBudgetPlanner.js
+  // đã CỘNG THÊM phần này vào maxOutputTokens), dùng đúng con số đó -> phần trả lời luôn còn chỗ.
+  // A2: kẹp theo trần output THẬT của model (maxOutputTokens từ discovery — Gemini trả
+  // outputTokenLimit tường minh). Không biết -> không kẹp, giữ hành vi cũ.
+  const modelCap = maxReasoningForModel(capsKnown ? capabilities : null);
+  const explicitRaw = Number.isFinite(reasoningBudget) && reasoningBudget > 0;
+  if (explicitRaw) {
+    reasoningBudget = Math.min(Math.round(reasoningBudget), modelCap);
+    // A4 (bất biến E): maxOutputTokens của Gemini BAO GỒM thinking token -> answer + reasoning phải
+    // nằm trọn trong trần output THẬT của model, nếu không model tiêu hết ngân sách cho suy luận và
+    // trả text rỗng kèm finishReason=MAX_TOKENS.
+    const fitted = fitReasoningToModel({
+      reasoningBudget, answerBudget: Math.round(maxTokens || 1000),
+      capabilities: capsKnown ? capabilities : null,
+      minReasoningTokens: 1024, countsAgainstOutput: true
+    });
+    if (!fitted.nativeEnabled) return null; // model không đủ chỗ -> prompt-based, không gửi config mù
+    reasoningBudget = fitted.reasoningBudget;
+  }
+  const explicit = explicitRaw;
   // includeThoughts:false vì đã có lớp lọc `thought:true` riêng bên dưới — xin luôn từ nguồn để đỡ
   // tốn băng thông/response size thay vì xin về rồi mới lọc bỏ.
-  if (/gemini-3/i.test(id)) return { thinkingLevel: 'high', includeThoughts: false };
-  if (/gemini-2\.5/i.test(id)) return { thinkingBudget: -1, includeThoughts: false };
-  if (!capsKnown) return { thinkingBudget: -1, includeThoughts: false }; // legacy direct-call, không biết modelId/generation gì thêm -> giữ hành vi cũ
+  if (/gemini-3/i.test(id)) {
+    return { thinkingLevel: thinkingLevelFromBudget(explicit ? reasoningBudget : 8000) || 'high', includeThoughts: false };
+  }
+  if (/gemini-2\.5/i.test(id)) {
+    return { thinkingBudget: explicit ? Math.round(reasoningBudget) : -1, includeThoughts: false };
+  }
+  if (!capsKnown) return { thinkingBudget: explicit ? Math.round(reasoningBudget) : -1, includeThoughts: false }; // legacy direct-call -> giữ hành vi cũ
   return null; // capsKnown=true nhưng KHÔNG xác định được thế hệ model (không phải 3.x/2.5.x) -> fail-safe, không đoán mò field
 }
 
@@ -91,7 +128,7 @@ function resolveGeminiThinkingConfig({ modelId, capabilities, deepThinking, fast
  * @param {{system:string, messages:Array, maxTokens?:number, temperature?:number, webSearch?:boolean, fast?:boolean, timeoutMs?:number}} opts
  * @returns {Promise<string>}
  */
-async function callGemini({ system, messages, maxTokens = 1000, temperature, webSearch, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+async function callGemini({ system, messages, maxTokens = 1000, reasoningBudget, temperature, webSearch, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
   const key = apiKeyOverride || API_KEY;
   if (!key) {
     const err = new Error('Máy chủ chưa cấu hình GEMINI_API_KEY.');
@@ -116,9 +153,21 @@ async function callGemini({ system, messages, maxTokens = 1000, temperature, web
   // FIX P0/C/F (audit): thinkingConfig giờ do resolveGeminiThinkingConfig() quyết định — capability-
   // aware (model có hỗ trợ reasoning không) VÀ version-aware (thinkingLevel cho Gemini 3+,
   // thinkingBudget cho Gemini 2.5-style) thay vì 1 config cứng {thinkingBudget:-1} cho MỌI model.
-  const thinkingConfig = resolveGeminiThinkingConfig({ modelId, capabilities, deepThinking, fast });
-  if (thinkingConfig) body.generationConfig.thinkingConfig = thinkingConfig;
-  if (system) body.systemInstruction = { parts: [{ text: system }] };
+  const thinkingConfig = resolveGeminiThinkingConfig({ modelId, capabilities, deepThinking, fast, reasoningBudget, maxTokens });
+  if (thinkingConfig) {
+    body.generationConfig.thinkingConfig = thinkingConfig;
+    // maxOutputTokens của Gemini bao gồm cả thinking token -> CỘNG THÊM reasoningBudget để
+    // answerBudget (maxTokens) được bảo toàn nguyên vẹn cho phần trả lời hiển thị.
+    if (Number.isFinite(reasoningBudget) && reasoningBudget > 0) {
+      const ceiling = capabilities && Number(capabilities.maxOutputTokens);
+      const wanted = Math.round(maxTokens) + Math.round(reasoningBudget);
+      body.generationConfig.maxOutputTokens = Number.isFinite(ceiling) && ceiling > 0
+        ? Math.min(ceiling, wanted)
+        : wanted;
+    }
+  }
+  const systemText = systemToString(system);
+  if (systemText) body.systemInstruction = { parts: [{ text: systemText }] };
   if (webSearch) body.tools = [{ google_search: {} }];
 
   const linked = createLinkedAbort(timeoutMs, signal);
@@ -189,7 +238,7 @@ async function callGemini({ system, messages, maxTokens = 1000, temperature, web
  * @param {{system:string, messages:Array, maxTokens?:number, temperature?:number, webSearch?:boolean, fast?:boolean, timeoutMs?:number, onDelta?:Function}} opts
  * @returns {Promise<string>}
  */
-async function callGeminiStream({ system, messages, maxTokens = 1000, temperature, webSearch, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+async function callGeminiStream({ system, messages, maxTokens = 1000, reasoningBudget, temperature, webSearch, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
   const key = apiKeyOverride || API_KEY;
   if (!key) {
     const err = new Error('Máy chủ chưa cấu hình GEMINI_API_KEY.');
@@ -207,9 +256,21 @@ async function callGeminiStream({ system, messages, maxTokens = 1000, temperatur
       ...(typeof temperature === 'number' ? { temperature } : {})
     }
   };
-  const thinkingConfig = resolveGeminiThinkingConfig({ modelId, capabilities, deepThinking, fast });
-  if (thinkingConfig) body.generationConfig.thinkingConfig = thinkingConfig;
-  if (system) body.systemInstruction = { parts: [{ text: system }] };
+  const thinkingConfig = resolveGeminiThinkingConfig({ modelId, capabilities, deepThinking, fast, reasoningBudget, maxTokens });
+  if (thinkingConfig) {
+    body.generationConfig.thinkingConfig = thinkingConfig;
+    // maxOutputTokens của Gemini bao gồm cả thinking token -> CỘNG THÊM reasoningBudget để
+    // answerBudget (maxTokens) được bảo toàn nguyên vẹn cho phần trả lời hiển thị.
+    if (Number.isFinite(reasoningBudget) && reasoningBudget > 0) {
+      const ceiling = capabilities && Number(capabilities.maxOutputTokens);
+      const wanted = Math.round(maxTokens) + Math.round(reasoningBudget);
+      body.generationConfig.maxOutputTokens = Number.isFinite(ceiling) && ceiling > 0
+        ? Math.min(ceiling, wanted)
+        : wanted;
+    }
+  }
+  const systemText = systemToString(system);
+  if (systemText) body.systemInstruction = { parts: [{ text: systemText }] };
   if (webSearch) body.tools = [{ google_search: {} }];
 
   const linked = createLinkedAbort(timeoutMs, signal);

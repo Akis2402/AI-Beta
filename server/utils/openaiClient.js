@@ -1,5 +1,11 @@
 'use strict';
 
+// A1: OpenAI tự cache prefix trùng >1024 token — điều kiện DUY NHẤT là phần TĨNH phải luôn đứng
+// TRƯỚC phần ĐỘNG. systemToString() ghép theo đúng thứ tự đó.
+const { systemToString } = require('./systemPromptParts');
+
+const { effortFromBudget, fitReasoningToModel } = require('./budget/reasoningPolicy');
+
 const { iterateSSELines } = require('./sseParse');
 const { createLinkedAbort, makeCancelledError } = require('./abortLink');
 const { finishReasonFromResponsesApi } = require('./finishReason');
@@ -12,6 +18,53 @@ const { finishReasonFromResponsesApi } = require('./finishReason');
 //
 // Cùng "hình dạng" tham số với callClaude()/callGemini() để aiProviders.js gọi mọi provider
 // qua cùng một interface: async ({system, messages, maxTokens, temperature, webSearch}) => text
+
+
+// ============================================================================================
+// PHẦN 1/2 ROOT-CAUSE FIX — reasoning token của Responses API tính vào `max_output_tokens`
+// ============================================================================================
+// TRƯỚC ĐÂY: body.max_output_tokens = maxTokens (= coreBudget) VÀ reasoning.effort = 'high' CỨNG.
+// Với một ngân sách nhỏ, model reasoning có thể tiêu gần hết max_output_tokens cho suy luận rồi
+// trả về status='incomplete' + incomplete_details.reason='max_output_tokens' và output RỖNG.
+// finishReason -> 'length' -> HARD -> recovery -> lặp lại y hệt -> reserve cạn -> FAILED.
+//
+// NAY: `maxTokens` = answerBudget (bất khả xâm phạm). `reasoningBudget` được CỘNG THÊM vào
+// max_output_tokens, và effort được suy ra TỪ ngân sách đó (effortFromBudget) thay vì hard-code —
+// ngân sách lớn vẫn giữ 'high' (KHÔNG giảm độ sâu reasoning để tiết kiệm token).
+function applyOpenAIReasoning(body, { maxTokens, reasoningBudget, deepThinking, fast, capabilities, temperature }) {
+  const capsKnown = capabilities && typeof capabilities === 'object';
+  const reasoningCapable = capsKnown ? !!capabilities.supportsThinking : true;
+  const useReasoning = !!deepThinking && !fast && reasoningCapable;
+  if (!useReasoning) {
+    if (typeof temperature === 'number') body.temperature = temperature;
+    return body;
+  }
+  // A5: reasoningBudget = 0 TƯỜNG MINH -> KHÔNG gửi tham số reasoning (lớp bài MICRO / model quá
+  // nhỏ). `undefined` giữ hành vi legacy (effort 'high').
+  if (reasoningBudget === 0 || (Number.isFinite(reasoningBudget) && reasoningBudget <= 0)) {
+    if (typeof temperature === 'number') body.temperature = temperature;
+    return body;
+  }
+  const explicit = Number.isFinite(reasoningBudget) && reasoningBudget > 0;
+  if (explicit) {
+    // A4 (bất biến E): reasoning token của Responses API tính vào max_output_tokens -> answer +
+    // reasoning phải nằm trọn trong trần output THẬT của model.
+    const fitted = fitReasoningToModel({
+      reasoningBudget: Math.round(reasoningBudget), answerBudget: Math.round(maxTokens),
+      capabilities: capsKnown ? capabilities : null,
+      minReasoningTokens: 1024, countsAgainstOutput: true
+    });
+    if (!fitted.nativeEnabled) {
+      if (typeof temperature === 'number') body.temperature = temperature;
+      return body; // model không đủ chỗ cho reasoning hợp lệ -> prompt-based
+    }
+    body.reasoning = { effort: effortFromBudget(fitted.reasoningBudget) || 'high' };
+    body.max_output_tokens = fitted.providerMaxTokens;
+    return body;
+  }
+  body.reasoning = { effort: 'high' };
+  return body;
+}
 
 const OPENAI_API_URL = 'https://api.openai.com/v1/responses';
 const API_KEY = process.env.OPENAI_API_KEY;
@@ -83,7 +136,7 @@ function extractResponsesText(data) {
  * @param {{system:string, messages:Array, maxTokens?:number, temperature?:number, webSearch?:boolean, fast?:boolean, timeoutMs?:number}} opts
  * @returns {Promise<string>}
  */
-async function callOpenAI({ system, messages, maxTokens = 1000, temperature, webSearch, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+async function callOpenAI({ system, messages, maxTokens = 1000, reasoningBudget, temperature, webSearch, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
   const key = apiKeyOverride || API_KEY;
   if (!key) {
     const err = new Error('Máy chủ chưa cấu hình OPENAI_API_KEY.');
@@ -93,7 +146,7 @@ async function callOpenAI({ system, messages, maxTokens = 1000, temperature, web
 
   const body = {
     model: assertModel(fast ? (fastModelOverride || MODEL_FAST || MODEL) : (modelOverride || MODEL)),
-    instructions: system,
+    instructions: systemToString(system),
     input: toResponsesInput(messages),
     max_output_tokens: maxTokens
   };
@@ -107,14 +160,7 @@ async function callOpenAI({ system, messages, maxTokens = 1000, temperature, web
   // capabilities (forward từ executionTargets.js, đã merge model-level supportsReasoning từ
   // modelDiscovery) xác nhận supportsThinking. capabilities HOÀN TOÀN vắng mặt (gọi trực tiếp ngoài
   // executionTargets, vd test cũ) -> giữ hành vi permissive cũ (tương thích ngược).
-  const capsKnown = capabilities && typeof capabilities === 'object';
-  const reasoningCapable = capsKnown ? !!capabilities.supportsThinking : true;
-  const useReasoning = !!deepThinking && !fast && reasoningCapable;
-  if (useReasoning) {
-    body.reasoning = { effort: 'high' };
-  } else if (typeof temperature === 'number') {
-    body.temperature = temperature;
-  }
+  applyOpenAIReasoning(body, { maxTokens, reasoningBudget, deepThinking, fast, capabilities, temperature });
   if (webSearch) body.tools = [{ type: 'web_search_preview' }];
 
   const linked = createLinkedAbort(timeoutMs, signal);
@@ -175,7 +221,7 @@ async function callOpenAI({ system, messages, maxTokens = 1000, temperature, web
  * @param {{system:string, messages:Array, maxTokens?:number, temperature?:number, webSearch?:boolean, fast?:boolean, timeoutMs?:number, onDelta?:Function}} opts
  * @returns {Promise<string>}
  */
-async function callOpenAIStream({ system, messages, maxTokens = 1000, temperature, webSearch, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+async function callOpenAIStream({ system, messages, maxTokens = 1000, reasoningBudget, temperature, webSearch, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
   const key = apiKeyOverride || API_KEY;
   if (!key) {
     const err = new Error('Máy chủ chưa cấu hình OPENAI_API_KEY.');
@@ -185,19 +231,12 @@ async function callOpenAIStream({ system, messages, maxTokens = 1000, temperatur
 
   const body = {
     model: assertModel(fast ? (fastModelOverride || MODEL_FAST || MODEL) : (modelOverride || MODEL)),
-    instructions: system,
+    instructions: systemToString(system),
     input: toResponsesInput(messages),
     max_output_tokens: maxTokens,
     stream: true
   };
-  const capsKnown = capabilities && typeof capabilities === 'object';
-  const reasoningCapable = capsKnown ? !!capabilities.supportsThinking : true;
-  const useReasoning = !!deepThinking && !fast && reasoningCapable;
-  if (useReasoning) {
-    body.reasoning = { effort: 'high' };
-  } else if (typeof temperature === 'number') {
-    body.temperature = temperature;
-  }
+  applyOpenAIReasoning(body, { maxTokens, reasoningBudget, deepThinking, fast, capabilities, temperature });
   if (webSearch) body.tools = [{ type: 'web_search_preview' }];
 
   const linked = createLinkedAbort(timeoutMs, signal);

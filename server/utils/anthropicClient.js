@@ -3,7 +3,76 @@
 const { iterateSSELines } = require('./sseParse');
 const { createLinkedAbort, makeCancelledError } = require('./abortLink');
 const { nativeThinkingBudget } = require('./thinkingRouter');
+const { maxReasoningForModel, fitReasoningToModel } = require('./budget/reasoningPolicy');
 const { normalizeFinishReason } = require('./finishReason');
+// A1: system có thể là string (nhánh cũ) hoặc PromptParts (nhánh mới, có cache breakpoint).
+const { toAnthropicSystemBlocks, systemToString } = require('./systemPromptParts');
+
+
+// ============================================================================================
+// PHẦN 1/2 ROOT-CAUSE FIX — `max_tokens` của Anthropic BAO GỒM CẢ thinking token
+// ============================================================================================
+// TRƯỚC ĐÂY: body.max_tokens = maxTokens (= coreBudget, tức 70% ngân sách đã tính) VÀ
+// thinking.budget_tokens = 0.6 * maxTokens. Phần văn bản NGƯỜI DÙNG ĐỌC chỉ còn 40% của 70%
+// = 28% ngân sách dự kiến -> model gần như LUÔN chạm max_tokens -> stop_reason='max_tokens' ->
+// completenessCheck gắn HARD 'finish_reason_length' -> recovery -> lượt recovery lại bị chia 60/40
+// tiếp -> reserve cạn -> lỗi "Câu trả lời chưa đầy đủ sau khi đã thử khôi phục".
+//
+// NAY: `maxTokens` có ngữ nghĩa DUY NHẤT là NGÂN SÁCH CHO VĂN BẢN HIỂN THỊ (answerBudget).
+// `reasoningBudget` (nếu caller truyền — xem budget/requestBudgetPlanner.js) được CỘNG THÊM vào
+// max_tokens, không bao giờ trừ vào phần trả lời.
+//
+// Tương thích ngược: caller CŨ không truyền reasoningBudget -> giữ nguyên hành vi cũ
+// (nativeThinkingBudget(maxTokens)) để mọi test/đường gọi legacy không đổi kết quả.
+function applyAnthropicThinking(body, { maxTokens, reasoningBudget, deepThinking, fast, capabilities, temperature }) {
+  const capsKnown = capabilities && typeof capabilities === 'object';
+  const nativeCapable = capsKnown ? !!(capabilities.supportsThinking || capabilities.supportsAdaptiveThinking) : true;
+  const explicit = Number.isFinite(reasoningBudget) && reasoningBudget > 0;
+  // A5: caller truyền TƯỜNG MINH reasoningBudget = 0 nghĩa là "KHÔNG dùng native reasoning cho lượt
+  // này" (lớp bài MICRO, hoặc model quá nhỏ — xem fitReasoningToModel). Trước đây con số 0 không
+  // phân biệt được với `undefined` nên vẫn rơi vào nhánh legacy nativeThinkingBudget(maxTokens) và
+  // câu "12 * 8 = ?" vẫn bị cấp >=1024 thinking token. `undefined` vẫn giữ hành vi legacy.
+  const explicitZero = reasoningBudget === 0 || (Number.isFinite(reasoningBudget) && reasoningBudget <= 0);
+  const useNativeThinking = !!deepThinking && !fast && nativeCapable && !explicitZero && (explicit || maxTokens >= 1500);
+  if (!useNativeThinking) {
+    if (typeof temperature === 'number') body.temperature = temperature;
+    return body;
+  }
+  // A2: trần CUỐI CÙNG theo model thật. chat.js tính reasoningBudget khi CHƯA biết target nào sẽ
+  // thắng rotation (genericReasoningBudget), nên điểm gate đúng nhất là ĐÂY — nơi đã biết chắc model.
+  // capabilities.maxOutputTokens vắng mặt -> không kẹp (giữ hành vi cũ).
+  const modelCap = maxReasoningForModel(capsKnown ? capabilities : null);
+  const wanted = Math.min(
+    modelCap,
+    Math.max(1024, explicit ? Math.round(reasoningBudget) : nativeThinkingBudget(maxTokens))
+  );
+  // A4 (bất biến E): answer + reasoning KHÔNG BAO GIỜ vượt maxOutputTokens THẬT của model. Khi model
+  // không đủ chỗ cho cả hai, fitReasoningToModel() trả nativeEnabled=false -> bỏ hẳn native thinking
+  // và để cơ chế prompt-based trong system prompt lo phần suy luận (KHÔNG suy luận nông hơn).
+  const fitted = fitReasoningToModel({
+    reasoningBudget: wanted,
+    answerBudget: explicit ? Math.round(maxTokens) : Math.max(200, Math.round(maxTokens) - wanted),
+    capabilities: capsKnown ? capabilities : null,
+    minReasoningTokens: 1024,
+    countsAgainstOutput: true
+  });
+  if (!fitted.nativeEnabled) {
+    if (typeof temperature === 'number') body.temperature = temperature;
+    return body;
+  }
+  if (explicit) {
+    // answerBudget được BẢO TOÀN nguyên vẹn: max_tokens = answer + reasoning.
+    body.max_tokens = fitted.providerMaxTokens;
+    body.thinking = { type: 'enabled', budget_tokens: fitted.reasoningBudget };
+  } else {
+    body.thinking = {
+      type: 'enabled',
+      budget_tokens: Math.min(fitted.reasoningBudget, Math.max(1024, Math.round(maxTokens) - 200))
+    };
+  }
+  // Khi thinking bật, Anthropic KHÔNG cho truyền temperature/top_p/top_k tùy chỉnh -> bỏ qua.
+  return body;
+}
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -51,7 +120,7 @@ if (!API_KEY) {
  *   trước (tương thích ngược 100% với cấu hình chỉ có 1 khóa/1 model).
  * @returns {Promise<string>} nội dung text trả lời (đã gộp mọi khối "text", bỏ qua khối tool_use/tool_result)
  */
-async function callClaude({ system, messages, maxTokens = 1000, tools, temperature, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+async function callClaude({ system, messages, maxTokens = 1000, reasoningBudget, tools, temperature, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
   const key = apiKeyOverride || API_KEY;
   if (!key) {
     const err = new Error('Máy chủ chưa được cấu hình ANTHROPIC_API_KEY. Vui lòng liên hệ quản trị viên.');
@@ -62,7 +131,9 @@ async function callClaude({ system, messages, maxTokens = 1000, tools, temperatu
   const body = {
     model: assertModel(fast ? (fastModelOverride || MODEL_FAST || MODEL) : (modelOverride || MODEL)),
     max_tokens: maxTokens,
-    system,
+    // A1: caller truyền PromptParts -> system thành MẢNG content block, có cache_control ở cuối khối
+    // tĩnh (và khối ngữ cảnh nguồn nếu đủ lớn). Caller cũ truyền string -> giữ NGUYÊN nhánh cũ.
+    system: toAnthropicSystemBlocks(system) || system,
     messages
   };
   if (Array.isArray(tools) && tools.length) body.tools = tools;
@@ -82,14 +153,7 @@ async function callClaude({ system, messages, maxTokens = 1000, tools, temperatu
   // supportsAdaptiveThinking; `capabilities` HOÀN TOÀN vắng mặt (undefined, không phải {}) nghĩa là
   // caller gọi callClaude() trực tiếp ngoài executionTargets (vd test thuần/legacy) và chưa biết gì
   // về capability model — giữ hành vi cũ (permissive) để không phá tương thích ngược.
-  const capsKnown = capabilities && typeof capabilities === 'object';
-  const nativeCapable = capsKnown ? !!(capabilities.supportsThinking || capabilities.supportsAdaptiveThinking) : true;
-  const useNativeThinking = !!deepThinking && !fast && maxTokens >= 1500 && nativeCapable;
-  if (useNativeThinking) {
-    body.thinking = { type: 'enabled', budget_tokens: nativeThinkingBudget(maxTokens) };
-  } else if (typeof temperature === 'number') {
-    body.temperature = temperature;
-  }
+  applyAnthropicThinking(body, { maxTokens, reasoningBudget, deepThinking, fast, capabilities, temperature });
 
   const linked = createLinkedAbort(timeoutMs, signal);
 
@@ -151,7 +215,16 @@ async function callClaude({ system, messages, maxTokens = 1000, tools, temperatu
   if (meta) {
     meta.finishReason = normalizeFinishReason(data.stop_reason);
     // Vấn đề #4: số token THẬT do provider báo — dùng để hiệu chỉnh tokenCounter (xem tokenCounter.js).
-    if (data.usage) meta.usage = { inputTokens: data.usage.input_tokens, outputTokens: data.usage.output_tokens };
+    // B10/A1.8: Anthropic trả breakdown cache trong `usage` — ĐỌC và lưu lại thay vì bỏ qua như
+    // trước, để đo hiệu quả THẬT của prompt caching (MEASURED, không phải ESTIMATED).
+    if (data.usage) {
+      meta.usage = {
+        inputTokens: data.usage.input_tokens,
+        outputTokens: data.usage.output_tokens,
+        cachedTokens: Number(data.usage.cache_read_input_tokens) || 0,
+        cacheCreationTokens: Number(data.usage.cache_creation_input_tokens) || 0
+      };
+    }
   }
 
   return text;
@@ -165,7 +238,7 @@ async function callClaude({ system, messages, maxTokens = 1000, tools, temperatu
  * @param {{system:string, messages:Array, maxTokens?:number, tools?:Array, temperature?:number, fast?:boolean, timeoutMs?:number, onDelta?:Function}} opts
  * @returns {Promise<string>}
  */
-async function callClaudeStream({ system, messages, maxTokens = 1000, tools, temperature, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
+async function callClaudeStream({ system, messages, maxTokens = 1000, reasoningBudget, tools, temperature, fast, deepThinking, capabilities, timeoutMs = DEFAULT_TIMEOUT_MS, onDelta, apiKeyOverride, modelOverride, fastModelOverride, signal, meta }) {
   const key = apiKeyOverride || API_KEY;
   if (!key) {
     const err = new Error('Máy chủ chưa được cấu hình ANTHROPIC_API_KEY. Vui lòng liên hệ quản trị viên.');
@@ -176,19 +249,12 @@ async function callClaudeStream({ system, messages, maxTokens = 1000, tools, tem
   const body = {
     model: assertModel(fast ? (fastModelOverride || MODEL_FAST || MODEL) : (modelOverride || MODEL)),
     max_tokens: maxTokens,
-    system,
+    system: toAnthropicSystemBlocks(system) || system,
     messages,
     stream: true
   };
   if (Array.isArray(tools) && tools.length) body.tools = tools;
-  const capsKnown = capabilities && typeof capabilities === 'object';
-  const nativeCapable = capsKnown ? !!(capabilities.supportsThinking || capabilities.supportsAdaptiveThinking) : true;
-  const useNativeThinking = !!deepThinking && !fast && maxTokens >= 1500 && nativeCapable;
-  if (useNativeThinking) {
-    body.thinking = { type: 'enabled', budget_tokens: nativeThinkingBudget(maxTokens) };
-  } else if (typeof temperature === 'number') {
-    body.temperature = temperature;
-  }
+  applyAnthropicThinking(body, { maxTokens, reasoningBudget, deepThinking, fast, capabilities, temperature });
 
   const linked = createLinkedAbort(timeoutMs, signal);
 
@@ -248,6 +314,16 @@ async function callClaudeStream({ system, messages, maxTokens = 1000, tools, tem
       // mục 1: sự kiện "message_delta" mang stop_reason THẬT ngay trước khi stream đóng —
       // đây là tín hiệu completion-first đáng tin nhất (model tự quyết định dừng vs bị cắt vì hết
       // max_tokens), forward ra ngoài qua `meta` giống hệt bản không-streaming ở trên.
+      // Cache breakdown chỉ xuất hiện ở `message_start` (usage đầu vào), không có ở message_delta.
+      if (evt.type === 'message_start' && meta && evt.message && evt.message.usage) {
+        const u = evt.message.usage;
+        meta.usage = {
+          ...(meta.usage || {}),
+          inputTokens: u.input_tokens,
+          cachedTokens: Number(u.cache_read_input_tokens) || 0,
+          cacheCreationTokens: Number(u.cache_creation_input_tokens) || 0
+        };
+      }
       if (evt.type === 'message_delta' && evt.delta && evt.delta.stop_reason && meta) {
         meta.finishReason = normalizeFinishReason(evt.delta.stop_reason);
         if (evt.usage) meta.usage = { ...(meta.usage || {}), outputTokens: evt.usage.output_tokens };
@@ -286,7 +362,7 @@ async function callClaudeWebSearch({ system, messages, maxTokens = 1200, timeout
   const body = {
     model: assertModel(modelOverride || MODEL_FAST || MODEL), // đủ dùng cho tác vụ tìm + tóm tắt link, không cần model mạnh/đắt nhất
     max_tokens: maxTokens,
-    system,
+    system: systemToString(system),
     messages,
     tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }]
   };

@@ -84,8 +84,10 @@ function bumpKey(key, ratio) {
   });
 }
 
-function recordUsage(providerKey, { text, chars, tokens, contentClass } = {}) {
+function recordUsage(providerKey, { text, chars, tokens, contentClass, isImage, modality } = {}) {
   if (!providerKey) return;
+  // BẢO VỆ ĐA PHƯƠNG THỨC: Không đưa image token vào EMA charsPerToken của text (Section 52)
+  if (isImage || modality === 'image') return;
   const n = Number.isFinite(chars) ? chars : String(text || '').length;
   const t = Number(tokens);
   if (!Number.isFinite(t) || t <= 0) return;

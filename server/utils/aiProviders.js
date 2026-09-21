@@ -1,5 +1,7 @@
 'use strict';
 
+const { recordAttemptFor } = require('./tokenTelemetry');
+
 // ---------- Điều phối AI Rotation: Provider → API Keys → Models → Execution Targets ----------
 // KHÔNG coi "AI = API Key" hay "AI = Model". Mỗi tổ hợp (API Key × Model) là 1 Execution Target độc
 // lập (xem executionTargets.js) — rotation xoay công bằng qua các target đó (xem rotationManager.js:
@@ -22,7 +24,10 @@ const { getAllExecutionTargets, listAutoDiscoveryDefs } = require('./executionTa
 const {
   getEligibleTargets, orderByRotation, shuffle, markSuccess, markFailure, getHealthSnapshot, isTargetSlow,
   // Vấn đề #1 (vòng 3): đặt "vé xoay" toàn cục lấy bằng atomic INCR ở đầu request.
-  setGlobalRotationSlot
+  setGlobalRotationSlot,
+  // FIX (audit cross-check): reason code khi 1 target bị loại khỏi pool — trả lời được câu hỏi
+  // "có N AI khỏe nhưng tại sao chỉ M AI chạy?" bằng dữ liệu thật, không phải suy đoán (mục 15/16).
+  getEligibilityBreakdown
 } = require('./rotationManager');
 // ---------- mục 3/9/21: model discovery orchestration ----------
 // aiProviders.js chỉ ĐIỀU PHỐI (gọi warmDiscovery cho mọi provider/khóa cần auto-discovery TRƯỚC
@@ -35,11 +40,14 @@ const rotationStore = require('./rotationStore');
 const { stripThinkingTags, createStreamingThinkingFilter } = require('./thinkingFilter');
 // Lọc "nhãn phân loại an toàn nội bộ bị lộ ra làm câu trả lời" — xem đầu safetyLeakFilter.js.
 const { createSafetyLineFilter } = require('./safetyLeakFilter');
+// LỚP 3: nháp lập kế hoạch KHÔNG có thẻ ("We need to continue from that point...") — xem
+// server/utils/metaPlanningFilter.js để biết nguyên nhân gốc và luật chống dương tính giả.
+const { createMetaPlanningFilter } = require('./metaPlanningFilter');
 // Observability (mục LVIII): log requestId/provider/model/targetId/stage/latency/status/error class
 // cho MỖI lần gọi 1 execution target — không log secret (logger tự redact). `requestId` là optional
 // (args.requestId, do chat.js gán) — nếu không có, field đó vắng mặt trong log, không throw.
 const { log, classifyErrorForLog } = require('./logger');
-function logAttempt({ requestId, stage, target, latency, status, err }) {
+function logAttempt({ requestId, stage, target, latency, status, err, usage, answerBudget, reasoningBudget, providerMaxTokens, finishReason, retry, recovery, estimatedOutputTokens }) {
   log({
     requestId, stage, status,
     provider: target && target.providerKey,
@@ -47,6 +55,18 @@ function logAttempt({ requestId, stage, target, latency, status, err }) {
     targetId: target && target.id,
     latency,
     errorClass: err ? classifyErrorForLog(err) : undefined
+  });
+  // PHẦN B mục 11: telemetry PER ATTEMPT. Không log API key/nội dung — recordAttemptFor() chỉ nhận
+  // số đếm và nhãn. No-op nếu route chưa đăng ký recorder cho requestId này (đường gọi legacy/test).
+  recordAttemptFor(requestId, {
+    stage,
+    provider: target && target.providerKey,
+    model: target && target.modelId,
+    targetId: target && target.id,
+    latencyMs: latency,
+    status: status === 'success' ? 'success' : (status === 'empty' ? 'empty' : 'error'),
+    usage, answerBudget, reasoningBudget, providerMaxTokens, finishReason,
+    retry: !!retry, recovery: !!recovery, estimatedOutputTokens
   });
 }
 
@@ -62,25 +82,108 @@ function logAttempt({ requestId, stage, target, latency, status, err }) {
 // lại, và khi ngân sách gần hết, hệ thống NGỪNG thử thêm, dùng ngay số lượt đã thu thập được (tối
 // thiểu 1) để tổng hợp thay vì cố thử thêm rồi bị nền tảng hủy toàn bộ request.
 const CROSS_CHECK_BUDGET_MS = Number(process.env.CROSS_CHECK_BUDGET_MS) || 45000;
-// ---------- Giới hạn số AI call của Đối chiếu đa hướng (KHÔNG phụ thuộc số execution target) ----------
-// TRƯỚC ĐÂY: vòng 1 gọi TẤT CẢ target eligible SONG SONG — có bao nhiêu (API key × model) đã cấu
-// hình thì gọi bấy nhiêu. Với nhiều khóa/nhiều model (vd 3 key × 5 model = 15 target), 1 câu hỏi ở
-// chế độ Sâu có thể tốn TỚI 15 lệnh gọi AI cùng lúc — rủi ro chi phí/rate-limit nghiêm trọng, tăng
-// tuyến tính theo số target chứ không phải theo nhu cầu thực (đối chiếu 2-3 góc nhìn là đủ).
-// FIX: giới hạn cứng số candidate ở vòng 1 bằng CROSS_CHECK_MAX_CANDIDATES (mặc định 3), ưu tiên ĐA
-// DẠNG PROVIDER (pickDiverseCandidates — mỗi hãng khác nhau góp 1 candidate trước, chỉ lấy trùng
-// hãng khi không đủ lựa chọn) thay vì random/thứ tự rotation thô — đối chiếu chéo giữa các HÃNG khác
-// nhau có giá trị hơn nhiều so với 2 model cùng 1 hãng. Retry cho target lỗi cũng giới hạn ĐÚNG 1
-// lượt thử thay thế mỗi slot lỗi (không lặp qua toàn bộ target còn lại) — tổng số lệnh gọi tối đa cả
-// pipeline luôn bị chặn trần ở khoảng `2 × CROSS_CHECK_MAX_CANDIDATES + 1`, KHÔNG BAO GIỜ tỷ lệ thuận
-// với tổng số execution target đã cấu hình (xem test/cross-check-limit.test.js).
+// ============================================================================================
+// FIX AUDIT (rotation/thinking/cross-check): "Đối chiếu đa hướng chỉ 2-3 AI dù còn nhiều AI khỏe"
+// ============================================================================================
+// NGUYÊN NHÂN GỐC (đã xác nhận bằng code, không phải giả thuyết): round 1 CŨ luôn cắt cứng ở
+// `Math.min(maxCandidates, CROSS_CHECK_MAX_CANDIDATES)` với CROSS_CHECK_MAX_CANDIDATES mặc định = 3
+// — BẤT KỂ pool eligible còn 5, 10 hay 20 target khỏe. Đây KHÔNG phải participant cap hợp lý, mà là
+// HARD-CODE 3 trá hình dưới tên "giới hạn candidate". Không có "hidden cap ở 3" nào khác trong pipeline
+// này — đây chính là nơi duy nhất giới hạn số AI thực sự được gọi ở vòng 1.
+//
+// FIX: tách RÕ 2 khái niệm KHÁC NHAU (mục 25 audit — không được lẫn lộn):
+//   PARTICIPANT COUNT (bao nhiêu AI tham gia)  — nay = TOÀN BỘ eligible pool, chỉ chặn bởi
+//     CROSS_CHECK_SAFETY_CAP (trần AN TOÀN tuyệt đối chống phá rate-limit/chi phí khi pool cực lớn,
+//     KHÔNG PHẢI "luôn dùng 3"). Xem resolveParticipantCount().
+//   CONCURRENCY LIMIT (bao nhiêu lệnh ĐANG BAY cùng lúc) — CROSS_CHECK_CONCURRENCY: khi participant
+//     count > concurrency, hệ thống BATCH thay vì bớt participant (mục 25: "8, 10, 15, 20 target vẫn
+//     tham gia toàn bộ, chỉ chạy theo batch phù hợp"). Xem mapWithConcurrency().
+// CROSS_CHECK_MAX_CANDIDATES (giữ tên biến để tương thích ngược với .env/test cũ) nay là PREFERRED
+// COUNT — một SÀN tối thiểu mong muốn khi caller không có yêu cầu khác, KHÔNG BAO GIỜ dùng để CẮT
+// BỚT một pool đang có NHIỀU HƠN thế. pickDiverseCandidates() vẫn giữ nguyên: ưu tiên đa dạng provider
+// trước, chỉ là limit truyền vào nay phản ánh đúng quy mô pool thay vì hằng số cố định.
 const CROSS_CHECK_MAX_CANDIDATES = Number(process.env.CROSS_CHECK_MAX_CANDIDATES) || 3;
+// Trần AN TOÀN tuyệt đối cho participant count — bảo vệ chi phí/rate-limit khi pool cực lớn (vd 20+
+// target đã cấu hình). Mặc định RỘNG RÃI (12) — đủ để "huy động toàn bộ hoặc phần lớn pool" đúng mục
+// tiêu, không tái lặp lỗi "luôn dừng ở 2-3". Cấu hình qua .env nếu hạ tầng cần khác.
+const CROSS_CHECK_SAFETY_CAP = Number(process.env.CROSS_CHECK_SAFETY_CAP) || 12;
+// Cửa sổ đồng thời (concurrency window, mục 25) — ĐỘC LẬP với participant count. Participant lớn hơn
+// cửa sổ này vẫn được huy động HẾT, chỉ chạy theo nhiều batch nối tiếp thay vì bắn hết cùng lúc.
+const CROSS_CHECK_CONCURRENCY = Number(process.env.CROSS_CHECK_CONCURRENCY) || 6;
+
+/**
+ * ---------- ADAPTIVE PARTICIPANT COUNT ----------
+ * @param {number} eligiblePoolSize Số target còn eligible (đã qua health/cooldown/capability filter).
+ * @param {number} [explicitMax] Giới hạn TRÊN do caller CHỦ ĐỘNG truyền (test cũ/1 policy tương lai
+ *   thật sự cần ít hơn) — được tôn trọng như 1 trần, KHÔNG PHẢI giá trị cố định luôn dùng. Không
+ *   truyền -> dùng toàn bộ pool (chặn bởi safety cap), đúng tinh thần "không giảm AI vì token" (mục 17).
+ * @returns {number} Số target NÊN mời tham gia vòng 1.
+ */
+function resolveParticipantCount(eligiblePoolSize, explicitMax) {
+  if (!Number.isFinite(eligiblePoolSize) || eligiblePoolSize <= 0) return 0;
+  if (eligiblePoolSize === 1) return 1; // chỉ còn 1 target khỏe -> chạy 1, caller báo degraded
+  const safetyBound = Math.max(2, Math.min(CROSS_CHECK_SAFETY_CAP, eligiblePoolSize));
+  if (Number.isFinite(explicitMax) && explicitMax > 0) {
+    return Math.max(2, Math.min(explicitMax, safetyBound));
+  }
+  return safetyBound; // không có giới hạn tường minh -> huy động hết pool (trong trần an toàn)
+}
+
+/**
+ * Chạy `items` với ĐÚNG tối đa `concurrency` lệnh ĐANG BAY cùng lúc, nhưng xử lý HẾT toàn bộ danh
+ * sách (không âm thầm bỏ bớt phần tử) — kết quả cùng shape với Promise.allSettled để chỗ gọi không
+ * phải đổi cách đọc. Đây là nơi hiện thực hoá "concurrency window" (mục 25): participant limit và
+ * concurrency limit LÀ HAI THỨ KHÁC NHAU — hàm này chỉ giới hạn số lệnh cùng lúc, KHÔNG BAO GIỜ cắt
+ * bớt số phần tử được xử lý.
+ * @returns {Promise<Array<{status:'fulfilled',value:*}|{status:'rejected',reason:*}>>}
+ */
+async function mapWithConcurrency(items, concurrency, fn) {
+  if (!items || !items.length) return [];
+  const limit = Math.max(1, Math.min(Number(concurrency) || items.length, items.length));
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const i = cursor++;
+      try { results[i] = { status: 'fulfilled', value: await fn(items[i], i) }; }
+      catch (reason) { results[i] = { status: 'rejected', reason }; }
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, worker));
+  return results;
+}
 const { createRequestDeadline, safeCallTimeout, MIN_CALL_TIMEOUT_MS } = require('./requestDeadline');
 // PHẦN J: throughput đo thật theo từng model/provider — thay hằng số 60 tok/s dùng chung.
 const { recordThroughput } = require('./throughputStats');
 // Vấn đề #4: hiệu chỉnh tỷ lệ ký tự/token từ số token THẬT provider báo về.
 const tokenCounter = require('./tokenCounter');
 const { estimateTokens } = require('./adaptiveBudget');
+
+// ============================================================================================
+// B10 — TELEMETRY TOKEN: cachedTokens / cacheSavedTokens (đo hiệu quả THẬT của A1)
+// ============================================================================================
+// Anthropic trả `cache_read_input_tokens` / `cache_creation_input_tokens` trong `usage`. Trước đây
+// 2 field này bị BỎ QUA hoàn toàn, nên không có cách nào biết prompt caching có thật sự hoạt động
+// hay không (chỉ ước lượng lý thuyết). Nay đọc và cộng dồn theo từng request.
+//
+// cacheSavedTokens: token đọc từ cache được tính giá ~10% so với input thường, nên phần TIẾT KIỆM
+// thực tế ≈ 90% số token đã đọc từ cache. Hệ số nằm ở đúng 1 chỗ này để dễ chỉnh nếu giá đổi.
+const CACHE_READ_DISCOUNT = 0.9;
+
+function emptyUsageAccumulator() {
+  return { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, cacheSavedTokens: 0, calls: 0 };
+}
+
+function accumulateUsage(acc, usage) {
+  if (!acc || !usage) return acc;
+  acc.calls += 1;
+  acc.inputTokens += Number(usage.inputTokens) || 0;
+  acc.outputTokens += Number(usage.outputTokens) || 0;
+  acc.cachedTokens += Number(usage.cachedTokens) || 0;
+  acc.cacheCreationTokens += Number(usage.cacheCreationTokens) || 0;
+  acc.cacheSavedTokens = Math.round(acc.cachedTokens * CACHE_READ_DISCOUNT);
+  return acc;
+}
 
 /**
  * Chọn tối đa `limit` target từ danh sách đã rotation-order, ƯU TIÊN đa dạng provider (mỗi hãng góp
@@ -206,32 +309,50 @@ function eligibleInRotationOrder(providers, { preferWebSearch = false, requireVi
  *   Nếu không truyền (gọi trực tiếp/test cũ), fallback về đồng hồ CROSS_CHECK_BUDGET_MS riêng như cũ.
  * @returns {Promise<{candidates:Array<{label:string,text:string}>, deadline:object}>}
  */
-async function gatherCrossCheckCandidates(providers, { system, variantSystem, messages, maxTokens, onStatus, deadline: parentDeadline, requestId, deepThinking, requireVision = false, signal, maxCandidates = CROSS_CHECK_MAX_CANDIDATES }) {
+// ============================================================================================
+// B2 ROOT CAUSE (đã xác nhận bằng code, KHÔNG phải giả thuyết) — `reasoningBudget` BỊ RƠI MẤT
+// ============================================================================================
+// chat.js LUÔN truyền `reasoningBudget: budgetOf('candidate').reasoningBudget` vào hàm này (2 chỗ:
+// nhánh streaming và nhánh JSON). Nhưng chữ ký CŨ của hàm KHÔNG hề destructure field đó, và cả 3
+// điểm gọi `p.call(...)` bên trong (round 1, retry, survivor) đều không forward nó xuống execution
+// target. Hệ quả: MỌI candidate cross-check chạy với reasoningBudget = undefined -> mỗi client rơi
+// về nhánh legacy (`nativeThinkingBudget(maxTokens)` với Anthropic, tức reasoning ĂN VÀO answer
+// budget đúng như lỗi gốc mà reasoningPolicy.js sinh ra để sửa; Gemini/OpenAI thì không nhận được
+// cấu hình reasoning tường minh nào). Đây chính là "reasoningBudget tính xong nhưng không truyền
+// xuống provider client thật" mà B1 cảnh báo — và nó xảy ra ở ĐÚNG nhánh tốn token nhất.
+//
+// FIX: nhận `reasoningBudget` trong chữ ký và forward NGUYÊN VẸN vào cả 3 điểm gọi. Client nào
+// không hỗ trợ reasoning native sẽ tự bỏ qua field này (PHẦN 29) nên việc truyền luôn là an toàn.
+async function gatherCrossCheckCandidates(providers, { system, variantSystem, messages, maxTokens, reasoningBudget, onStatus, deadline: parentDeadline, requestId, deepThinking, requireVision = false, signal, maxCandidates }) {
   const deadline = parentDeadline || createDeadline();
   const notify = typeof onStatus === 'function' ? onStatus : () => {};
+  // B10: usage THẬT cộng dồn cho toàn bộ vòng thu thập candidate (kể cả retry/survivor).
+  const usage = emptyUsageAccumulator();
   // mục 4: client đã hủy TRƯỚC KHI kịp gọi provider nào -> không tốn 1 lệnh gọi AI nào, trả candidates rỗng ngay.
-  if (signal && signal.aborted) return { candidates: [], deadline };
+  if (signal && signal.aborted) return { candidates: [], deadline, usage };
   // Mục 5: KHÔNG dùng Math.max(MIN, remaining) làm timeout — nếu ngân sách còn lại dưới sàn tối
   // thiểu, safeCallTimeout() trả về null và caller PHẢI bỏ qua lệnh gọi đó (coi như hết ngân sách),
   // không được ép timeout dài hơn thời gian thực sự còn lại.
   const timeoutFor = (base) => safeCallTimeout(base, deadline);
 
-  // ---------- Vòng 1: TỐI ĐA maxCandidates target, ưu tiên đa dạng provider ----------
-  // PHẦN 10 FIX: maxCandidates nay CÓ THỂ nhỏ hơn CROSS_CHECK_MAX_CANDIDATES khi caller (chat.js)
-  // đã đánh giá risk=LOW qua crossCheckPolicy() — bài đơn giản không cần đủ 3 candidate mới đối
-  // chiếu được, 2 candidate vẫn cho phép so khớp (candidatesAgree) mà tốn ít lệnh gọi AI hơn. Risk
-  // MEDIUM/HIGH vẫn giữ nguyên CROSS_CHECK_MAX_CANDIDATES đầy đủ (không giảm khi thực sự cần).
-  const round1Order = pickDiverseCandidates(eligibleInRotationOrder(providers, { requireVision }), Math.max(2, Math.min(maxCandidates, CROSS_CHECK_MAX_CANDIDATES)));
-  const firstRound = await Promise.allSettled(
-    round1Order.map((p) => {
-      const t = timeoutFor(30000);
-      if (t === null) return Promise.reject(new Error('Hết ngân sách thời gian request trước khi kịp gọi provider này.'));
-      const startedAt = Date.now();
-      return p.call({ system: variantSystem, messages, maxTokens, timeoutMs: t, deepThinking, signal })
-        .then((text) => { logAttempt({ requestId, stage: 'cross_check_round1', target: p, latency: Date.now() - startedAt, status: 'success' }); return text; })
-        .catch((err) => { logAttempt({ requestId, stage: 'cross_check_round1', target: p, latency: Date.now() - startedAt, status: 'error', err }); throw err; });
-    })
-  );
+  // ---------- Vòng 1: ADAPTIVE — huy động TOÀN BỘ eligible pool (chặn bởi safety cap), ưu tiên đa
+  // dạng provider, chạy theo CONCURRENCY WINDOW thay vì cắt cứng participant xuống 3 ----------
+  // FIX (audit): TRƯỚC ĐÂY luôn Math.min(maxCandidates, CROSS_CHECK_MAX_CANDIDATES) — hard-code 3
+  // bất kể pool. NAY: participant count = resolveParticipantCount() (toàn bộ pool, chặn bởi
+  // CROSS_CHECK_SAFETY_CAP — trần AN TOÀN thật, không phải "luôn 3"); thực thi qua
+  // mapWithConcurrency() để KHÔNG phá rate-limit khi participant count lớn hơn cửa sổ đồng thời.
+  const eligiblePool = eligibleInRotationOrder(providers, { requireVision });
+  const participantCount = resolveParticipantCount(eligiblePool.length, maxCandidates);
+  const round1Order = pickDiverseCandidates(eligiblePool, participantCount);
+  const firstRound = await mapWithConcurrency(round1Order, CROSS_CHECK_CONCURRENCY, (p) => {
+    const t = timeoutFor(30000);
+    if (t === null) return Promise.reject(new Error('Hết ngân sách thời gian request trước khi kịp gọi provider này.'));
+    const startedAt = Date.now();
+    const meta = {};
+    return p.call({ system: variantSystem, messages, maxTokens, reasoningBudget, timeoutMs: t, deepThinking, signal, meta })
+      .then((text) => { accumulateUsage(usage, meta.usage); logAttempt({ requestId, stage: 'cross_check_round1', target: p, latency: Date.now() - startedAt, status: 'success', usage: meta.usage, answerBudget: maxTokens, reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, estimatedOutputTokens: estimateTokens(text) }); return text; })
+      .catch((err) => { logAttempt({ requestId, stage: 'cross_check_round1', target: p, latency: Date.now() - startedAt, status: 'error', err }); throw err; });
+  });
 
   // Mọi text ở bước THU THẬP candidate này đi tiếp vào prompt của lượt TỔNG HỢP cuối (không hiển
   // thị trực tiếp cho người dùng ở bước này) — nhưng vẫn strip <thinking>/<think> ngay tại đây để
@@ -254,24 +375,37 @@ async function gatherCrossCheckCandidates(providers, { system, variantSystem, me
   // ---------- Thử lại các target lỗi — GIỚI HẠN ĐÚNG 1 lượt thay thế mỗi slot lỗi (không lặp qua
   // toàn bộ target còn lại — giữ tổng số lệnh gọi bị chặn trần, không tỷ lệ thuận số target) ----------
   const retryableFailedProviders = failedProviders.filter((p) => !invalidRequestTargetIds.has(p.id));
+  let retryOutcomes = [];
   if (retryableFailedProviders.length && !deadline.expired()) {
     notify('Đang thử lại các nhà cung cấp gặp lỗi…');
-    const retryOutcomes = await Promise.allSettled(
+    // ---------- B7: KHÔNG được trao CÙNG 1 target thay thế cho NHIỀU slot lỗi ----------
+    // BUG CŨ: mỗi slot lỗi tự tính `others` từ cùng một pool rồi lấy `others[0]` — 2 slot lỗi thì
+    // CẢ HAI cùng nhận đúng target D (fan-out vô ích: 2 lệnh gọi AI trùng hệt nhau, và nếu D cũng
+    // hỏng thì hỏng gấp đôi). Ngoài ra `others[0] || failed` còn gọi lại CHÍNH target vừa bị
+    // markFailure (đang cooldown) — đúng thứ B7 cấm.
+    // NAY: `claimedRetryIds` được điền ĐỒNG BỘ (trước mọi `await`) nên mỗi slot lỗi nhận một target
+    // KHÁC NHAU; hết target khả dụng -> bỏ qua slot đó, giữ số candidate hợp lệ hiện có.
+    const claimedRetryIds = new Set(round1Order.map((p) => p.id));
+    retryOutcomes = await Promise.allSettled(
       retryableFailedProviders.map(async (failed) => {
         const others = eligibleInRotationOrder(
-          providers.filter((p) => p.id !== failed.id && !round1Order.includes(p)),
+          providers.filter((p) => p.id !== failed.id && !claimedRetryIds.has(p.id)),
           { requireVision }
         );
-        const replacement = others[0] || failed; // ĐÚNG 1 ứng viên thay thế, không loop toàn bộ pool
+        const replacement = others[0]; // ĐÚNG 1 ứng viên thay thế, không loop toàn bộ pool
+        if (!replacement) throw new Error('Không còn execution target nào khác để thử lại — giữ nguyên các candidate đã thu thập được.');
+        claimedRetryIds.add(replacement.id);
         const t = timeoutFor(20000);
         if (deadline.expired() || t === null) throw new Error('Hết ngân sách thời gian request — bỏ qua thử lại.');
         const startedAt = Date.now();
         try {
-          const text = stripThinkingTags(await replacement.call({ system: variantSystem, messages, maxTokens, timeoutMs: t, deepThinking, signal }));
-          logAttempt({ requestId, stage: 'cross_check_retry', target: replacement, latency: Date.now() - startedAt, status: text ? 'success' : 'empty' });
+          const retryMeta = {};
+          const text = stripThinkingTags(await replacement.call({ system: variantSystem, messages, maxTokens, reasoningBudget, timeoutMs: t, deepThinking, signal, meta: retryMeta }));
+          accumulateUsage(usage, retryMeta.usage);
+          logAttempt({ requestId, stage: 'cross_check_retry', target: replacement, latency: Date.now() - startedAt, status: text ? 'success' : 'empty', usage: retryMeta.usage, answerBudget: maxTokens, reasoningBudget, finishReason: retryMeta.finishReason, retry: true, estimatedOutputTokens: estimateTokens(text || '') });
           if (text) { markSuccess(replacement); return { label: replacement.label, text }; }
         } catch (e) {
-          logAttempt({ requestId, stage: 'cross_check_retry', target: replacement, latency: Date.now() - startedAt, status: 'error', err: e });
+          logAttempt({ requestId, stage: 'cross_check_retry', target: replacement, latency: Date.now() - startedAt, status: 'error', err: e, answerBudget: maxTokens, reasoningBudget, retry: true });
           markFailure(replacement, e);
         }
         throw new Error('Không còn target nào khả dụng để thử lại trong ngân sách thời gian cho phép.');
@@ -282,7 +416,9 @@ async function gatherCrossCheckCandidates(providers, { system, variantSystem, me
 
   // ---------- Vẫn chưa đủ 2 lượt để đối chiếu chéo: dùng chính target còn sống làm thêm 1 lượt ----------
   const survivorTimeout = timeoutFor(15000);
+  let survivorAttempted = false;
   if (candidates.length === 1 && !deadline.expired() && survivorTimeout !== null) {
+    survivorAttempted = true;
     const survivor = providers.find((p) => candidates[0].label === p.label) || providers[0];
     // FIX P1/G (audit): TRƯỚC ĐÂY temperature:0.4 bị áp CỨNG cho MỌI provider ở lượt "góc nhìn khác"
     // này, kể cả Gemini — trái best-practice của Gemini (đặc biệt Gemini 3, khuyến nghị dùng
@@ -290,12 +426,44 @@ async function gatherCrossCheckCandidates(providers, { system, variantSystem, me
     // định cho provider KHÔNG PHẢI Gemini; Gemini dùng default của chính model (không set field này).
     const survivorTemperature = survivor.providerKey === 'gemini' ? undefined : 0.4;
     try {
-      const extra = stripThinkingTags(await survivor.call({ system, messages, maxTokens, temperature: survivorTemperature, timeoutMs: survivorTimeout, deepThinking, signal }));
+      const survivorMeta = {};
+      const extra = stripThinkingTags(await survivor.call({ system, messages, maxTokens, reasoningBudget, temperature: survivorTemperature, timeoutMs: survivorTimeout, deepThinking, signal, meta: survivorMeta }));
+      accumulateUsage(usage, survivorMeta.usage);
       if (extra) { markSuccess(survivor); candidates.push({ label: survivor.label + ' (góc nhìn khác)', text: extra }); }
     } catch (e) { markFailure(survivor, e); /* không còn cách nào khác trong ngân sách — dùng đúng 1 lượt hiện có */ }
   }
 
-  return { candidates, deadline };
+  // ============================================================================================
+  // PARTICIPANT ACCOUNTING THẬT (mục 2/15 audit) — trả lời chính xác "cấu hình N AI thì thực tế bao
+  // nhiêu AI chạy?" bằng số đo THẬT của request này, không phải suy đoán từ UI.
+  // ============================================================================================
+  const replacementTargets = retryOutcomes.filter((r) => r.status === 'fulfilled').length;
+  const startedTargets = round1Order.length + retryOutcomes.length + (survivorAttempted ? 1 : 0);
+  const accounting = {
+    configuredTargets: providers.length,
+    eligibleTargets: eligiblePool.length,
+    selectedTargets: round1Order.length,
+    startedTargets,
+    successfulTargets: candidates.length,
+    failedTargets: failedProviders.length,
+    replacementTargets,
+    // Target eligible nhưng KHÔNG được mời vòng 1 vì pool vượt CROSS_CHECK_SAFETY_CAP — chỉ > 0 khi
+    // safety cap THỰC SỰ có tác dụng, không phải mọi lúc như hard-cap 3 cũ.
+    excludedForSafetyCap: Math.max(0, eligiblePool.length - round1Order.length),
+    degraded: eligiblePool.length <= 1 || candidates.length < 2
+  };
+
+  // Mục 29 audit: debug mode tuỳ chọn — KHÔNG log secret/API key (chỉ id nội bộ + reason code).
+  if (process.env.DEBUG_AI_CROSSCHECK === 'true') {
+    // eslint-disable-next-line no-console
+    console.log('[DEBUG_AI_CROSSCHECK]', JSON.stringify({
+      requestId,
+      accounting,
+      excluded: getEligibilityBreakdown(providers, { requireVision }).filter((e) => !e.eligible)
+    }));
+  }
+
+  return { candidates, deadline, usage, accounting };
 }
 
 /**
@@ -321,6 +489,38 @@ async function gatherCrossCheckCandidates(providers, { system, variantSystem, me
 // NGỪNG thử thêm và báo lỗi ngay thay vì kéo dài vô thời hạn theo số target đã cấu hình.
 // CHỈ dùng làm fallback khi KHÔNG có deadline của caller (mục 4) — xem opts.deadline ở trên.
 const FAILOVER_BUDGET_MS = Number(process.env.FAILOVER_BUDGET_MS) || 65000;
+
+
+// ============================================================================================
+// MỤC 13 — NGÂN SÁCH PHẢI ĐƯỢC TÍNH LẠI CHO ĐÚNG TARGET SẼ GỌI, KỂ CẢ KHI FAILOVER
+// ============================================================================================
+// Bug kiến trúc: route tính MỘT con số budget từ capability của CẢ POOL (`pool.some(supportsThinking)`)
+// rồi truyền y nguyên cho mọi target. Nếu target A có native thinking còn target B thì không, B vẫn
+// nhận đúng `maxTokens`/`reasoningBudget` đã tính cho A — hoặc thừa (B không dùng reasoning nhưng
+// maxTokens đã cộng chỗ cho nó), hoặc thiếu (B có trần output nhỏ hơn). Mỗi client tự gate được
+// FIELD nào gửi đi, nhưng CON SỐ thì không ai tính lại.
+//
+// Nay: caller có thể truyền `args.recomputeForTarget(target)` — một hàm thuần trả về phần args cần
+// GHI ĐÈ cho đúng target đó (thường là {maxTokens, reasoningBudget}). Gọi ở MỌI điểm ngay trước
+// `p.call()`: lượt đầu, mọi lượt failover, mọi nhánh đua tốc độ. Không truyền -> hành vi cũ y nguyên.
+/**
+ * @param {object} args
+ * @param {object} target execution target sắp được gọi
+ * @returns {object} args đã hiệu chỉnh cho target này
+ */
+function argsForTarget(args, target) {
+  if (!args || typeof args.recomputeForTarget !== 'function' || !target) return args;
+  let override;
+  try {
+    override = args.recomputeForTarget(target);
+  } catch (e) {
+    return args; // tính lại hỏng KHÔNG được làm chết lượt gọi — rơi về con số của pool như cũ
+  }
+  if (!override || typeof override !== 'object') return args;
+  // `recomputeForTarget` không bao giờ được đi tiếp xuống client (không phải tham số API).
+  const { recomputeForTarget, ...rest } = { ...args, ...override };
+  return rest;
+}
 
 async function callWithFailover(providers, args, { preferWebSearch = false, requireVision = false, deadline: parentDeadline } = {}) {
   if (!providers || !providers.length) {
@@ -354,9 +554,10 @@ async function callWithFailover(providers, args, { preferWebSearch = false, requ
       // trả finish_reason/stop_reason THẬT ra ngoài mà KHÔNG đổi kiểu trả về (vẫn Promise<string>) —
       // tránh phải sửa mọi nơi đang destructure kết quả p.call() như 1 chuỗi.
       const meta = {};
-      const text = stripThinkingTags(await p.call({ ...args, timeoutMs: callTimeout, meta }));
+      const targetArgs = argsForTarget(args, p);
+      const text = stripThinkingTags(await p.call({ ...targetArgs, timeoutMs: callTimeout, meta }));
       const failoverLatency = Date.now() - attemptStartedAt;
-      logAttempt({ requestId: args.requestId, stage: 'failover', target: p, latency: failoverLatency, status: text ? 'success' : 'empty' });
+      logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'failover', target: p, latency: failoverLatency, status: text ? 'success' : 'empty', usage: meta.usage, answerBudget: targetArgs.maxTokens, reasoningBudget: targetArgs.reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, recovery: !!args.telemetryRecovery, estimatedOutputTokens: estimateTokens(text || '') });
       if (text) {
         markSuccess(p, failoverLatency);
         const realOutNs = meta.usage && Number(meta.usage.outputTokens);
@@ -365,7 +566,7 @@ async function callWithFailover(providers, args, { preferWebSearch = false, requ
           outputTokens: Number.isFinite(realOutNs) && realOutNs > 0 ? realOutNs : estimateTokens(text),
           elapsedMs: failoverLatency
         });
-        return { text, provider: p, tried, finishReason: meta.finishReason || null, interrupted: false, latencyMs: failoverLatency };
+        return { text, provider: p, tried, finishReason: meta.finishReason || null, interrupted: false, latencyMs: failoverLatency, usage: meta.usage || null };
       }
       tried.push({ label: p.label, error: 'Phản hồi rỗng' });
     } catch (err) {
@@ -375,7 +576,7 @@ async function callWithFailover(providers, args, { preferWebSearch = false, requ
       const classification = markFailure(p, err);
       invalidateModelIfNeeded(p, classification);
       lastClassification = classification;
-      logAttempt({ requestId: args.requestId, stage: 'failover', target: p, latency: Date.now() - attemptStartedAt, status: 'error', err });
+      logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'failover', target: p, latency: Date.now() - attemptStartedAt, status: 'error', err, answerBudget: args.maxTokens, reasoningBudget: args.reasoningBudget, recovery: !!args.telemetryRecovery });
       // P0 mục 2: KHÔNG BAO GIỜ lộ err.message thô (có thể chứa chi tiết billing/nội bộ của provider)
       // ra danh sách `tried` (field này đi thẳng vào response client qua errorHandler.js) — luôn dùng
       // sanitizedMessage đã được errorClassifier.js chuẩn hóa, bất kể loại lỗi (không chỉ billing).
@@ -422,7 +623,9 @@ function _resetFastModeStatsForTest() {
  * Gọi 1 target, trả {text, provider} hoặc throw — dùng chung cho single-call và race attempts.
  * Ghi nhận latency thật vào rotationManager (markSuccess(p, latencyMs)) để nuôi isTargetSlow().
  */
-function attemptTarget(p, raceArgs, tried, requestId) {
+function attemptTarget(p, rawRaceArgs, tried, requestId) {
+  // MỤC 13: mỗi nhánh đua cũng phải dùng ngân sách của ĐÚNG target nó gọi.
+  const raceArgs = argsForTarget(rawRaceArgs, p);
   const startedAt = Date.now();
   const meta = {};
   return p.call({ ...raceArgs, meta })
@@ -645,21 +848,29 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
       attemptText += visible;
       onDelta(visible);
     });
-    const filter = createStreamingThinkingFilter((visible) => safetyFilter.feed(visible));
+    // Chuỗi lọc: thinking tag -> nháp lập kế hoạch -> nhãn an toàn -> người dùng.
+    // metaFilter đặt TRƯỚC safetyFilter để `committed` vẫn chỉ bật khi có nội dung THẬT đi tới cuối
+    // chuỗi: lượt gọi chỉ sinh ra nháp kế hoạch sẽ có committed=false và được failover như response rỗng.
+    const metaFilter = createMetaPlanningFilter((visible) => safetyFilter.feed(visible));
+    const filter = createStreamingThinkingFilter((visible) => metaFilter.feed(visible));
     const attemptStartedAt = Date.now();
     try {
       const meta = {};
+      // MỤC 13: ngân sách của ĐÚNG target này (native thinking? trần output bao nhiêu?), không phải
+      // con số tính từ `pool.some(...)` ở route.
+      const streamTargetArgs = argsForTarget(args, p);
       const text = await p.callStream({
-        ...args,
+        ...streamTargetArgs,
         meta,
         onDelta: (piece) => filter.feed(piece)
       });
       filter.flush();
+      metaFilter.flush();
       safetyFilter.flush();
       const visibleText = stripThinkingTags(text);
       if (visibleText || committed) {
         const latency = Date.now() - attemptStartedAt;
-        logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency, status: 'success' });
+        logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'stream', target: p, latency, status: 'success', usage: meta.usage, answerBudget: streamTargetArgs.maxTokens, reasoningBudget: streamTargetArgs.reasoningBudget, providerMaxTokens: meta.providerMaxTokens, finishReason: meta.finishReason, recovery: !!args.telemetryRecovery, estimatedOutputTokens: estimateTokens(visibleText || '') });
         // PHẦN J FIX: TRƯỚC ĐÂY đường streaming gọi `markSuccess(p)` KHÔNG kèm latency, nên toàn bộ
         // telemetry latency/throughput không bao giờ học được gì từ đường code chạy NHIỀU NHẤT
         // (mọi request thật đều là streaming). Nay ghi cả latency (cho isTargetSlow) và throughput
@@ -677,7 +888,7 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
         });
         return {
           text: visibleText, provider: p, tried, finishReason: meta.finishReason || null,
-          interrupted: false, latencyMs: latency
+          interrupted: false, latencyMs: latency, usage: meta.usage || null
         };
       }
       logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'empty' });
@@ -690,7 +901,7 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
         // lấy nốt phần đang nằm trong buffer (trước đây bị mất trắng: nhánh catch không hề gọi
         // filter.flush()/safetyFilter.flush(), nên đoạn văn bản cuối còn đệm trong bộ lọc thinking
         // bị bỏ đi cùng lỗi), rồi trả checkpoint để caller chuyển sang RESUME MODE.
-        try { filter.flush(); safetyFilter.flush(); } catch (e) { /* bộ lọc đã đóng — bỏ qua */ }
+        try { filter.flush(); metaFilter.flush(); safetyFilter.flush(); } catch (e) { /* bộ lọc đã đóng — bỏ qua */ }
         logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'partial_error', err });
         // Người dùng hủy giữa chừng thì KHÔNG phải lỗi provider — không cooldown, không resume.
         if (err && err.cancelled) {
@@ -716,7 +927,7 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
       // mục 4: bị hủy (client disconnect/bấm Dừng) trước khi kịp phát delta nào — dừng ngay, không
       // thử target khác (mọi target khác cũng dùng chung signal, cũng sẽ abort ngay lập tức).
       if (err && err.cancelled) throw err;
-      logAttempt({ requestId: args.requestId, stage: 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'error', err });
+      logAttempt({ requestId: args.requestId, stage: args.telemetryStage || 'stream', target: p, latency: Date.now() - attemptStartedAt, status: 'error', err, answerBudget: args.maxTokens, reasoningBudget: args.reasoningBudget, recovery: !!args.telemetryRecovery });
       const classification = markFailure(p, err);
       invalidateModelIfNeeded(p, classification);
       lastClassification = classification;
@@ -741,8 +952,12 @@ async function streamWithFailover(providers, args, onDelta, { preferWebSearch = 
 }
 
 module.exports = {
-  getActiveProviders, ensureProvidersReady, getRotationHealth, callWithFailover, callFastest, streamWithFailover, shuffle,
+  getActiveProviders, ensureProvidersReady, getRotationHealth, callWithFailover, callFastest, streamWithFailover, shuffle, argsForTarget,
   createDeadline, gatherCrossCheckCandidates, CROSS_CHECK_BUDGET_MS, CROSS_CHECK_MAX_CANDIDATES, pickDiverseCandidates,
+  // FIX (audit cross-check): tách participant count (adaptive, toàn bộ pool) khỏi concurrency window.
+  CROSS_CHECK_SAFETY_CAP, CROSS_CHECK_CONCURRENCY, resolveParticipantCount, mapWithConcurrency,
+  getEligibilityBreakdown,
   safeCallTimeout, MIN_CALL_TIMEOUT_MS,
-  getFastModeStats, _resetFastModeStatsForTest, T_FAST_RACE_THRESHOLD_MS
+  getFastModeStats, _resetFastModeStatsForTest, T_FAST_RACE_THRESHOLD_MS,
+  emptyUsageAccumulator, accumulateUsage, CACHE_READ_DISCOUNT
 };

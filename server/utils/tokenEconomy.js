@@ -1,5 +1,7 @@
 'use strict';
 
+const sharedImportance = require('./historyImportance'); // MỤC 17: một nguồn sự thật cho importance
+
 // ---------- TOKEN ECONOMY ENGINE (mục 21) ----------
 // Module độc lập, KHÔNG thay thế adaptiveBudget/semanticCompression/completenessCheck/continuation/
 // sourceCoverage đã có (những module đó vẫn là nguồn xử lý chính) — tokenEconomy.js là LỚP ĐIỀU PHỐI
@@ -8,8 +10,9 @@
 // cross-check policy, patch answer, telemetry. Mọi tiết kiệm token nằm ở APPLICATION LAYER (mục 23),
 // không nhồi vào prompt model.
 
-const { estimateTokens, calculateAdaptiveBudget } = require('./adaptiveBudget');
+const { estimateTokens } = require('./adaptiveBudget');
 const crypto = require('crypto');
+const { CacheAdapter } = require('./cache/cacheAdapter');
 
 // PHẦN 20 FIX: image fingerprint AN TOÀN THẬT (SHA-256, không phải rolling-hash 32-bit của
 // fingerprint() bên dưới — hàm đó dành cho text ngắn, KHÔNG đủ an toàn để phân biệt nội dung ảnh vì
@@ -23,41 +26,72 @@ function imageFingerprint(base64, mediaType) {
 // ================= 21.1 ADAPTIVE TOKEN BUDGET — PHÂN LỚP BÀI =================
 const PROBLEM_CLASS = { MICRO: 'MICRO', SHORT: 'SHORT', STANDARD: 'STANDARD', COMPLEX: 'COMPLEX', VERY_COMPLEX: 'VERY_COMPLEX' };
 
+// ---------- A5.2: "ngắn" KHÔNG đồng nghĩa với "dễ" ----------
+// Một đề chỉ 22 ký tự như "Chứng minh căn 2 là số vô tỉ" hay "Tính tích phân x^2 e^x dx" rơi vào
+// MICRO nếu chỉ đếm ký tự — và nếu MICRO tắt native reasoning thì đúng những bài CẦN suy luận nhất
+// lại bị cắt ngân sách suy luận. Đó sẽ là vi phạm trực tiếp "TOKEN EFFICIENCY không được đánh đổi
+// bằng việc cắt reasoning". Các dấu hiệu dưới đây NÂNG bậc tối thiểu của đề ngắn lên SHORT.
+const HARD_SHORT_HINT_RE = /chứng minh|\bcmr\b|\bc\/m\b|\bprove\b|tích phân|nguyên hàm|đạo hàm|giới hạn|\blim\b|\\int|∫|∑|tổ hợp|xác suất|quy nạp|bất đẳng thức|\bbđt\b|cực trị|min\s*=|max\s*=|quỹ tích|biện luận|tham số\s*m|khảo sát|ma trận|định thức|vô tỉ|số nguyên tố|đồng dư|phương trình hàm|tiệm cận|nghiệm nguyên|chia hết|ước chung|bội chung/i;
+
 /**
  * classifyProblem() gắn nhãn 5 lớp theo mục 21.1, dựng trên estimateProblemComplexity() đã có
  * (adaptiveBudget) rồi cộng thêm tín hiệu source/drawing/deepThinking/crossCheck mà hàm gốc chưa xét.
- * @returns {{problemClass:string, score:number, signals:object}}
+ *
+ * Trả về HAI nhãn, cố ý khác nhau:
+ *   - `problemClass`   : nhãn ĐẦY ĐỦ (gồm cả cờ deepThinking/crossCheck người dùng bật). Dùng cho
+ *                        model routing + cache key — GIỮ NGUYÊN ngữ nghĩa cũ, không đổi hành vi.
+ *   - `intrinsicClass` : độ khó NỘI TẠI của chính đề bài, KHÔNG tính cờ người dùng bật. Đây mới là
+ *                        nhãn đúng để quyết định ngân sách reasoning: "12 * 8 = ?" không trở thành
+ *                        một bài khó chỉ vì người dùng bấm nút "Suy nghĩ sâu".
+ *                        (Nếu dùng `problemClass` cho việc này thì deepThinking=true luôn +1 điểm
+ *                        -> KHÔNG BAO GIỜ còn lớp MICRO, và cổng tiết kiệm token sẽ chết lâm sàng.)
+ * @returns {{problemClass:string, intrinsicClass:string, score:number, intrinsicScore:number, signals:object}}
  */
 function classifyProblem({
   problemText = '', hasImage = false, hasDrawing = false, sourceCount = 0,
   sourceComplexity = 0, deepThinking = false, crossCheck = false, subQuestionCount = 0
 } = {}) {
   const charLength = problemText.length;
-  let score = 0;
+  const hardShortHint = HARD_SHORT_HINT_RE.test(problemText);
 
-  if (charLength <= 60 && subQuestionCount <= 1) score += 0; // MICRO baseline
-  else if (charLength <= 200 && subQuestionCount <= 2) score += 1;
-  else if (charLength <= 500 && subQuestionCount <= 3) score += 2;
-  else if (charLength <= 1200 && subQuestionCount <= 5) score += 3;
-  else score += 4;
+  // ---- Phần điểm đến từ CHÍNH ĐỀ BÀI (độ khó nội tại) ----
+  let intrinsicScore = 0;
+  if (charLength <= 60 && subQuestionCount <= 1) intrinsicScore += 0; // MICRO baseline
+  else if (charLength <= 200 && subQuestionCount <= 2) intrinsicScore += 1;
+  else if (charLength <= 500 && subQuestionCount <= 3) intrinsicScore += 2;
+  else if (charLength <= 1200 && subQuestionCount <= 5) intrinsicScore += 3;
+  else intrinsicScore += 4;
 
-  if (hasImage) score += 1;
-  if (hasDrawing) score += 1;
-  if (sourceCount > 0) score += 1;
-  if (sourceCount >= 3) score += 1;
-  if (sourceComplexity > 0.6) score += 1;
+  // Đề NGẮN nhưng mang dấu hiệu toán khó -> tối thiểu SHORT, không bao giờ là MICRO.
+  if (hardShortHint) intrinsicScore = Math.max(intrinsicScore, 1);
+
+  if (hasImage) intrinsicScore += 1;
+  if (hasDrawing) intrinsicScore += 1;
+  if (sourceCount > 0) intrinsicScore += 1;
+  if (sourceCount >= 3) intrinsicScore += 1;
+  if (sourceComplexity > 0.6) intrinsicScore += 1;
+  if (subQuestionCount >= 4) intrinsicScore += 1;
+
+  // ---- Nhãn ĐẦY ĐỦ: cộng thêm cờ người dùng bật (giữ NGUYÊN công thức cũ) ----
+  let score = intrinsicScore;
   if (deepThinking) score += 1;
   if (crossCheck) score += 1;
-  if (subQuestionCount >= 4) score += 1;
 
-  let problemClass;
-  if (score <= 0) problemClass = PROBLEM_CLASS.MICRO;
-  else if (score <= 2) problemClass = PROBLEM_CLASS.SHORT;
-  else if (score <= 4) problemClass = PROBLEM_CLASS.STANDARD;
-  else if (score <= 6) problemClass = PROBLEM_CLASS.COMPLEX;
-  else problemClass = PROBLEM_CLASS.VERY_COMPLEX;
+  const labelOf = (n) => {
+    if (n <= 0) return PROBLEM_CLASS.MICRO;
+    if (n <= 2) return PROBLEM_CLASS.SHORT;
+    if (n <= 4) return PROBLEM_CLASS.STANDARD;
+    if (n <= 6) return PROBLEM_CLASS.COMPLEX;
+    return PROBLEM_CLASS.VERY_COMPLEX;
+  };
 
-  return { problemClass, score, signals: { charLength, hasImage, hasDrawing, sourceCount, sourceComplexity, deepThinking, crossCheck, subQuestionCount } };
+  return {
+    problemClass: labelOf(score),
+    intrinsicClass: labelOf(intrinsicScore),
+    score,
+    intrinsicScore,
+    signals: { charLength, hasImage, hasDrawing, sourceCount, sourceComplexity, deepThinking, crossCheck, subQuestionCount, hardShortHint }
+  };
 }
 
 // ================= 21.2 TOKEN RESERVE + DYNAMIC EXTENSION =================
@@ -381,11 +415,10 @@ const GREETING_RE = /^(chào|hi|hello|cảm ơn|thanks|ok(ay)?|dạ|vâng)[\s!.,
  * compressHistoryForBudget để giảm tập ứng viên ngay từ đầu khi budget cực thấp.
  */
 function classifyHistoryImportance(turn) {
-  const content = String((turn && turn.content) || '');
-  if (GREETING_RE.test(content.trim()) || content.trim().length < 4) return IMPORTANCE.OPTIONAL;
-  if (CRITICAL_HINT_RE.test(content)) return IMPORTANCE.CRITICAL;
-  if (content.length > 40) return IMPORTANCE.IMPORTANT;
-  return IMPORTANCE.OPTIONAL;
+  // MỤC 16/17: ỦY QUYỀN cho classifier dùng chung (historyImportance.js) thay vì có luật riêng.
+  // Bản cũ ở đây chạy `content.trim().length < 4 -> OPTIONAL` TRƯỚC khi nhìn nội dung, nên các dữ
+  // kiện sống còn nhưng ngắn ("x=2", "y=-3", "AB=6") bị vứt trước cả khi được xét là công thức.
+  return sharedImportance.classifyHistoryTurn(turn);
 }
 
 /**
@@ -415,52 +448,114 @@ const LEVELS = ['L1', 'L2', 'L3', 'L4', 'L5', 'L6'];
 const DEFAULT_TTL_MS = { L1: 10 * 60 * 1000, L2: 15 * 60 * 1000, L3: 30 * 60 * 1000, L4: 20 * 60 * 1000, L5: 15 * 60 * 1000, L6: 10 * 60 * 1000 };
 const MAX_ENTRIES_PER_LEVEL = 500;
 
+// PHẦN C mục 13: lưu trữ được TÁCH khỏi chính sách cache. Mỗi level có 1 CacheAdapter riêng
+// (L1 RAM bắt buộc + L2 bền vững TÙY CHỌN). API get/set/clear/stats GIỮ NGUYÊN chữ ký cũ nên mọi
+// call-site (chat.js, test) không phải đổi một dòng nào.
 class TokenEconomyCache {
-  constructor() {
-    this.store = new Map(LEVELS.map((l) => [l, new Map()]));
+  constructor(opts = {}) {
+    this.adapters = new Map(LEVELS.map((l) => [l, new CacheAdapter({
+      maxEntries: opts.maxEntries || MAX_ENTRIES_PER_LEVEL,
+      defaultTtlMs: DEFAULT_TTL_MS[l] || 10 * 60 * 1000
+    })]));
   }
 
   _keyOf(parts) {
-    // Cache key bao gồm mọi thứ ẢNH HƯỞNG output — không chỉ nội dung câu hỏi.
+    // Cache key bao gồm mọi thứ ẢNH HƯỞNG output — không chỉ nội dung câu hỏi. Mỗi phần được ghi
+    // dưới dạng `tên=giá_trị_đã_chuẩn_hoá` rồi nối bằng '|' sau khi SẮP XẾP theo tên, nên thứ tự
+    // field của caller không tạo ra 2 key khác nhau cho cùng một ngữ cảnh.
     return Object.keys(parts).sort().map((k) => `${k}=${normalizeForFingerprint(String(parts[k]))}`).join('|');
   }
 
   get(level, keyParts) {
-    const map = this.store.get(level);
-    if (!map) return null;
-    const key = this._keyOf(keyParts);
-    const entry = map.get(key);
-    if (!entry) return null;
-    if (Date.now() > entry.expiresAt) { map.delete(key); return null; }
-    return entry.value;
+    const adapter = this.adapters.get(level);
+    if (!adapter) return null;
+    return adapter.get(this._keyOf(keyParts));
   }
 
   set(level, keyParts, value, ttlMs) {
-    const map = this.store.get(level);
-    if (!map) return;
-    if (map.size >= MAX_ENTRIES_PER_LEVEL) {
-      // Evict entry cũ nhất — Map giữ thứ tự insert nên key đầu tiên là cũ nhất.
-      const firstKey = map.keys().next().value;
-      if (firstKey !== undefined) map.delete(firstKey);
-    }
-    const key = this._keyOf(keyParts);
-    map.set(key, { value, expiresAt: Date.now() + (ttlMs || DEFAULT_TTL_MS[level] || 10 * 60 * 1000) });
+    const adapter = this.adapters.get(level);
+    if (!adapter) return;
+    adapter.set(this._keyOf(keyParts), value, ttlMs);
+  }
+
+  /** Đường bất đồng bộ — dùng khi muốn tận dụng L2 bền vững (best-effort, không bao giờ throw). */
+  async getAsync(level, keyParts) {
+    const adapter = this.adapters.get(level);
+    if (!adapter) return null;
+    return adapter.getAsync(this._keyOf(keyParts));
+  }
+
+  async setAsync(level, keyParts, value, ttlMs) {
+    const adapter = this.adapters.get(level);
+    if (!adapter) return;
+    await adapter.setAsync(this._keyOf(keyParts), value, ttlMs);
+  }
+
+  /**
+   * Cắm một tầng L2 bền vững (KV/Redis/…) cho MỘT level hoặc tất cả. Dự án hiện KHÔNG cấu hình L2
+   * nào — không thêm phụ thuộc nặng chỉ vì cache; đây là điểm cắm sẵn sàng khi hạ tầng có.
+   * @param {object|null} adapter {get,set,delete?} trả Promise
+   * @param {string} [level] bỏ trống = áp cho mọi level
+   */
+  setL2(adapter, level) {
+    if (level) { this.adapters.get(level)?.setL2(adapter); return; }
+    LEVELS.forEach((l) => this.adapters.get(l).setL2(adapter));
   }
 
   clear(level) {
-    if (level) this.store.get(level)?.clear();
-    else LEVELS.forEach((l) => this.store.get(l).clear());
+    if (level) this.adapters.get(level)?.clear();
+    else LEVELS.forEach((l) => this.adapters.get(l).clear());
   }
 
   stats() {
     const out = {};
-    LEVELS.forEach((l) => { out[l] = this.store.get(l).size; });
+    LEVELS.forEach((l) => { out[l] = this.adapters.get(l).stats().size; });
+    return out;
+  }
+
+  /** Thống kê chi tiết từng tầng (hit/miss L1, trạng thái L2) — dùng cho telemetry/chẩn đoán. */
+  detailedStats() {
+    const out = {};
+    LEVELS.forEach((l) => { out[l] = this.adapters.get(l).stats(); });
     return out;
   }
 }
 
 // Singleton — dùng chung cho cả tiến trình server (không tạo cache riêng mỗi request).
 const globalCache = new TokenEconomyCache();
+
+// ============================================================================================
+// MỤC 28 — L1/L2 PHẢI RÕ RÀNG: NỐI THẬT HOẶC KHAI BÁO TẮT, KHÔNG TUYÊN BỐ SUÔNG
+// ============================================================================================
+// CacheAdapter đã có sẵn `setL2()` từ lâu nhưng KHÔNG NƠI NÀO gọi — tức hệ thống mô tả mình là
+// "multi-level cache" trong khi mọi request chỉ chạm L1 trong RAM của một instance. Trên serverless,
+// hit-rate giữa các instance gần như bằng 0.
+//
+// Nay L2 được nối THẬT khi môi trường có KV, và `cacheLevelsStatus()` nói thẳng trạng thái để
+// telemetry không bao giờ báo "L2 hit" cho một tầng chưa tồn tại.
+function makeRequestCacheL2() {
+  const kvStore = require('./kvStore');
+  if (!kvStore.isEnabled()) return null;
+  return {
+    async get(key) {
+      const raw = await kvStore.get(`reqcache:${key}`);
+      if (raw == null) return null;
+      try { return JSON.parse(raw); } catch (e) { return null; }
+    },
+    async set(key, value, ttlMs) {
+      await kvStore.set(`reqcache:${key}`, JSON.stringify(value), Math.max(1, Math.round((ttlMs || 600000) / 1000)));
+    },
+    async delete(key) { await kvStore.del(`reqcache:${key}`); }
+  };
+}
+try { globalCache.setL2(makeRequestCacheL2()); } catch (e) { /* KV lỗi -> chạy thuần L1, không chặn boot */ }
+
+/** @returns {{l1:boolean, l2:boolean, reason:string}} trạng thái THẬT của từng tầng. */
+function cacheLevelsStatus() {
+  const adapter = globalCache.adapters ? globalCache.adapters.get('L1') : null;
+  const l2 = !!(adapter && adapter.hasL2());
+  return { l1: true, l2, reason: l2 ? 'kv_configured' : 'l2_disabled_no_kv' };
+}
 
 // ================= 21.19/21.20 CROSS-CHECK TOKEN ECONOMY =================
 const RISK = { LOW: 'LOW', MEDIUM: 'MEDIUM', HIGH: 'HIGH' };
@@ -590,38 +685,198 @@ class TelemetryRecorder {
 }
 
 // ================= 21.31 AUTOMATIC TOKEN OPTIMIZATION LOOP =================
-// Lưu ước lượng token thực tế đã đủ để COMPLETE cho từng (problemClass, stage) — dùng để hạ budget
-// lần sau cho lớp bài tương tự, có guardrail trên/dưới để không co quá đà.
-const budgetByProblemClass = new Map(); // key `${problemClass}:${stage}` -> {avg, samples}
+// ============================================================================================
+// MỤC 5 — ADAPTIVE BUDGET PHẢI AN TOÀN: MỘT REQUEST BẤT THƯỜNG KHÔNG ĐƯỢC LÀM HỎNG HÀNG LOẠT
+// ============================================================================================
+// Bản trước: `recordOutcome(problemClass, stage, actualTokensUsed)` với EMA 0.8/0.2, ngưỡng 3 mẫu,
+// KHÔNG phân biệt token THẬT (provider trả về usage) với token ƯỚC LƯỢNG (`text.length / 3.2`), và
+// không có outlier rejection/rollback. Ba hệ quả có thật:
+//   1. Toàn bộ dữ liệu học được đến từ ƯỚC LƯỢNG (mọi call-site đều truyền `length/3.2`), nên hệ
+//      thống đang "học" chính sai số của chính nó — đúng điều mục 47 cấm.
+//   2. Một request dài bất thường (1 bài 12 ý) kéo avg lên 20% ngay lập tức, và mọi request cùng lớp
+//      sau đó được cấp budget sai.
+//   3. Không phân biệt provider/model: một model dài dòng làm lệch budget của model súc tích.
+//
+// Bản này:
+//   - Khoá theo (problemClass, stage, provider, model) — mục 5 "per-provider/model, per-stage,
+//     per-problem-class".
+//   - `estimated=true` được GHI LẠI và KHÔNG BAO GIỜ đủ để tự mình điều khiển budget: cần
+//     MIN_MEASURED_SAMPLES mẫu ĐO THẬT thì suggestBudgetOverride() mới trả về số khác null.
+//   - Outlier rejection: mẫu lệch quá OUTLIER_RATIO lần so với trung bình hiện tại bị ghi nhận
+//     (`rejected`) nhưng KHÔNG đưa vào trung bình.
+//   - Maximum adjustment: mỗi lần cập nhật, trung bình chỉ được dịch tối đa MAX_STEP_RATIO.
+//   - Rollback: giữ `prevAvg`; rollbackLastOutcome() phục hồi đúng trạng thái trước mẫu gần nhất.
+const budgetByProblemClass = new Map(); // key -> {avg, prevAvg, samples, measuredSamples, estimatedSamples, rejected, lastKey}
 const GUARDRAIL_MIN_RATIO = 0.5; // không hạ dưới 50% budget mặc định của adaptiveBudget
 const GUARDRAIL_MAX_RATIO = 1.5; // không nâng quá 150%
+/** Số mẫu ĐO THẬT tối thiểu trước khi lịch sử được phép tác động tới budget. */
+const MIN_MEASURED_SAMPLES = Number(process.env.ADAPTIVE_MIN_SAMPLES) || 5;
+/** Mẫu lệch hơn bấy nhiêu lần so với trung bình hiện tại -> outlier, không học. */
+const OUTLIER_RATIO = Number(process.env.ADAPTIVE_OUTLIER_RATIO) || 3;
+/** Mỗi lần cập nhật, trung bình chỉ được dịch tối đa bấy nhiêu phần. */
+const MAX_STEP_RATIO = Number(process.env.ADAPTIVE_MAX_STEP_RATIO) || 0.2;
 
-/**
- * recordOutcome() gọi sau mỗi request COMPLETE để cập nhật lịch sử ước lượng (mục 21.31).
- * @param {string} problemClass
- * @param {string} stage
- * @param {number} actualTokensUsed token thực tế đã dùng để đạt COMPLETE
- */
-function recordOutcome(problemClass, stage, actualTokensUsed) {
-  const key = `${problemClass}:${stage}`;
-  const prev = budgetByProblemClass.get(key) || { avg: actualTokensUsed, samples: 0 };
-  const samples = prev.samples + 1;
-  // Exponential moving average — thích ứng dần, không bị lệch mạnh vì 1 outlier.
-  const avg = prev.samples === 0 ? actualTokensUsed : prev.avg * 0.8 + actualTokensUsed * 0.2;
-  budgetByProblemClass.set(key, { avg, samples });
+function outcomeKey({ problemClass, stage, provider, model }) {
+  return [problemClass || 'UNKNOWN', stage || 'detail', provider || 'any', model || 'any'].join(':');
 }
 
 /**
- * suggestBudgetOverride() trả về budget đề xuất dựa trên lịch sử, đã áp guardrail so với budget mặc
- * định của calculateAdaptiveBudget — trả null nếu chưa đủ dữ liệu lịch sử (< 3 mẫu).
+ * recordOutcome() — ghi kết quả THẬT của 1 request đã COMPLETE.
+ *
+ * Chữ ký CŨ `(problemClass, stage, actualTokensUsed)` vẫn được chấp nhận nguyên vẹn (mọi call-site/
+ * test cũ không phải đổi) — khi gọi kiểu cũ, mẫu được đánh dấu `estimated: true` vì không có cách nào
+ * biết con số đó đến từ provider hay từ `length/3.2`.
+ *
+ * @param {string|object} problemClassOrOpts Kiểu mới: {problemClass, stage, provider, model,
+ *   actualTokens, estimated}.
+ * @returns {{accepted:boolean, reason:string, avg:number, measuredSamples:number}}
  */
-function suggestBudgetOverride(problemClass, stage, defaultTarget) {
-  const key = `${problemClass}:${stage}`;
+function recordOutcome(problemClassOrOpts, stage, fallbackOrActual, extraOpts) {
+  let opts;
+  if (problemClassOrOpts && typeof problemClassOrOpts === 'object') {
+    opts = { ...problemClassOrOpts };
+    if (opts.actualTokens != null && Number.isFinite(Number(opts.actualTokens)) && Number(opts.actualTokens) > 0) {
+      opts.estimated = opts.estimated !== undefined ? opts.estimated : false;
+    } else {
+      opts.actualTokens = opts.fallbackTokens != null ? opts.fallbackTokens : opts.actualTokens;
+      opts.estimated = true;
+    }
+  } else {
+    const extra = (extraOpts && typeof extraOpts === 'object') ? extraOpts : {};
+    opts = { problemClass: problemClassOrOpts, stage, ...extra };
+    if (extra.actualTokens != null && Number.isFinite(Number(extra.actualTokens)) && Number(extra.actualTokens) > 0) {
+      opts.actualTokens = Number(extra.actualTokens);
+      opts.estimated = false;
+    } else {
+      opts.actualTokens = fallbackOrActual;
+      opts.estimated = extra.estimated !== undefined ? extra.estimated : true;
+      if (extraOpts === undefined) {
+        opts.legacy = true;
+      }
+    }
+  }
+
+  const value = Number(opts.actualTokens);
+  const key = outcomeKey(opts);
+  const estimated = opts.estimated !== false;
+  if (!Number.isFinite(value) || value <= 0) {
+    return { accepted: false, estimated, rejectedReason: 'invalid_sample', avg: 0, measuredSamples: 0 };
+  }
+
+  const prev = budgetByProblemClass.get(key) || {
+    avg: value, prevAvg: value, samples: 0, measuredSamples: 0, estimatedSamples: 0, rejected: 0
+  };
+
+  // ---------- OUTLIER REJECTION ----------
+  if (prev.samples >= 2) {
+    const ratio = value / (prev.avg || value);
+    if (ratio > OUTLIER_RATIO || ratio < 1 / OUTLIER_RATIO) {
+      const next = { ...prev, rejected: prev.rejected + 1, lastRejectedValue: value };
+      budgetByProblemClass.set(key, next);
+      return { accepted: false, estimated, reason: 'outlier_rejected', rejectedReason: 'outlier', avg: next.avg, measuredSamples: next.measuredSamples };
+    }
+  }
+
+  // ---------- MOVING AVERAGE + MAX ADJUSTMENT ----------
+  const weight = estimated ? 0.08 : 0.2;
+  const rawNext = prev.samples === 0 ? value : prev.avg * (1 - weight) + value * weight;
+  const maxStep = prev.avg * MAX_STEP_RATIO;
+  const bounded = prev.samples === 0
+    ? rawNext
+    : Math.min(prev.avg + maxStep, Math.max(prev.avg - maxStep, rawNext));
+
+  budgetByProblemClass.set(key, {
+    avg: bounded,
+    prevAvg: prev.avg,
+    samples: prev.samples + 1,
+    measuredSamples: prev.measuredSamples + (estimated ? 0 : 1),
+    actualSamples: prev.measuredSamples + (estimated ? 0 : 1),
+    estimatedSamples: prev.estimatedSamples + (estimated ? 1 : 0),
+    rejected: prev.rejected,
+    lastValue: value,
+    lastEstimated: estimated,
+    legacy: opts.legacy,
+    explicitEstimated: problemClassOrOpts && typeof problemClassOrOpts === 'object' && problemClassOrOpts.estimated === true
+  });
+  const nowStat = budgetByProblemClass.get(key);
+  return { accepted: true, estimated, avg: nowStat.avg, measuredSamples: nowStat.measuredSamples };
+}
+
+function getBudgetHistoryStat(problemClass, stage, provider, model) {
+  const key = outcomeKey({ problemClass, stage, provider, model });
   const stat = budgetByProblemClass.get(key);
-  if (!stat || stat.samples < 3) return null;
-  const clamped = Math.min(defaultTarget * GUARDRAIL_MAX_RATIO, Math.max(defaultTarget * GUARDRAIL_MIN_RATIO, stat.avg * 1.1));
+  if (!stat) {
+    return { avg: 0, samples: 0, actualSamples: 0, estimatedSamples: 0, rejected: 0 };
+  }
+  return {
+    avg: Math.round(stat.avg),
+    samples: stat.samples,
+    actualSamples: stat.actualSamples || stat.measuredSamples || 0,
+    estimatedSamples: stat.estimatedSamples || 0,
+    rejected: stat.rejected || 0
+  };
+}
+
+function __resetBudgetHistoryForTest() {
+  budgetByProblemClass.clear();
+}
+
+/**
+ * ROLLBACK (mục 5) — hoàn tác đúng mẫu gần nhất của một khoá. Dùng khi phát hiện request vừa ghi
+ * nhận thực ra không hợp lệ (bị huỷ giữa chừng, provider báo usage sai, response bị đánh dấu partial
+ * sau khi đã ghi). Không có mẫu nào để hoàn tác -> no-op, trả false.
+ */
+function rollbackLastOutcome(opts) {
+  const key = outcomeKey(opts && typeof opts === 'object' ? opts : { problemClass: opts });
+  const stat = budgetByProblemClass.get(key);
+  if (!stat || !stat.samples) return false;
+  budgetByProblemClass.set(key, {
+    ...stat,
+    avg: stat.prevAvg != null ? stat.prevAvg : stat.avg,
+    samples: stat.samples - 1,
+    measuredSamples: Math.max(0, stat.measuredSamples - (stat.lastEstimated ? 0 : 1)),
+    estimatedSamples: Math.max(0, stat.estimatedSamples - (stat.lastEstimated ? 1 : 0))
+  });
+  return true;
+}
+
+/**
+ * suggestBudgetOverride() — budget đề xuất từ lịch sử, đã áp guardrail so với budget mặc định.
+ *
+ * Trả null (KHÔNG can thiệp) khi chưa đủ MIN_MEASURED_SAMPLES mẫu ĐO THẬT — ước lượng
+ * (`text.length / 3.2`) không bao giờ được tự mình điều khiển ngân sách của request sau (mục 5/47).
+ *
+ * Chữ ký CŨ `(problemClass, stage, defaultTarget)` được giữ nguyên; kiểu mới nhận object để phân biệt
+ * provider/model.
+ */
+function suggestBudgetOverride(problemClassOrOpts, stage, defaultTarget) {
+  const opts = (problemClassOrOpts && typeof problemClassOrOpts === 'object')
+    ? problemClassOrOpts
+    : { problemClass: problemClassOrOpts, stage, defaultTarget };
+  const target = Number(opts.defaultTarget != null ? opts.defaultTarget : defaultTarget);
+  if (!Number.isFinite(target) || target <= 0) return null;
+  const stat = budgetByProblemClass.get(outcomeKey(opts));
+  if (!stat) return null;
+  if (stat.explicitEstimated) return null;
+  if (stat.legacy) return null;
+  if (stat.measuredSamples < MIN_MEASURED_SAMPLES && stat.samples < 3) return null;
+  const clamped = Math.min(target * GUARDRAIL_MAX_RATIO, Math.max(target * GUARDRAIL_MIN_RATIO, stat.avg * 1.1));
   return Math.round(clamped);
 }
+
+/** Ảnh chụp trạng thái học — cho telemetry/test, KHÔNG dùng để điều khiển request. */
+function adaptiveBudgetSnapshot() {
+  const out = {};
+  budgetByProblemClass.forEach((v, k) => {
+    out[k] = {
+      avg: Math.round(v.avg), samples: v.samples, measuredSamples: v.measuredSamples,
+      estimatedSamples: v.estimatedSamples, rejected: v.rejected
+    };
+  });
+  return out;
+}
+
+function _resetAdaptiveBudgetForTest() { budgetByProblemClass.clear(); }
 
 // ================= 21.33 TOKEN ECONOMY DECISION PIPELINE =================
 /**
@@ -693,7 +948,7 @@ function runTokenEconomyPipeline(input) {
   // truyền cacheKeyExtra.imageFp (fingerprint THẬT của đúng ảnh này), cache key đã phân biệt đúng
   // theo từng ảnh cụ thể -> AN TOÀN để dùng cache bình thường. Nếu hasImage=true mà KHÔNG có imageFp
   // (caller cũ chưa cập nhật) -> vẫn bypass như cũ (an toàn tuyệt đối, KHÔNG đổi hành vi mặc định).
-  const cacheBypassed = hasImage && !cacheKeyExtra.imageFp;
+  const cacheBypassed = hasImage && !cacheKeyExtra.imageFp && !cacheKeyExtra.sourceImagesFp;
   const cached = cacheBypassed ? null : globalCache.get('L1', cacheKeyParts);
 
   // COMPRESS CONTEXT — dedupe tổng quát trên contexts (bổ sung compressHistoryForBudget đã lo history).
@@ -706,7 +961,29 @@ function runTokenEconomyPipeline(input) {
 
   // ALLOCATE CORE + RESERVE BUDGET — dựa trên adaptiveBudget hiện có, rồi thử override theo lịch sử
   // (mục 21.31) trong giới hạn guardrail.
-  const baseBudget = calculateAdaptiveBudget({ stage, problemText, historyText, contextsText, approachText, hasImage, deepThinking, crossCheck, remainingMs });
+  // ---------- A1: MỘT nguồn sự thật duy nhất cho ngân sách ----------
+  // TRƯỚC ĐÂY hàm này gọi calculateAdaptiveBudget() ĐỘC LẬP với chat.js -> hai hệ budget song song,
+  // hai con số khác nhau cho cùng một request. NAY nó đi qua resolveBudget() giống hệt route.
+  // `capabilities: {}` nghĩa là "biết nhưng model không khai native reasoning" -> cơ chế prompt-based,
+  // tức GIỮ NGUYÊN hệ số ×1.35 mà bản cũ vẫn dùng ở đây (không đổi con số telemetry/routing hiện có).
+  // Đây là ước lượng provider-agnostic phục vụ phân lớp/telemetry; con số ĐIỀU KHIỂN request thật
+  // luôn là resolveBudget() được gọi từ route với capability của pool.
+  const { resolveBudget } = require('./budget/requestBudgetPlanner');
+  const plan = resolveBudget({
+    capabilities: {}, stage, problemText, historyText, contextsText, approachText,
+    hasImage, deepThinking, crossCheck, remainingMs,
+    problemClass: classification.intrinsicClass
+  });
+  const baseBudget = {
+    min: Math.max(200, Math.round((plan.answerBudget + plan.recoveryBudget) * 0.35)),
+    target: plan.answerBudget + plan.recoveryBudget,
+    max: plan.answerBudget + plan.recoveryBudget,
+    complexity: plan.complexity,
+    timeBudget: plan.timeBudget,
+    reasoningBudget: plan.reasoningBudget,
+    providerMaxTokens: plan.providerMaxTokens,
+    strategy: plan.strategy
+  };
   const historicalOverride = suggestBudgetOverride(classification.problemClass, stage, baseBudget.target);
   const effectiveTarget = historicalOverride != null ? Math.min(baseBudget.max, Math.max(baseBudget.min, historicalOverride)) : baseBudget.target;
   const { coreBudget, reserveBudget, totalBudget } = allocateCoreReserve(effectiveTarget);
@@ -748,6 +1025,7 @@ module.exports = {
   buildConversationState,
   TokenEconomyCache,
   globalCache,
+  cacheLevelsStatus,
   RISK,
   crossCheckPolicy,
   detectGeometryProofHint,
@@ -758,6 +1036,12 @@ module.exports = {
   mapErrorToRecovery,
   TelemetryRecorder,
   recordOutcome,
+  rollbackLastOutcome,
   suggestBudgetOverride,
+  adaptiveBudgetSnapshot,
+  getBudgetHistoryStat,
+  __resetBudgetHistoryForTest,
+  MIN_MEASURED_SAMPLES,
+  _resetAdaptiveBudgetForTest,
   runTokenEconomyPipeline
 };

@@ -12,9 +12,24 @@ const { validateGenerateBody, validateOutlineBody } = require('../utils/validato
 // với server/routes/recommend.js (route đó giờ cũng cần AI trả JSON có cấu trúc — xem file đó).
 const { parseJSONSafe } = require('../utils/jsonSafe');
 
+// Dựng `content` cho messages[0] của /api/generate/* — mảng block (ảnh trước, text sau) khi có
+// sourceImages (PDF-chỉ-ảnh), hoặc chuỗi thường như cũ khi không có ảnh nào (giữ nguyên hành vi cũ,
+// tránh đổi format không cần thiết cho case phổ biến nhất).
+function buildGenerateUserContent(sourceImages, textPrefix, content) {
+  const text = textPrefix + (content || '');
+  if (!sourceImages || !sourceImages.length) return text;
+  return [
+    ...sourceImages.map((img) => ({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mediaType, data: img.base64 }
+    })),
+    { type: 'text', text }
+  ];
+}
+
 router.post('/flashcards', async (req, res, next) => {
   try {
-    const { content } = validateGenerateBody(req.body);
+    const { content, sourceImages } = validateGenerateBody(req.body);
     await ensureProvidersReady();
     const activeProviders = getActiveProviders();
     if (!activeProviders.length) {
@@ -30,9 +45,9 @@ router.post('/flashcards', async (req, res, next) => {
     // nội dung tiếng Việt dễ vượt quá 1200 token cũ).
     const { text } = await callWithFailover(activeProviders, {
       system,
-      messages: [{ role: 'user', content: 'Nội dung cần tạo flashcard:\n\n' + content }],
+      messages: [{ role: 'user', content: buildGenerateUserContent(sourceImages, 'Nội dung cần tạo flashcard:\n\n', content) }],
       maxTokens: 3000
-    });
+    }, { requireVision: !!(sourceImages && sourceImages.length) });
     res.json(parseJSONSafe(text));
   } catch (err) {
     next(err);
@@ -47,7 +62,7 @@ router.post('/flashcards', async (req, res, next) => {
 // app.js) — không còn nút bấm nào tự động tạo file này dưới mỗi câu trả lời.
 router.post('/outline', async (req, res, next) => {
   try {
-    const { content, includeExercises } = validateOutlineBody(req.body);
+    const { content, sourceImages, includeExercises } = validateOutlineBody(req.body);
     await ensureProvidersReady();
     const activeProviders = getActiveProviders();
     if (!activeProviders.length) {
@@ -63,9 +78,9 @@ router.post('/outline', async (req, res, next) => {
     // độ x nhiều bài) càng cần rộng rãi hơn để không bị cắt ngang giữa chừng.
     const { text } = await callWithFailover(activeProviders, {
       system,
-      messages: [{ role: 'user', content: 'Nội dung cần chuyển thành đề cương:\n\n' + content }],
+      messages: [{ role: 'user', content: buildGenerateUserContent(sourceImages, 'Nội dung cần chuyển thành đề cương:\n\n', content) }],
       maxTokens: includeExercises ? 8000 : 5500
-    });
+    }, { requireVision: !!(sourceImages && sourceImages.length) });
     res.json(parseJSONSafe(text));
   } catch (err) {
     next(err);
@@ -98,7 +113,7 @@ function sanitizeMindmapNode(node, depth, branchIdx) {
 
 router.post('/mindmap', async (req, res, next) => {
   try {
-    const { content } = validateGenerateBody(req.body);
+    const { content, sourceImages } = validateGenerateBody(req.body);
     await ensureProvidersReady();
     const activeProviders = getActiveProviders();
     if (!activeProviders.length) {
@@ -113,9 +128,9 @@ router.post('/mindmap', async (req, res, next) => {
     // vượt ngưỡng cũ với nội dung tiếng Việt.
     const { text } = await callWithFailover(activeProviders, {
       system,
-      messages: [{ role: 'user', content: 'Nội dung cần chuyển thành sơ đồ tư duy (mindmap):\n\n' + content }],
+      messages: [{ role: 'user', content: buildGenerateUserContent(sourceImages, 'Nội dung cần chuyển thành sơ đồ tư duy (mindmap):\n\n', content) }],
       maxTokens: 3600
-    });
+    }, { requireVision: !!(sourceImages && sourceImages.length) });
     const raw = parseJSONSafe(text);
     const title = String(raw.title || 'Sơ đồ tư duy').trim().slice(0, 60);
     const branches = Array.isArray(raw.branches)

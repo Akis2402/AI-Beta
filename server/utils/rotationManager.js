@@ -175,6 +175,34 @@ function getEligibleTargets(targets, requirements = {}) {
   });
 }
 
+// ---------- REASON CODE khi 1 target KHÔNG được chọn (mục 16 audit) ----------
+// Trả lời trực tiếp câu hỏi "Tôi có 10 AI nhưng tại sao chỉ 3 AI chạy?" — mỗi target loại khỏi
+// eligible pool có ĐÚNG 1 lý do tường minh, không phải suy đoán.
+function eligibilityReason(t, requirements) {
+  if (requirements.requireWebSearch && !t.supportsWebSearch) return 'provider_capability';
+  if (requirements.requireVision && t.capabilities && t.capabilities.supportsVision === false) return 'vision_unsupported';
+  const k = keyHealth.get(t.keyId);
+  if (k && k.invalid) return 'invalid_key';
+  if (!isAvailable(k)) return 'cooldown';
+  const m = modelHealth.get(t.modelId);
+  if (!isAvailable(m)) return 'model_unavailable';
+  const th = targetHealth.get(t.id);
+  if (!isAvailable(th)) return 'cooldown';
+  return null; // eligible
+}
+
+/**
+ * Bản chụp lý do loại/giữ cho TOÀN BỘ target đã cấu hình — dùng cho telemetry/debug (mục 15/16):
+ * trả lời chính xác vì sao N target không tham gia thay vì để pool co lại trong im lặng.
+ * @returns {Array<{targetId:string, eligible:boolean, excludedReason:string|null}>}
+ */
+function getEligibilityBreakdown(targets, requirements = {}) {
+  return (targets || []).map((t) => {
+    const reason = eligibilityReason(t, requirements);
+    return { targetId: t.id, eligible: !reason, excludedReason: reason };
+  });
+}
+
 /**
  * Sắp thứ tự thử: round-robin công bằng bắt đầu từ cursor hiện tại (không phải luôn từ đầu danh
  * sách) — qua nhiều request liên tiếp, mọi target đều lần lượt được ưu tiên thử trước, đúng tinh
@@ -317,6 +345,6 @@ function getHealthSnapshot(targets) {
 
 module.exports = {
   getEligibleTargets, orderByRotation, shuffle, markSuccess, markFailure, getHealthSnapshot, isTargetSlow,
-  noteSelection, getRotationPositions, _resetRotationStateForTest,
+  noteSelection, getRotationPositions, _resetRotationStateForTest, getEligibilityBreakdown,
   exportSnapshot, applySnapshot, setGlobalRotationSlot, getGlobalRotationSlot
 };
