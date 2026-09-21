@@ -32,7 +32,7 @@
      'self' — không cần SRI (không còn nguy cơ MITM ở CDN thứ 3), không còn timeout/DNS/content-
      blocker/Safari-cache-bug nào có thể chặn được nữa. Version pin y hệt trước (KaTeX 0.16.9). -->
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/css/styles.308ec08bf5.css">
+<link rel="stylesheet" href="/css/styles.4db96a4990.css">
 </head>
 <body>
 <div id="app">
@@ -208,6 +208,24 @@
           <button class="chip" id="setDarkBtn"><span class="chip-ic" id="icMoon"></span><span data-i18n="settings.themeDark">Tối</span></button>
         </div>
       </div>
+    </div>
+
+    <div class="set-section" id="puterAuthSection" data-status="unknown">
+      <h3 data-i18n="puter.settings.title">Tạo hình ảnh AI (Puter.js)</h3>
+      <p class="set-desc" data-i18n="puter.settings.desc">Hình ảnh AI cần Auth Puter.js — bạn chủ động bấm nút bên dưới, ứng dụng không tự mở cửa sổ đăng nhập. Sơ đồ Toán/Lý/Hóa dựng bằng SVG chính xác và mọi tính năng khác luôn dùng được kể cả khi chưa Auth.</p>
+      <div class="set-row">
+        <label data-i18n="puter.status.label">Trạng thái Puter.js</label>
+        <div class="puter-auth-status-wrap">
+          <span id="puterAuthStatus" class="puter-status" role="status" aria-live="polite" data-status="unknown">◌ Chưa kiểm tra</span>
+          <span id="puterAuthUser" class="puter-user" hidden></span>
+        </div>
+      </div>
+      <div class="puter-auth-actions">
+        <button type="button" class="chip puter-auth-btn" id="puterAuthBtn">Auth Puter.js</button>
+        <button type="button" class="chip" id="puterSignOutBtn" hidden data-i18n="puter.btn.signout">Đăng xuất Puter</button>
+        <button type="button" class="chip" id="puterRecheckBtn" hidden data-i18n="puter.btn.recheck">Kiểm tra lại</button>
+      </div>
+      <p class="puter-auth-help" id="puterAuthHelp" role="status" aria-live="polite" hidden></p>
     </div>
 
     <div class="set-section">
@@ -417,7 +435,7 @@
      nội dung khác nhau -> an toàn cache "immutable" vĩnh viễn (xem vercel.json). File nguồn ở đây
      CỐ Ý giữ tên KHÔNG hash (đây là template — build step ghi đè bản có hash vào output deploy,
      KHÔNG commit ngược lại repo). -->
-<script src="/js/i18n/translations.59b85322d4.js"></script>
+<script src="/js/i18n/translations.58819ae070.js"></script>
 <script src="/js/i18n/languageStore.763a541496.js"></script>
 <script src="/js/i18n/i18n.20d12a2b84.js"></script>
 <script src="/js/payloadBudget.c9bd656bea.js"></script>
@@ -429,12 +447,13 @@
 <script src="/js/solid3d.b9cfced17e.js"></script>
 <script src="/js/exprEval.b06b7b8995.js"></script>
 <script src="/js/scene3d.eab03768bc.js"></script>
-<script src="/js/providers/puterAdapter.79dee75a91.js"></script>
-<script src="/js/providers/providerRouter.bcdbb977c7.js"></script>
-<script src="/js/visual/puterVisualManager.ef640068f1.js"></script>
+<script src="/js/providers/puterAdapter.e15c261080.js"></script>
+<script src="/js/providers/providerRouter.a9eab4f87c.js"></script>
+<script src="/js/visual/puterVisualManager.6162700d9b.js"></script>
+<script src="/js/ui/puterAuthUI.5384d8ecb0.js"></script>
 <script src="/js/tasks/conversationTaskManager.1eb7e20b62.js"></script>
 <script src="/js/tasks/backgroundTaskUI.915a2a6d32.js"></script>
 <script src="/js/voiceInput.66463c87c2.js"></script>
-<script src="/js/app.49deb50d47.js"></script>
+<script src="/js/app.14935bacef.js"></script>
 </body>
 </html>

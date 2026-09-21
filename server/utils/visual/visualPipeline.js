@@ -13,9 +13,11 @@ const MIN_IMAGE_CALL_MS = Number(process.env.MIN_IMAGE_CALL_MS) || 4000;
 //   2. KHÔNG BAO GIỜ chạy trước khi text answer hoàn tất (hình phải dựng từ FINAL VERIFIED FACTS).
 //   3. Có VISUAL DEADLINE RIÊNG, tách khỏi text deadline. Hết hạn -> bỏ hình, không bao giờ để
 //      timeout ảnh giết cả request.
-//   4. ĐƯỜNG DUY NHẤT cho hình 2D tĩnh là AI image provider. Không còn deterministic/SVG/concept
-//      card. Ảnh thất bại -> failover provider -> tối đa 1 lần repair -> status 'failed' + stub
-//      retry. TUYỆT ĐỐI không có nhánh nào trả `format:'svg'`.
+//   4. HYBRID VISUAL ENGINE: visualDeterminationEngine chọn renderer TRƯỚC. Nội dung tất định của
+//      Toán/Lý/Hoá dựng được chính xác -> SVG tất định (0 token, 0 lệnh gọi image model, KHÔNG cần
+//      Puter). Còn lại -> ảnh AI (Puter client-primary hoặc provider server): thất bại -> failover ->
+//      tối đa 1 lần repair -> 'failed' + stub retry. SVG chỉ được dựng bằng code (deterministic/),
+//      không bao giờ do LLM viết, và luôn qua validateSvg() trước khi rời server.
 //   5. Scene 3D TƯƠNG TÁC không đi qua đây: Three.js (solid3d.js/scene3d.js) render từ khối
 //      ```solid3d/```scene3d trong chính câu trả lời. Pipeline chỉ ghi nhận và bỏ qua.
 //
@@ -29,6 +31,8 @@ const cache = require('./visualCache');
 const imageClient = require('./imageGenerationClient');
 const hqStore = require('./visualHqStore');
 const responseGuard = require('./visualResponseGuard');
+const determinationEngine = require('./visualDeterminationEngine');
+const deterministic = require('./deterministic');
 
 // Ngân sách thời gian RIÊNG cho toàn bộ hệ thống hình. Text answer luôn ưu tiên.
 const VISUAL_DEADLINE_MS = Number(process.env.VISUAL_DEADLINE_MS) || 12000;
@@ -77,6 +81,14 @@ function resolveVisualDegradeLevel(remainingMs) {
   if (remainingMs < DEGRADE_LOW_MS) return 'low';
   if (remainingMs < DEGRADE_MEDIUM_MS) return 'medium';
   return 'high';
+}
+
+/** Bản tóm tắt an toàn (không kèm SVG) của quyết định — để log/telemetry/test. */
+function summarizeDetermination(d) {
+  return {
+    shouldVisualize: d.shouldVisualize, visualType: d.visualType, subject: d.subject, category: d.category, confidence: d.confidence,
+    deterministic: d.deterministic, userRequested: d.userRequested, reason: d.reason, authRequired: d.authRequired, puterAuth: d.puterAuth
+  };
 }
 
 let visualSeq = 0;
@@ -137,7 +149,12 @@ async function runVisualPipeline(args) {
     stage = 'approach',
     // MỤC 33: visual đã có từ vòng đời Approach (server load qua visualStateStore) — Detail chỉ
     // được DÙNG LẠI đúng tập này.
-    existingVisuals = null, inputImageIds = []
+    existingVisuals = null, inputImageIds = [],
+    // Trạng thái Auth Puter do CLIENT báo ('authenticated'|'unauthenticated'|'unknown'|'error').
+    puterAuth = 'unknown',
+    // Câu gốc của người dùng (còn nguyên động từ "vẽ…"/"cấu hình…"). Nhánh image-only chỉ giữ `question` = CHỦ ĐỀ đã bị
+    // cắt động từ; SVG tất định cần câu gốc để nhận diện dữ kiện, còn ảnh AI vẫn dùng chủ đề gọn.
+    rawQuestion = ''
   } = args || {};
 
   const telemetry = {
@@ -160,7 +177,10 @@ async function runVisualPipeline(args) {
     visualProviderFailures: 0,
     visualRetryCount: 0,
     visualJudgeCalls: 0,
-    visualReused: false
+    visualReused: false,
+    // ---------- Hybrid Visual Engine ----------
+    visualDeterministic: false, visualSpecHash: null, visualSvgBytes: 0, visualSvgCacheHit: false,
+    visualDeterminationReason: null, visualCategory: null, visualPuterAuth: 'unknown', visualAuthRequired: false
   };
 
   try {
@@ -170,12 +190,12 @@ async function runVisualPipeline(args) {
     if (!stageMayGenerate(stage)) {
       telemetry.visualLifecycleLocked = true;
       const reuse = Array.isArray(existingVisuals)
-        ? existingVisuals.filter((v) => v && (v.url || v.format === 'image_url' || v.format === 'data_url'))
+        ? existingVisuals.filter((v) => v && (v.url || v.format === 'image_url' || v.format === 'data_url' || (v.format === 'svg' && v.svg)))
         : [];
       if (reuse.length) {
         telemetry.visualReused = true;
         telemetry.visualType = reuse[0].type || telemetry.visualType;
-        telemetry.visualRenderer = reuse[0].renderer || 'generated_image';
+        telemetry.visualRenderer = reuse[0].renderer || (reuse[0].format === 'svg' ? 'deterministic_svg' : 'generated_image');
         reuse.forEach((v) => onEvent({ ...v, type: 'visual:ready', reused: true }));
         return { status: 'reused', decision: null, visuals: reuse, telemetry };
       }
@@ -189,32 +209,109 @@ async function runVisualPipeline(args) {
     const degrade = resolveVisualDegradeLevel(remaining);
     telemetry.visualDegradeLevel = degrade;
     if (degrade === 'emergency') {
-      telemetry.visualError = 'deferred_deadline';
-      return { status: 'skipped', decision: null, visuals: [], telemetry };
+      // SVG tất định không tốn thời gian mạng -> vẫn cho qua khi dựng được; mọi thứ còn lại bị hoãn như cũ.
+      let svgProbe = null;
+      try { svgProbe = deterministic.tryRender(rawQuestion || question, subject); } catch (_) { svgProbe = null; }
+      if (!svgProbe || svgProbe.status !== 'rendered') {
+        telemetry.visualError = 'deferred_deadline';
+        return { status: 'skipped', decision: null, visuals: [], telemetry };
+      }
     }
 
     // ---------- TẦNG 1+2: quyết định (0 token) ----------
     let decision = decisionEngine.evaluateVisualNeed({
       question, answerPlan: finalAnswer, subject, complexity, language, userPreference
     });
+    // IMAGE-ONLY = người dùng CHỈ xin một bức hình -> theo định nghĩa đó là YÊU CẦU TƯỜNG MINH. Chủ đề đã bị cắt động từ
+    // ("Vẽ hình tế bào" -> "tế bào") nên bộ chấm điểm thấy "dưới ngưỡng" và bỏ hình (lỗi có sẵn từ bản gốc, phát hiện khi
+    // chạy route thật). Chỉ nâng các từ chối MỀM; veto tuyệt đối và setting "never" vẫn giữ nguyên.
+    if (stage === 'image_only' && !decision.shouldGenerateImage && ['below_threshold', 'borderline', 'low_value_subject'].includes(decision.reason)) {
+      decision = {
+        ...decision, shouldGenerateImage: true, explicitRequest: true, imageNecessity: 'USER_REQUESTED', reason: 'image_only_request',
+        visualType: decision.visualType && decision.visualType !== 'no_visual' ? decision.visualType : 'concept_illustration',
+        visualPurpose: decision.visualPurpose || 'minh hoạ theo yêu cầu của người dùng', suggestedCount: 1, placement: 'after_solution',
+        generationPriority: 'high', confidence: Math.max(decision.confidence || 0, 0.9), borderline: false
+      };
+    }
 
-    // ---------- TẦNG 3: chỉ borderline mới hỏi model ----------
-    if (typeof judge === 'function' && decisionEngine.needsModelJudgement(decision)) {
+    // ---------- HYBRID: Visual Determination Engine chọn SVG / Puter / không hình ----------
+    const clientPrimary = String(process.env.PUTER_VISUAL_MODE || 'client_primary').toLowerCase() === 'client_primary';
+    const puterAuthState = determinationEngine.normalizePuterAuth(puterAuth);
+    telemetry.visualPuterAuth = puterAuthState;
+    const determine = () => determinationEngine.determineVisual({
+      question: rawQuestion || question, approachText, subject, decision, userPreference, puterAuth: puterAuthState, clientPrimary
+    });
+    let determination = determine();
+
+    // ---------- TẦNG 3: chỉ borderline mới hỏi model (bỏ qua khi SVG tất định đã dựng được) ----------
+    const svgSettled = determination.visualType === 'svg' || determination.reason === 'deterministic_validation_failed';
+    if (!svgSettled && typeof judge === 'function' && decisionEngine.needsModelJudgement(decision)) {
       telemetry.visualJudgeUsed = true;
       telemetry.visualJudgeCalls += 1;
       try {
         const verdict = await judge({ question, subject, decision });
-        if (verdict) decision = decisionEngine.applyModelJudgement(decision, verdict);
+        if (verdict) { decision = decisionEngine.applyModelJudgement(decision, verdict); determination = determine(); }
       } catch (e) { /* judge lỗi -> giữ nguyên quyết định heuristic, không ảnh hưởng text */ }
     }
 
     telemetry.visualNecessity = decision.imageNecessity || 'NONE';
-    telemetry.visualDecision = decision.shouldGenerateImage;
-    telemetry.visualConfidence = decision.confidence;
+    telemetry.visualDecision = decision.shouldGenerateImage || determination.visualType === 'svg';
+    telemetry.visualConfidence = determination.visualType === 'svg' ? determination.confidence : decision.confidence;
     telemetry.visualType = decision.visualType;
+    telemetry.visualDeterministic = !!determination.deterministic;
+    telemetry.visualDeterminationReason = determination.reason;
+    telemetry.visualCategory = determination.category;
+
+    // ---------- Nhánh 1: SVG TẤT ĐỊNH — 0 token, 0 lệnh gọi image model, KHÔNG cần Puter ----------
+    if (determination.visualType === 'svg' && determination.artifact) {
+      const art = determination.artifact;
+      const necessity = decision.imageNecessity || 'NONE';
+      const svgVisual = {
+        visualId: nextVisualId(),
+        type: art.category, visualType: art.category, subject: subject || art.domain,
+        renderer: 'deterministic_svg', origin: 'deterministic', format: 'svg',
+        svg: art.svg, alt: art.desc, title: art.title, caption: '',
+        svgSpec: { specHash: art.specHash, category: art.category, engine: deterministic.ENGINE_VERSION },
+        specHash: art.specHash, fidelity: 'deterministic', necessity,
+        overrodeNever: !!decision.overrodeNever,
+        placement: decision.placement && decision.placement !== 'none' ? decision.placement : 'after_problem_summary',
+        fromCache: !!art.cacheHit
+      };
+      telemetry.visualRenderer = 'deterministic_svg';
+      telemetry.visualFidelity = 'deterministic';
+      telemetry.visualGenerated = true;
+      telemetry.visualSpecHash = art.specHash;
+      telemetry.visualSvgBytes = Buffer.byteLength(art.svg, 'utf8');
+      telemetry.visualSvgCacheHit = !!art.cacheHit;
+      telemetry.visualCacheHit = !!art.cacheHit;
+      telemetry.visualGenerationLatency = Date.now() - t0;
+      determinationEngine.debugLog('svg_ready', { category: art.category, specHash: art.specHash, bytes: telemetry.visualSvgBytes, cacheHit: !!art.cacheHit });
+      onEvent({ ...svgVisual, type: 'visual:ready' });
+      return { status: 'ready', decision, visuals: [svgVisual], telemetry, determination: summarizeDetermination(determination) };
+    }
+
+    // ---------- Nhánh 2: dữ kiện MÂU THUẪN -> không vẽ bừa, báo rõ lý do (KHÔNG gọi AI vẽ "cho có") ----------
+    if (determination.reason === 'deterministic_validation_failed') {
+      const first = (determination.validationErrors && determination.validationErrors[0]) || { code: 'invalid', detail: '' };
+      const notice = {
+        visualId: nextVisualId(), format: 'notice', noticeKind: 'validation_failed', renderer: 'deterministic_svg',
+        subject, type: determination.category, title: language === 'en' ? 'Diagram not drawn' : 'Chưa vẽ hình',
+        message: language === 'en'
+          ? `The given data is invalid or inconsistent, so no diagram was drawn (to avoid drawing it wrong): ${first.detail}`
+          : `Dữ kiện trong đề không hợp lệ hoặc mâu thuẫn nên không vẽ hình (tránh vẽ sai): ${first.detail}`,
+        errorCode: first.code, errors: (determination.validationErrors || []).slice(0, 3)
+      };
+      telemetry.visualError = `deterministic_validation_failed:${first.code}`;
+      onEvent({ ...notice, type: 'visual:ready' });
+      return { status: 'skipped', decision, visuals: [notice], telemetry, determination: summarizeDetermination(determination) };
+    }
 
     if (!decision.shouldGenerateImage) {
       return { status: 'skipped', decision, visuals: [], telemetry };
+    }
+    if (degrade === 'emergency') {
+      telemetry.visualError = 'deferred_deadline';
+      return { status: 'skipped', decision: null, visuals: [], telemetry };
     }
 
     // ---------- Cross-check conflict detection TRƯỚC khi dựng spec ----------
@@ -233,7 +330,6 @@ async function runVisualPipeline(args) {
     }
 
     // ---------- Chọn renderer: generated_image | interactive_3d | no_visual ----------
-    const clientPrimary = String(process.env.PUTER_VISUAL_MODE || 'client_primary').toLowerCase() === 'client_primary';
     const imageProviderAvailable = imageClient.isConfigured();
     const route = router.chooseVisualRenderer(spec, {
       imageProviderAvailable,
@@ -338,6 +434,35 @@ async function runVisualPipeline(args) {
         placement: decision.placement
       };
       await hqStore.remember(visualId, { ...promptCtx, visualFingerprint, visualJob });
+
+      // ---------- Puter CHƯA Auth: không phát job (sẽ chỉ tạo popup/lỗi), không nag khi hình chỉ là tuỳ chọn ----------
+      if (determination.authRequired) {
+        telemetry.visualRenderer = 'puter';
+        telemetry.visualAuthRequired = true;
+        const userAsked = !!determination.userRequested || highNeed;
+        if (!userAsked) {
+          // Hình AI chỉ là tuỳ chọn: câu trả lời chính vẫn nguyên vẹn, hình bị bỏ qua + MỘT dòng nhắc nhẹ (không phải lỗi).
+          telemetry.visualError = 'puter_auth_required_skipped';
+          determinationEngine.debugLog('puter_auth_skip', { necessity, reason: 'optional_visual_while_unauthenticated' });
+          const skipNote = {
+            visualId: nextVisualId(), format: 'notice', noticeKind: 'puter_auth_skipped', renderer: 'puter_image', subject, type: spec.type, authRequired: true,
+            title: language === 'en' ? 'AI image not created' : 'Chưa tạo hình ảnh AI',
+            message: language === 'en'
+              ? 'The AI image was not created because Puter.js is not authenticated. You can authenticate in Settings to use it.'
+              : 'Hình ảnh AI chưa được tạo vì Puter.js chưa được Auth. Bạn có thể Auth trong Settings để sử dụng.'
+          };
+          onEvent({ ...skipNote, type: 'visual:ready' });
+          return { status: 'skipped', decision, visuals: [skipNote], telemetry, determination: summarizeDetermination(determination) };
+        }
+        const authStub = {
+          visualId, renderFailed: true, authRequired: true, errorCode: 'PUTER_AUTH_REQUIRED', reason: 'puter_auth_required',
+          recoverable: true, userRequested: !!determination.userRequested, necessity, title: spec.title, subject, type: spec.type,
+          status: 'AUTH_REQUIRED', renderer: 'puter_image', job: visualJob
+        };
+        telemetry.visualError = 'puter_auth_required';
+        onEvent({ ...authStub, type: 'visual:error' });
+        return { status: 'auth_required', decision, visuals: [authStub], visualJob: null, telemetry, determination: summarizeDetermination(determination) };
+      }
       telemetry.visualRenderer = 'puter';
       telemetry.visualLifecycleLocked = true;
       telemetry.visualGenerationLifecycleCount = 1;

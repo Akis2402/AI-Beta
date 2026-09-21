@@ -410,6 +410,12 @@ async function generateImageCaption({ topic, language, activeProviders, deadline
 }
 
 /**
+ * Kết quả hình phụ thuộc trạng thái Auth Puter CỦA NGƯỜI GỌI (bỏ im lặng hình tuỳ chọn / thẻ "cần Auth")
+ * KHÔNG được vào cache text DÙNG CHUNG: người dùng đã Auth hỏi cùng câu sẽ nhận nhầm kết quả "không hình".
+ */
+function isAuthDependentVisualRun(run) { return !!(run && run.telemetry && run.telemetry.visualAuthRequired); }
+
+/**
  * runVisualsFor() — điểm gọi DUY NHẤT của hệ thống hình minh hoạ trong route (PHẦN 20/24/30/32).
  *
  * Bất biến bắt buộc:
@@ -1050,7 +1056,13 @@ router.post('/', async (req, res, next) => {
       remainingMs: globalDeadline.remaining(), requirements: requirementsList,
       cacheKeyExtra: {
         promptVersion: PROMPT_VERSION,
-        requestId: reqLogger.requestId,
+        // BUG FIX (P0 — phát hiện qua audit Puter phase final, test/puter-visualjob-cache-e2e.test.js):
+        // TRƯỚC ĐÂY có `requestId: reqLogger.requestId` ở đây. `_keyOf()` trong TokenEconomyCache
+        // (server/utils/tokenEconomy.js) băm TẤT CẢ field của object này để tạo cache key — nhét một
+        // giá trị DUY NHẤT THEO TỪNG REQUEST vào đúng object dùng làm cache key khiến 2 request giống
+        // hệt nhau (cùng câu hỏi/settings/model) không BAO GIỜ cache-hit được, vì mỗi request luôn có
+        // 1 requestId khác nhau -> vô hiệu hoá hoàn toàn L1/L2 result cache trong thực tế production.
+        // reqLogger.requestId vẫn sẵn có trực tiếp ở mọi nơi cần log/telemetry (không cần đi qua đây).
         // ---------- MỤC 29: CACHE KEY PHẢI MANG CHÍNH SÁCH MODEL THẬT ----------
         // `modelTier` (đã có sẵn trong key) chỉ là NHÃN độ phức tạp, không phải model. Hai request
         // giống hệt nhau nhưng pool đã đổi (thêm/bớt API key, model discovery chọn revision khác,
@@ -1187,6 +1199,8 @@ router.post('/', async (req, res, next) => {
       grade: input.settings.grade,
       complexity: tePlan.budget && tePlan.budget.complexity ? tePlan.budget.complexity.level : 'medium',
       userPreference: input.settings.visual,
+      // Hybrid Visual Engine: trạng thái Auth Puter do client báo (gợi ý, mặc định 'unknown').
+      puterAuth: (input.clientCaps && input.clientCaps.puterAuth) || 'unknown',
       deadline: globalDeadline,
       signal,
       reqLogger,
@@ -1240,6 +1254,15 @@ router.post('/', async (req, res, next) => {
         sseHeaders(res);
         sseWrite(res, 'delta', { text: resultCacheValue.text });
         sseWrite(res, 'done', { ...resultCacheValue, fromCache: true, cacheLevel: resultCacheLevel });
+        // BUG FIX (P0 — Puter phase final §3): text cache hit trước đây chỉ gửi "done" rồi đóng SSE
+        // ngay — client CHỈ enqueue Puter qua đúng 1 sự kiện "visual:request" (xem apiPostStream()
+        // trong app.js), "done" mang field visualJob không tự kích hoạt gì cả. Không phát lại sự
+        // kiện này thì mọi cache-hit (kể cả cùng nội dung câu hỏi) vĩnh viễn KHÔNG có hình, đúng bug
+        // "text cache hit == no visual" mà yêu cầu cấm tuyệt đối. renderer === 'puter_image' đảm bảo
+        // chỉ áp dụng cho nhánh client-primary — không đụng tới legacy server_fallback.
+        if (resultCacheValue.visualJob && resultCacheValue.visualJob.renderer === 'puter_image') {
+          sseWrite(res, 'visual:request', resultCacheValue.visualJob);
+        }
         return res.end();
       }
       return res.json({ ...resultCacheValue, fromCache: true, cacheLevel: resultCacheLevel });
@@ -1262,7 +1285,7 @@ router.post('/', async (req, res, next) => {
     const imageOnly = { imageOnly: intentPlan.imageOnly, topic: intentPlan.topic, reason: intentPlan.reason };
     if (imageOnly.imageOnly) {
       reqLogger.log({ stage: 'image_only_request', topic: imageOnly.topic.length, reason: imageOnly.reason });
-      const imageVisualBase = { ...visualBase, userPreference: 'always', question: imageOnly.topic || problemText };
+      const imageVisualBase = { ...visualBase, userPreference: 'always', question: imageOnly.topic || problemText, rawQuestion: problemText };
 
       if (wantsStream) {
         sseHeaders(res);
@@ -1557,11 +1580,16 @@ router.post('/', async (req, res, next) => {
           });
           donePayload.visuals = visualRun.visuals;
           donePayload.visualStatus = visualRun.status;
+          // BUG FIX (P0 — Puter phase final §3/§4): visualJob (client_primary, status 'pending')
+          // KHÔNG BAO GIỜ được set ở đây trước đây — cả stream lẫn giá trị bị cache đều mất khả
+          // năng tạo ảnh Puter phía client. Đây LÀ payload được ghi thẳng vào tokenEconomy L1/L2
+          // (dòng ngay dưới), nên field này phải có mặt để một cache-hit sau này vẫn mang đủ job.
+          donePayload.visualJob = visualRun.visualJob || null;
 
           // PHẦN P: KHÔNG BAO GIỜ cache response PARTIAL/interrupted/chưa validate — chỉ cache khi
           // thực sự COMPLETED (partial=false), nếu không lần sau sẽ trả lại đúng câu trả lời bị cắt.
           if (reconcileRun.resumes || continuations) workingSetTracker.use('continuation'); // KHÔNG retrieval lại
-          if (!tePlan.cacheBypassed && !outcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, donePayload);
+          if (!tePlan.cacheBypassed && !outcome.partial && !isAuthDependentVisualRun(visualRun)) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, donePayload);
           if (!outcome.partial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: reconcileStage, provider: reconciler && reconciler.providerKey, model: reconciler && reconciler.modelId, ...outcomeSample(requestUsage, full), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
           teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
           teTelemetry.record('outputTokens', full.length / 3.2);
@@ -1683,9 +1711,11 @@ router.post('/', async (req, res, next) => {
         });
         directDonePayload.visuals = directVisualRun.visuals;
         directDonePayload.visualStatus = directVisualRun.status;
+        // BUG FIX (P0 — Puter phase final §3/§4): xem giải thích đầy đủ ở nhánh cross-check phía trên.
+        directDonePayload.visualJob = directVisualRun.visualJob || null;
 
         // PHẦN P: chỉ cache khi COMPLETED thật (không cache partial/interrupted).
-        if (!tePlan.cacheBypassed && !directOutcome.partial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, directDonePayload);
+        if (!tePlan.cacheBypassed && !directOutcome.partial && !isAuthDependentVisualRun(directVisualRun)) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, directDonePayload);
         if (!directOutcome.partial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: directStageName, provider: directRun.provider && directRun.provider.providerKey, model: directRun.provider && directRun.provider.modelId, ...outcomeSample(requestUsage, full), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
         teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
         teTelemetry.record('outputTokens', full.length / 3.2);
@@ -1829,7 +1859,10 @@ router.post('/', async (req, res, next) => {
       });
       jsonDonePayload.visuals = jsonVisualRun.visuals;
       jsonDonePayload.visualStatus = jsonVisualRun.status;
-      if (!tePlan.cacheBypassed && !reconcilePartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
+      // BUG FIX (P0 — Puter phase final §3/§4): JSON non-stream là nơi bug rõ nhất — không có
+      // event SSE nào khác để bù, nếu thiếu field này thì visuals:[] là đường cụt hoàn toàn.
+      jsonDonePayload.visualJob = jsonVisualRun.visualJob || null;
+      if (!tePlan.cacheBypassed && !reconcilePartial && !isAuthDependentVisualRun(jsonVisualRun)) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, jsonDonePayload);
       if (!reconcilePartial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: reconcileStage, provider: reconciler && reconciler.providerKey, model: reconciler && reconciler.modelId, ...outcomeSample(requestUsage, finalText), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
       teTelemetry.record('outputTokens', finalText.length / 3.2);
       reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });
@@ -1916,7 +1949,9 @@ router.post('/', async (req, res, next) => {
     });
     finalJsonPayload.visuals = directJsonVisualRun.visuals;
     finalJsonPayload.visualStatus = directJsonVisualRun.status;
-    if (!tePlan.cacheBypassed && !directJsonPartial) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
+    // BUG FIX (P0 — Puter phase final §3/§4): xem giải thích đầy đủ ở nhánh cross-check JSON phía trên.
+    finalJsonPayload.visualJob = directJsonVisualRun.visualJob || null;
+    if (!tePlan.cacheBypassed && !directJsonPartial && !isAuthDependentVisualRun(directJsonVisualRun)) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
     if (!directJsonPartial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: input.stage === 'approach' ? 'approach' : 'detail', provider: provider && provider.providerKey, model: provider && provider.modelId, ...outcomeSample(requestUsage, text), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
     teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
     teTelemetry.record('outputTokens', text.length / 3.2);

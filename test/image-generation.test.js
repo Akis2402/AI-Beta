@@ -250,24 +250,32 @@ const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
     } finally { restore(); }
   });
 
-  await atest('13. Đồ thị toán GIỜ đi ảnh AI (không còn deterministic), và không bao giờ trả SVG', async () => {
+  await atest('13. HYBRID: đồ thị toán -> SVG tất định (0 lệnh gọi ảnh); người dùng ép "bằng AI" -> ảnh AI', async () => {
     const { restore } = loadClient({ GEMINI_IMAGE_API_KEY: 'k' });
     const pipeline = require(PIPELINE_PATH);
     require(path.join(__dirname, '..', 'server', 'utils', 'visual', 'visualCache.js'))._resetForTest();
     try {
       let apiCalls = 0;
-      const r = await withFetch(async () => {
+      const okImg = async () => {
         apiCalls++;
         return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: PNG_B64 } }] } }] }) };
-      }, () => pipeline.runVisualPipeline({
+      };
+      const svg = await withFetch(okImg, () => pipeline.runVisualPipeline({
         question: 'Khảo sát và vẽ đồ thị hàm số y = x^2 - 2x - 3',
-        finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4).',
-        subject: 'math', answerComplete: true
+        finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4).', subject: 'math', answerComplete: true
       }));
-      assert.strictEqual(r.status, 'ready', JSON.stringify(r.telemetry));
-      assert.strictEqual(apiCalls > 0, true, 'đồ thị toán nay PHẢI đi qua image generation');
-      assert.strictEqual(r.visuals[0].renderer, 'generated_image');
-      assert.notStrictEqual(r.visuals[0].format, 'svg');
+      assert.strictEqual(svg.status, 'ready', JSON.stringify(svg.telemetry));
+      assert.strictEqual(apiCalls, 0, 'đồ thị dựng được chính xác bằng code -> KHÔNG được gọi image generation');
+      assert.strictEqual(svg.visuals[0].renderer, 'deterministic_svg');
+      assert.strictEqual(svg.visuals[0].format, 'svg');
+      const ai = await withFetch(okImg, () => pipeline.runVisualPipeline({
+        question: 'Khảo sát và vẽ đồ thị hàm số y = x^2 - 2x - 3 bằng AI',
+        finalAnswer: 'Ta có y = x^2-2x-3, đỉnh I(1;-4).', subject: 'math', answerComplete: true
+      }));
+      assert.strictEqual(ai.status, 'ready', JSON.stringify(ai.telemetry));
+      assert.strictEqual(apiCalls > 0, true, 'người dùng ép AI -> phải đi qua image generation');
+      assert.strictEqual(ai.visuals[0].renderer, 'generated_image');
+      assert.notStrictEqual(ai.visuals[0].format, 'svg');
     } finally { restore(); }
   });
 

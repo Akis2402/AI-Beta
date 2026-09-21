@@ -78,16 +78,32 @@ NGÔN NGỮ TRẢ LỜI — BẮT BUỘC: ${langDirective}
  * @param {{onDelta:Function, onStatus:Function, signal:AbortSignal, allowPuterFallback?:boolean}} opts
  */
 async function streamViaProviderRouter(path, body, opts = {}) {
-  const { onDelta, onStatus, signal, allowPuterFallback = true } = opts;
+  const {
+    onDelta, onStatus, signal, allowPuterFallback = true,
+    // BUG FIX (P0 — Puter phase final §5/§30): trước đây 4 callback hình minh hoạ KHÔNG được
+    // forward sang apiPostStream(). app.js là caller DUY NHẤT của apiPostStream (luôn đi qua hàm
+    // này), nên onVisualRequest/onVisualPending/onVisualReady/onVisualError chưa từng được gọi
+    // trong production: Puter vẫn có thể sinh ảnh và lưu IndexedDB ở nền, nhưng UI không bao giờ
+    // biết để hiển thị (card giữ nguyên trạng thái pending vĩnh viễn). Bắt buộc forward nguyên vẹn.
+    onVisualRequest, onVisualPending, onVisualReady, onVisualError
+  } = opts;
   try {
-    return await window.apiPostStream(path, body, { onDelta, onStatus, signal });
+    return await window.apiPostStream(path, body, {
+      onDelta, onStatus, onVisualRequest, onVisualPending, onVisualReady, onVisualError, signal
+    });
   } catch (err) {
     if (err && (err.cancelled || err.name === 'AbortError')) throw err; // Dừng thủ công -> không fallback (PHẦN D)
     recordServerFailure();
     const hasImage = !!(body && body.image);
-    const puterOk = allowPuterFallback && isRotationExhaustedError(err) &&
+    // Fallback Puter CHỈ khi người dùng ĐÃ Auth trong Settings. Chưa Auth -> trả lại lỗi gốc của server;
+    // TUYỆT ĐỐI không để puter.ai.chat() tự bật popup đăng nhập từ một tác vụ nền (Master prompt Puter Auth).
+    const puterAuthed = !!(window.puterAdapter && window.puterAdapter.auth && window.puterAdapter.auth.isAuthenticated());
+    const puterOk = allowPuterFallback && isRotationExhaustedError(err) && puterAuthed &&
       window.puterAdapter && (!hasImage || window.puterAdapter.puterSupportsVision(body.puterModel));
-    if (!puterOk) throw err;
+    if (!puterOk) {
+      if (allowPuterFallback && isRotationExhaustedError(err) && !puterAuthed) err.puterFallbackSkipped = 'PUTER_AUTH_REQUIRED';
+      throw err;
+    }
 
     onStatus && onStatus(window.t ? window.t('provider.puterFallback') : 'Đang chuyển sang nhà cung cấp dự phòng...', 'info');
     const messages = Array.isArray(body.history)

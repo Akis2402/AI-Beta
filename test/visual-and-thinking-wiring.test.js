@@ -106,22 +106,30 @@ test('11. index.html có đủ 3 lựa chọn cài đặt hình minh họa', () 
   ['data-val="auto"', 'data-val="always"', 'data-val="never"'].forEach((v) => assert.ok(html.includes(v), v));
 });
 
-test('12. client KHÔNG còn bất kỳ đường nhúng SVG nào cho hình minh hoạ', () => {
+test('12. client: không còn đường SVG NHÚNG-DOM cũ; SVG tất định chỉ hiển thị qua <img src=data:image/svg+xml>', () => {
   const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');
-  // Kiến trúc AI image-first: renderVisualSvg()/drawPlot()/drawShape() đã bị xoá hẳn; thân card chỉ
-  // còn renderVisualImage() và nó chỉ nhận data:image/ hoặc https (isGeneratedImageVisual).
+  // Các hàm vẽ SVG/Geo2D phía client đã bị xoá hẳn và KHÔNG được quay lại (server dựng SVG bằng code).
   ['function renderVisualSvg(', 'function drawPlot(', 'function drawShape(', 'Geo2D'].forEach((needle) => {
     assert.ok(!appSrc.includes(needle), 'app.js còn tàn dư đường SVG: ' + needle);
   });
   const idx = appSrc.indexOf('function renderVisualCard(');
   assert.ok(idx !== -1, 'phải còn renderVisualCard()');
-  const body = appSrc.slice(idx, idx + 1200);
-  assert.ok(body.includes('renderVisualImage(v)'), 'thân card phải là ảnh AI');
-  assert.ok(!body.includes('renderVisualSvg'), 'không còn nhánh SVG trong card');
-  // Cổng chấp nhận payload: chỉ data:image/ hoặc https.
+  const body = appSrc.slice(idx, idx + 1600);
+  assert.ok(body.includes('renderVisualImage(v)'), 'ảnh AI vẫn phải đi qua renderVisualImage()');
+  assert.ok(body.includes('renderVisualSvgCard(v)'), 'SVG tất định đi qua renderVisualSvgCard() riêng');
+  // SVG KHÔNG BAO GIỜ được chèn vào DOM dạng markup: không innerHTML/insertAdjacentHTML với v.svg.
+  assert.ok(!/innerHTML\s*=\s*[^;\n]*\.svg\b/.test(appSrc), 'cấm gán innerHTML từ trường svg');
+  assert.ok(!/insertAdjacentHTML\([^)]*svg/i.test(appSrc), 'cấm insertAdjacentHTML với svg');
+  const svgCard = appSrc.slice(appSrc.indexOf('function renderVisualSvgCard('), appSrc.indexOf('function renderVisualSvgCard(') + 1400);
+  assert.ok(/svgDataUri\(v\.svg\)/.test(svgCard) && /img\.src\s*=/.test(svgCard), 'SVG phải hiển thị qua <img src=data-URI> (script trong <img> không chạy)');
+  assert.ok(/data:image\/svg\+xml/.test(appSrc), 'phải dùng data:image/svg+xml');
+  // Cổng chấp nhận ẢNH AI: chỉ data:image/ hoặc https (không đổi).
   const gate = appSrc.slice(appSrc.indexOf('function isGeneratedImageVisual('), appSrc.indexOf('function isGeneratedImageVisual(') + 400);
   assert.ok(/data:image\\\//.test(gate) && /https/.test(gate),
     'client phải tự kiểm tra lại payload trước khi nhúng, không tin tuyệt đối payload mạng');
+  // Cổng chấp nhận SVG: phải bắt đầu bằng <svg và có giới hạn kích thước.
+  const svgGate = appSrc.slice(appSrc.indexOf('function isDeterministicSvgVisual('), appSrc.indexOf('function isDeterministicSvgVisual(') + 300);
+  assert.ok(/<svg/.test(svgGate) && /length\s*<=/.test(svgGate), 'client tự kiểm tra lại payload SVG (bắt đầu <svg, có giới hạn kích thước)');
 });
 
 let passed = 0, failed = 0;

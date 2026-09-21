@@ -198,7 +198,7 @@ function enforceRequestBudget(body) {
 async function apiPost(path, body, { signal } = {}) {
   const prepared = enforceRequestBudget(body);
   body = prepared.body;
-  const res = await fetch(path, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body), signal });
+  const res = await fetch(path, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(withClientCaps(path, body)), signal });
   let data;
   try { data = await res.json(); } catch (e) { data = null; }
   if (!res.ok) {
@@ -232,11 +232,71 @@ function dataUrlToBlob(dataUrl) {
   return new Blob([out], { type: m[1] || 'image/png' });
 }
 
+/* ============================================================================================
+   HYBRID VISUAL ENGINE (client) — SVG tất định + Puter AI Image + Auth CHỈ trong Settings
+   ============================================================================================ */
+const PUTER_AUTH_ERROR_CODES = new Set(['PUTER_AUTH_REQUIRED', 'PUTER_AUTH_FAILED', 'auth_required']);
+/** Lỗi thuộc nhóm "cần (Re-)Auth Puter" — KHÔNG được thử lại ngầm, KHÔNG được tự mở popup Auth. */
+function isPuterAuthError(e) { return !!(e && (PUTER_AUTH_ERROR_CODES.has(e.code) || PUTER_AUTH_ERROR_CODES.has(e.errorCode) || e.authRequired === true)); }
+/** Trạng thái Auth Puter hiện tại (canonical) để báo server: 'authenticated'|'unauthenticated'|'unknown'|'error'. */
+function buildClientCaps() {
+  const a = window.puterAdapter && window.puterAdapter.auth;
+  let status = 'unknown';
+  try { status = a ? a.getState().status : 'unknown'; } catch (e) { status = 'unknown'; }
+  return { puterAuth: status };
+}
+function withClientCaps(path, body) {
+  return (/^\/api\/chat\b/.test(String(path)) && body && typeof body === 'object' && !body.clientCaps) ? { ...body, clientCaps: buildClientCaps() } : body;
+}
+/** Tách JOB Puter sạch (renderer:'puter_image') ra khỏi stub lỗi/Auth để chạy lại được. */
+function extractPuterJob(f) {
+  if (!f) return null;
+  if (f.job && f.job.renderer === 'puter_image') return { ...f.job, status: 'QUEUED' };
+  if (f.renderer === 'puter_image') {
+    const { errorCode, authRequired, renderFailed, renderPending, job, reason, recoverable, userRequested, ...rest } = f;
+    return { ...rest, status: 'QUEUED' };
+  }
+  return null;
+}
+/** Đỗ job bị chặn vì chưa Auth: tự chạy tiếp khi người dùng Auth (chỉ với hình họ yêu cầu/NECESSARY). */
+function parkAuthRequiredJob(failure, cb) {
+  const mgr = window.puterVisualManager;
+  const job = extractPuterJob(failure);
+  if (!mgr || typeof mgr.park !== 'function' || !job) return;
+  const must = !!(failure.userRequested || failure.necessity === 'USER_REQUESTED' || failure.necessity === 'NECESSARY');
+  mgr.park(job, {
+    autoResume: must,
+    onReady: (v) => cb.onVisualReady(v),
+    onError: (e) => cb.onVisualError({ ...job, errorCode: (e && e.code) || 'PUTER_GENERATION_FAILED', authRequired: isPuterAuthError(e) })
+  });
+}
+
 async function runClientVisualJob(job, signal) {
   if (!job || job.renderer !== 'puter_image') return null;
   if (signal && signal.aborted) return null;
   if (!window.puterVisualManager) throw new Error('Puter visual manager unavailable.');
   return window.puterVisualManager.enqueue(job);
+}
+
+/**
+ * dispatchVisualJob() — điểm DUY NHẤT xử lý một visualJob (client-primary, renderer:'puter_image')
+ * bất kể job đó tới từ đâu: sự kiện SSE "visual:request" (đường thường), field `visualJob` gắn kèm
+ * "done"/JSON khi cache-hit (BUG FIX P0 — Puter phase final §3/§4), hay nhánh apiPost() fallback khi
+ * trình duyệt không hỗ trợ ReadableStream (§5). Gộp về một hàm để 3 call-site không thể lệch nhau
+ * (đúng lớp lỗi đã xảy ra ở streamViaProviderRouter trước bản vá này — logic đúng nhưng chỉ 1 nơi
+ * gọi nó, 1 nơi khác quên).
+ */
+function dispatchVisualJob(job, signal, { onVisualRequest, onVisualReady, onVisualError, onStatus } = {}) {
+  if (!job || job.renderer !== 'puter_image') return;
+  if (typeof onVisualRequest === 'function') onVisualRequest(job);
+  runClientVisualJob(job, signal).then(
+    (result) => { if (typeof onVisualReady === 'function') onVisualReady(result); },
+    (error) => { if (typeof onVisualError === 'function') onVisualError({
+      ...job, errorCode: (error && error.code) || 'PUTER_GENERATION_FAILED',
+      authRequired: isPuterAuthError(error)
+    }); }
+  );
+  if (typeof onStatus === 'function') onStatus(t('chat.visualGenerating'), 'GENERATING');
 }
 
 function bindClientVisualCallbacks({ message, container, conversation }) {
@@ -245,7 +305,7 @@ function bindClientVisualCallbacks({ message, container, conversation }) {
     renderVisuals(container, message.approachVisuals || message.detailVisuals || [], message.approachVisualStatus || message.detailVisualStatus);
     if (conversation) touchConversation(conversation);
   };
-  return {
+  const cb = {
     onVisualPending: () => {
       message.approachVisualStatus = 'pending';
       render();
@@ -266,10 +326,13 @@ function bindClientVisualCallbacks({ message, container, conversation }) {
       const list = message.detail !== undefined && message.detail !== null ? 'detailVisuals' : 'approachVisuals';
       const status = list === 'detailVisuals' ? 'detailVisualStatus' : 'approachVisualStatus';
       message[list] = [{ ...(message[list] && message[list][0] || failure), ...failure, renderFailed: true }];
-      message[status] = 'failed';
+      // Chưa Auth Puter: KHÔNG phải lỗi sinh ảnh — hiện thẻ "Mở Settings", đỗ job chờ người dùng tự Auth.
+      message[status] = failure && failure.authRequired ? 'auth_required' : 'failed';
+      if (failure && failure.authRequired) parkAuthRequiredJob(failure, cb);
       render();
     }
   };
+  return cb;
 }
 
 /**
@@ -289,10 +352,13 @@ async function apiPostStream(path, body, { onDelta, onStatus, onVisualRequest, o
   if (!window.ReadableStream || !window.TextDecoder) {
     const data = await apiPost(path, body, { signal });
     if (data && data.text && typeof onDelta === 'function') onDelta(data.text);
+    // BUG FIX (P0 — Puter phase final §5): fallback không-stream trước đây bỏ qua hoàn toàn
+    // data.visualJob — trình duyệt cũ/không hỗ trợ ReadableStream vĩnh viễn mất khả năng tạo hình.
+    if (data && data.visualJob) dispatchVisualJob(data.visualJob, signal, { onVisualRequest, onVisualReady, onVisualError, onStatus });
     return data;
   }
 
-  const preparedStream = enforceRequestBudget({ ...body, stream: true });
+  const preparedStream = enforceRequestBudget({ ...withClientCaps(path, body), stream: true });
   const res = await fetch(path, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(preparedStream.body), signal });
   if (!res.ok || !res.body) {
     // Server từ chối trước khi mở stream (lỗi validate, thiếu API key...) — đọc lỗi JSON thường.
@@ -356,15 +422,7 @@ async function apiPostStream(path, body, { onDelta, onStatus, onVisualRequest, o
         if (typeof onStatus === 'function') onStatus(t('chat.visualPending'), lastKnownState);
       }
       else if (currentEvent === 'visual:request') {
-        if (typeof onVisualRequest === 'function') onVisualRequest(payload);
-        runClientVisualJob(payload, signal).then(
-          (result) => { if (typeof onVisualReady === 'function') onVisualReady(result); },
-          (error) => { if (typeof onVisualError === 'function') onVisualError({
-            ...payload, errorCode: error && error.code || 'upstream_failed',
-            authRequired: !!(error && (error.code === 'PUTER_AUTH_REQUIRED' || error.code === 'auth_required'))
-          }); }
-        );
-        if (typeof onStatus === 'function') onStatus(t('chat.visualGenerating'), 'GENERATING');
+        dispatchVisualJob(payload, signal, { onVisualRequest, onVisualReady, onVisualError, onStatus });
       }
       else if (currentEvent === 'visual:ready') {
         if (typeof onVisualReady === 'function') onVisualReady(payload);
@@ -3456,6 +3514,8 @@ function serializeVisualForConversation(v) {
   delete out.inputImages;
   delete out.auth;
   delete out.tokens;
+  // SVG tất định nhỏ (vài KB) GIỮ LẠI để sống sót qua reload không cần tính lại; quá 60KB thì bỏ (còn svgSpec).
+  if (typeof out.svg === 'string' && out.svg.length > 60000) delete out.svg;
   return out;
 }
 function serializeMessageForConversation(message) {
@@ -3496,12 +3556,37 @@ function updateChatMeta() {
   metaEl.textContent = parts.join(' · ');
 }
 
+// BUG FIX (P0 — Puter phase final §10/11 — OBJECT URL LIFECYCLE): Map<imageId, objectUrl> — canonical
+// owner DUY NHẤT của Object URL cho ảnh Puter đã lưu IndexedDB. ROOT CAUSE trước bản vá này:
+// renderVisualImage() gọi chatImageStore.get(imageId) MỖI LẦN card được vẽ lại tại chỗ (pending ->
+// ready, hoặc bấm "Thử tạo lại" thay nguyên card) — mỗi lần tạo 1 Object URL MỚI nhưng URL cũ (đã
+// gắn vào <img> vừa bị gỡ khỏi DOM) không bao giờ được revoke, vì revokeThreadBlobImages() chỉ chạy
+// khi CHUYỂN/ĐÓNG hội thoại, không chạy khi render lại NGAY TRONG cùng hội thoại. Kết quả: rò rỉ 1
+// Object URL mỗi vòng đời hình (2-3 lần render/hình là bình thường: pending -> ready, có thể + retry).
+// Khai báo TRƯỚC mọi hàm dùng nó (đúng nguyên tắc chống TDZ mà chính test/tdz-el-order.test.js canh giữ).
+const visualImageUrlRegistry = new Map();
+/** @returns {string} Object URL mới, sau khi đã revoke URL CŨ (nếu có) của cùng imageId. */
+function hydrateVisualObjectUrl(imageId, freshUrl) {
+  const prev = visualImageUrlRegistry.get(imageId);
+  if (prev && prev !== freshUrl) revokeImagePreviewUrl(prev);
+  visualImageUrlRegistry.set(imageId, freshUrl);
+  return freshUrl;
+}
+/** Gọi khi 1 ảnh cụ thể bị thay thế/xoá ngoài luồng render bình thường (vd xoá hội thoại chứa nó). */
+function forgetVisualObjectUrl(imageId) {
+  const prev = visualImageUrlRegistry.get(imageId);
+  if (prev) { revokeImagePreviewUrl(prev); visualImageUrlRegistry.delete(imageId); }
+}
+
 function revokeThreadBlobImages() {
   // Dọn mọi Object URL (blob:) đang gắn trên các <img> trong khung chat hiện tại trước khi xoá DOM —
   // vừa dùng cho ảnh vừa gửi (previewUrl) vừa dùng cho ảnh khôi phục từ IndexedDB (restoreMessageImage),
   // cả 2 đều KHÔNG tự revoke trước đây → rò rỉ Object URL mỗi lần chuyển/tạo hội thoại (risk còn lại
   // sau lần fix trước). An toàn khi gọi nhiều lần / gọi khi threadEl rỗng.
   threadEl.querySelectorAll('img[src^="blob:"]').forEach((img) => revokeImagePreviewUrl(img.src));
+  // Chuyển/đóng hội thoại coi như mọi URL cũ đã chết; xoá registry để lần render kế tiếp (kể cả cùng
+  // imageId) tạo URL mới sạch, không nhầm tưởng URL cũ (đã revoke) vẫn còn dùng được.
+  visualImageUrlRegistry.clear();
 }
 window.addEventListener('pagehide', revokeThreadBlobImages);
 
@@ -3626,7 +3711,10 @@ function deleteConversation(id) {
         if (v && v.imageId) imageIds.add(v.imageId);
       }));
     });
-    imageIds.forEach((imgId) => { window.chatImageStore.delete(imgId).catch(() => {}); });
+    // BUG FIX (P0 — §11): ảnh bị xoá khỏi IndexedDB nhưng Object URL của nó (nếu registry còn giữ)
+    // phải được revoke NGAY — nếu không, URL trỏ tới 1 Blob đã mất tham chiếu vẫn "sống" tới khi tab
+    // đóng (leak), và imageId đó nếu vô tình được tái dùng sau này sẽ đọc nhầm registry cũ.
+    imageIds.forEach((imgId) => { window.chatImageStore.delete(imgId).catch(() => {}); forgetVisualObjectUrl(imgId); });
   }
   if (state.currentConvId === id) {
     if (state.conversations.length) loadConversation(state.conversations[0].id, true);
@@ -4257,9 +4345,13 @@ function makeVisualRetryButton(v, hostEl) {
     btn.textContent = t('chat.visualGenerating');
     try {
       if (v.provider === 'puter' && window.puterVisualManager) {
-        const data = v.authRequired || v.errorCode === 'PUTER_AUTH_REQUIRED' || v.errorCode === 'auth_required'
-          ? await window.puterVisualManager.signInAndResume(v)
-          : await window.puterVisualManager.retry(v);
+        if (v.authRequired || isPuterAuthError(v)) {
+          // KHÔNG tự mở popup Auth từ nút thử lại: đưa người dùng tới Settings để tự bấm Auth.
+          if (window.puterAuthUI) window.puterAuthUI.openSettingsAtPuter();
+          btn.textContent = label; btn.disabled = false;
+          return;
+        }
+        const data = await window.puterVisualManager.retry(v);
         const merged = { ...v, ...data, renderFailed: false };
         const newCard = renderVisualCard(merged);
         const oldCard = hostEl.closest ? hostEl.closest('.visual-card') : null;
@@ -4312,7 +4404,7 @@ function renderVisualFailedCard(v) {
   }
   const msg = document.createElement('p');
   msg.className = 'visual-error-text';
-  msg.textContent = t('chat.visualGenerationFailed');
+  msg.textContent = t(puterFailKey(v.errorCode));
   fig.appendChild(msg);
   // Không có provider ảnh: nói THẲNG cần cấu hình gì — hệ thống KHÔNG dựng hình thay thế.
   if (v.reason === 'no_image_provider') {
@@ -4482,9 +4574,13 @@ function renderVisualImage(v) {
   if (v.imageId && window.chatImageStore) {
     window.chatImageStore.get(v.imageId).then((record) => {
       if (!record || !record.url) return renderVisualImageError(v, holder);
-      v.url = record.url;
+      // BUG FIX (P0 — §10/11): hydrateVisualObjectUrl() revoke URL cũ của ĐÚNG imageId này trước khi
+      // gắn URL mới — canonical owner duy nhất, không còn "manager get() -> URL#1, render get() ->
+      // URL#2" không ai revoke ai.
+      const url = hydrateVisualObjectUrl(v.imageId, record.url);
+      v.url = url;
       v.format = 'image_url';
-      img.src = record.url;
+      img.src = url;
     }).catch(() => renderVisualImageError(v, holder));
   } else if (v.url) {
     img.src = visualProxySrc(v, 'inline');
@@ -4649,8 +4745,142 @@ function renderVisualProviderLabel(v) {
   return el;
 }
 
+/** @returns {boolean} v là SVG TẤT ĐỊNH do server dựng bằng code (đã qua validateSvg phía server). */
+function isDeterministicSvgVisual(v) {
+  return !!(v && v.format === 'svg' && typeof v.svg === 'string' && /^\s*<svg[\s>]/i.test(v.svg) && v.svg.length <= 120000);
+}
+/** SVG hiển thị qua <img src="data:image/svg+xml">: script trong SVG không bao giờ chạy trong <img> (defense in depth). */
+function svgDataUri(svg) { return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(String(svg)); }
+function svgDownloadName(v) {
+  const base = String(v.title || v.type || 'so-do').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w\-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'so-do';
+  return `${base}.svg`;
+}
+function downloadSvgVisual(v, btn) {
+  try {
+    const blob = new Blob([v.svg], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = svgDownloadName(v);
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (e) {
+    if (btn) { const l = btn.textContent; btn.textContent = t('chat.visualDownloadFailed'); setTimeout(() => { btn.textContent = l; }, 2500); }
+  }
+}
+function openSvgLightbox(v) {
+  if (!isDeterministicSvgVisual(v)) return null;
+  const prev = document.querySelector('.visual-lightbox');
+  if (prev) prev.remove();
+  const box = document.createElement('div');
+  box.className = 'visual-lightbox';
+  box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true'); box.setAttribute('aria-label', v.title || t('chat.visualOpen'));
+  const inner = document.createElement('div'); inner.className = 'visual-lightbox-inner';
+  const img = document.createElement('img'); img.className = 'visual-lightbox-img visual-svg-lightbox-img'; img.alt = v.alt || v.title || ''; img.src = svgDataUri(v.svg);
+  inner.appendChild(img);
+  const bar = document.createElement('div'); bar.className = 'visual-lightbox-bar';
+  const dl = document.createElement('button'); dl.type = 'button'; dl.className = 'visual-btn'; dl.textContent = t('visual.svg.download');
+  dl.addEventListener('click', () => downloadSvgVisual(v, dl));
+  const close = document.createElement('button'); close.type = 'button'; close.className = 'visual-btn visual-btn-close'; close.textContent = t('chat.visualClose');
+  bar.appendChild(dl); bar.appendChild(close); inner.appendChild(bar); box.appendChild(inner);
+  const onKey = (e) => { if (e.key === 'Escape') destroy(); };
+  function destroy() { document.removeEventListener('keydown', onKey); box.remove(); }
+  close.addEventListener('click', destroy);
+  box.addEventListener('click', (e) => { if (e.target === box) destroy(); });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(box);
+  try { close.focus(); } catch (e) { /* ignore */ }
+  return box;
+}
+function renderVisualSvgCard(v) {
+  if (!isDeterministicSvgVisual(v)) return null;
+  const fig = document.createElement('figure');
+  fig.className = 'visual-figure visual-card visual-card-svg';
+  if (v.title) { const head = document.createElement('div'); head.className = 'visual-card-head'; head.textContent = v.title; fig.appendChild(head); }
+  const wrap = document.createElement('div'); wrap.className = 'visual-svg-wrap';
+  const img = document.createElement('img'); img.className = 'visual-img visual-svg-img'; img.alt = v.alt || v.title || ''; img.decoding = 'async'; img.src = svgDataUri(v.svg);
+  img.addEventListener('click', () => openSvgLightbox(v));
+  wrap.appendChild(img); fig.appendChild(wrap);
+  const note = document.createElement('p'); note.className = 'visual-origin-note visual-svg-note'; note.textContent = t('visual.svg.exact'); fig.appendChild(note);
+  const bar = document.createElement('div'); bar.className = 'visual-actions';
+  const open = document.createElement('button'); open.type = 'button'; open.className = 'visual-btn'; open.textContent = t('chat.visualOpen'); open.addEventListener('click', () => openSvgLightbox(v));
+  const dl = document.createElement('button'); dl.type = 'button'; dl.className = 'visual-btn'; dl.textContent = t('visual.svg.download'); dl.addEventListener('click', () => downloadSvgVisual(v, dl));
+  bar.appendChild(open); bar.appendChild(dl); fig.appendChild(bar);
+  return fig;
+}
+/** Thẻ THÔNG BÁO (vd. dữ kiện mâu thuẫn nên KHÔNG vẽ). Không có nút thử lại: thử lại dữ kiện sai vô ích. */
+let puterSkipNoteId = null; // chỉ MỘT dòng nhắc "chưa Auth Puter" cho mỗi lần tải trang (không làm phiền)
+function renderVisualNoticeCard(v) {
+  const isSkip = v.noticeKind === 'puter_auth_skipped';
+  if (isSkip) { if (puterSkipNoteId && puterSkipNoteId !== v.visualId) return null; puterSkipNoteId = v.visualId || 'skip'; }
+  const fig = document.createElement('figure');
+  fig.className = 'visual-figure visual-card visual-card-notice' + (isSkip ? ' visual-card-skip' : '');
+  fig.setAttribute('role', 'note');
+  const head = document.createElement('div'); head.className = 'visual-card-head'; head.textContent = isSkip ? t('puter.skip.title') : (v.title || t('visual.notice.title')); fig.appendChild(head);
+  const msg = document.createElement('p'); msg.className = 'visual-error-text visual-notice-text'; msg.textContent = isSkip ? t('puter.skip.message') : String(v.message || ''); fig.appendChild(msg);
+  if (isSkip) {
+    const row = document.createElement('div'); row.className = 'visual-auth-actions';
+    const open = document.createElement('button'); open.type = 'button'; open.className = 'visual-btn'; open.textContent = t('puter.card.openSettings');
+    open.addEventListener('click', () => { if (window.puterAuthUI) window.puterAuthUI.openSettingsAtPuter(); });
+    row.appendChild(open); fig.appendChild(row);
+  }
+  return fig;
+}
+/** Thẻ "cần Auth Puter": CHỈ điều hướng tới Settings — TUYỆT ĐỐI không tự mở popup Auth từ thẻ này. */
+function renderVisualAuthCard(v) {
+  const fig = document.createElement('figure');
+  fig.className = 'visual-figure visual-card visual-card-failed visual-card-auth';
+  if (v.title) { const head = document.createElement('div'); head.className = 'visual-card-head'; head.textContent = v.title; fig.appendChild(head); }
+  const msg = document.createElement('p'); msg.className = 'visual-error-text'; fig.appendChild(msg);
+  const row = document.createElement('div'); row.className = 'visual-auth-actions'; fig.appendChild(row);
+  const job = extractPuterJob(v);
+  const auth = window.puterAdapter && window.puterAdapter.auth;
+  const sync = () => {
+    row.textContent = '';
+    const authed = !!(auth && auth.isAuthenticated());
+    if (authed && job) {
+      msg.textContent = t('puter.card.readyHint');
+      const go = document.createElement('button'); go.type = 'button'; go.className = 'visual-btn visual-btn-retry'; go.textContent = t('puter.card.generateNow');
+      go.addEventListener('click', async () => {
+        go.disabled = true; go.textContent = t('chat.visualGenerating');
+        try {
+          const data = await window.puterVisualManager.runNow(job);
+          const merged = { ...v, ...data, renderFailed: false, authRequired: false, errorCode: null };
+          const newCard = renderVisualCard(merged);
+          if (newCard) { newCard.setAttribute('data-visual-card', '1'); if (fig.parentNode) fig.parentNode.replaceChild(newCard, fig); }
+        } catch (e) {
+          if (isPuterAuthError(e)) { sync(); return; }
+          go.disabled = false; go.textContent = t('chat.visualRetryFailed');
+          setTimeout(() => { go.textContent = t('puter.card.generateNow'); }, 2500);
+        }
+      });
+      row.appendChild(go);
+    } else {
+      msg.textContent = t('puter.card.authRequired');
+      const open = document.createElement('button'); open.type = 'button'; open.className = 'visual-btn'; open.textContent = t('puter.card.openSettings');
+      open.addEventListener('click', () => { if (window.puterAuthUI) window.puterAuthUI.openSettingsAtPuter(); });
+      row.appendChild(open);
+    }
+  };
+  sync();
+  if (auth && typeof auth.subscribe === 'function') {
+    const unsub = auth.subscribe(() => { if (!fig.isConnected) { unsub(); return; } sync(); });
+  }
+  return fig;
+}
+/** Mã lỗi Puter -> khoá dịch cụ thể (không dùng thông báo chung chung khi biết nguyên nhân). */
+function puterFailKey(code) {
+  return ({
+    PUTER_RATE_LIMIT: 'puter.fail.rate_limit', PUTER_NETWORK_ERROR: 'puter.fail.network', PUTER_PROVIDER_ERROR: 'puter.fail.provider',
+    PUTER_INSUFFICIENT_FUNDS: 'puter.fail.funds', PUTER_CONTENT_REFUSED: 'puter.fail.refused', PUTER_INVALID_RESULT: 'puter.fail.invalid',
+    PUTER_IMAGE_VALIDATION_FAILED: 'puter.fail.invalid', PUTER_SDK_UNAVAILABLE: 'puter.fail.sdk'
+  })[code] || 'chat.visualGenerationFailed';
+}
+
 function renderVisualCard(v) {
   if (!v) return null;
+  if (v.format === 'notice') return renderVisualNoticeCard(v);
+  if (isDeterministicSvgVisual(v)) return renderVisualSvgCard(v);
+  if (v.renderFailed && (v.authRequired || isPuterAuthError(v))) return renderVisualAuthCard(v);
   if (v.renderFailed) return renderVisualFailedCard(v); // stub lỗi kèm nút thử lại.
   // Chỉ ẢNH AI THẬT mới được dựng thành card. Không có nhánh SVG nào ở đây nữa: payload lạ ->
   // không hiển thị gì, text answer vẫn nguyên vẹn.
@@ -4701,12 +4931,12 @@ function renderVisualCard(v) {
 function renderVisuals(container, visuals, status) {
   if (!container) return;
   // Dọn placeholder loading của lượt trước (nếu có) trước khi vẽ kết quả thật.
-  container.querySelectorAll('.visual-loading').forEach((el) => el.remove());
+  container.querySelectorAll('.visual-loading, [data-visual-card]').forEach((el) => el.remove());
 
   if (status === 'pending') {
     const wait = document.createElement('div');
     wait.className = 'visual-note visual-loading';
-    wait.textContent = t('chat.visualGenerating');
+    wait.textContent = t('visual.status.ai');
     container.appendChild(wait);
     return;
   }
@@ -4724,7 +4954,7 @@ function renderVisuals(container, visuals, status) {
   if (!hasVisual) return;
   visuals.forEach((v) => {
     const card = renderVisualCard(v);
-    if (card) container.appendChild(card);
+    if (card) { card.setAttribute('data-visual-card', '1'); container.appendChild(card); }
   });
 }
 

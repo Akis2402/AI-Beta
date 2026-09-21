@@ -301,3 +301,12 @@ Mỗi khi gửi câu hỏi, khung nổi **"📚 Đề xuất ôn tập"** tự b
 - **Thêm/bớt trang ưu tiên**: sửa mảng `PRIORITY_SITES` trong `server/routes/recommend.js` (dùng chung cho cả lời nhắc tìm kiếm lẫn link dự phòng).
 - **Giới hạn tần suất**: biến `RATE_LIMIT_RECOMMEND` trong `.env` (mặc định 40 lượt/15 phút/IP, tách riêng khỏi `RATE_LIMIT_CHAT`).
 - **Tắt hẳn tính năng này**: xóa/không mount `app.use('/api/recommend', ...)` trong `server/app.js`, và bỏ lời gọi `scheduleRecommend(query)` trong `sendMessage()` (`public/js/app.js`) — phần UI (`#recommendPanel`) sẽ không bao giờ được kích hoạt nếu không có gì gọi nó.
+
+## 11. Hybrid Visual Engine (SVG tất định) + Auth Puter.js chỉ trong Settings
+
+Chi tiết đầy đủ, bảng kiểm chứng và giới hạn: xem **`HYBRID-VISUAL-PUTER-AUTH-RESULT.md`**.
+
+- **Chọn renderer**: `server/utils/visual/visualDeterminationEngine.js` là điểm quyết định duy nhất — *đề bài → (cần hình?) → SVG tất định dựng được chính xác? → SVG | ảnh AI (Puter) | không hình*. Toán/Lý/Hoá dựng được chính xác thì đi **SVG do code dựng** (`server/utils/visual/deterministic/`), 0 token, 0 lệnh gọi ảnh, **không cần Auth Puter**. Dữ kiện mâu thuẫn → không vẽ, hiện thẻ thông báo (không bịa).
+- **Auth Puter chỉ khi người dùng bấm nút trong Settings** (`public/js/ui/puterAuthUI.js` + `public/js/providers/puterAdapter.js`): không bao giờ tự popup lúc tải trang / SSE / retry / fallback provider. Lần đầu chưa Auth chỉ hiện *thông báo* (không phải popup Auth); "Không hiển thị lại hôm nay" tính theo **ngày lịch** của trình duyệt.
+- **Biến môi trường**: `PUTER_VISUAL_MODE` (mặc định `client_primary`), `PUTER_VISUAL_DEBUG=true` (log chẩn đoán phía server, không log token/đề bài). Phía client: `?puterDebug=1` hoặc `localStorage['tro-giai:puter-debug']='1'`.
+- **Test**: `npm test` (gồm `hybrid-svg-engine`, `puter-auth-flow`, `chat-route-harness`); E2E trình duyệt thật: `npm run e2e-hybrid` (cần `pip install playwright` + Chromium; SDK Puter được giả lập).

@@ -23,6 +23,7 @@
     "measure-tokens": "node scripts/measure-tokens.js",
     "live-image-check": "node scripts/live-image-check.js",
     "puter-browser-smoke": "node scripts/puter-browser-smoke.js",
+    "e2e-hybrid": "python3 test/e2e/hybrid_puter_e2e.py",
     "visual-corpus-report": "node scripts/visual-corpus-report.js",
     "live-source-check": "node scripts/live-source-check.js",
     "test:ci": "npm run build && node scripts/check-static-assets.js && node test/run-all.js --ci",
@@ -45,6 +46,7 @@
     "@types/node": "^26.6.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "playwright": "^1.63.0",
     "typescript": "^7.0.2"
   },
   "allowScripts": {

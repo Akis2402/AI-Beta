@@ -50,6 +50,7 @@ const CORE_JS = [
 const I18N_JS = ['translations.js', 'languageStore.js', 'i18n.js'];
 const PROVIDER_JS = ['puterAdapter.js', 'providerRouter.js'];
 const VISUAL_JS = ['puterVisualManager.js'];
+const UI_JS = ['puterAuthUI.js']; // Giao diện Auth Puter (Settings + popup thông báo)
 const TASK_JS = ['conversationTaskManager.js', 'backgroundTaskUI.js'];
 const CORE_CSS = ['styles.css'];
 
@@ -138,6 +139,7 @@ function main() {
   process('js/i18n', I18N_JS);
   process('js/providers', PROVIDER_JS);
   process('js/visual', VISUAL_JS);
+  process('js/ui', UI_JS);
   process('js/tasks', TASK_JS);
   process('css', CORE_CSS);
 
@@ -162,4 +164,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { main, hashOf, buildTagRegex, CORE_JS, CORE_CSS, VISUAL_JS };
+module.exports = { main, hashOf, buildTagRegex, CORE_JS, CORE_CSS, VISUAL_JS, UI_JS };

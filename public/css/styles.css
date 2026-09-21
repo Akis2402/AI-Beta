@@ -1666,3 +1666,54 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 #bgTaskPanel.dragging .rec-head{cursor:grabbing;}
 .bgtask-act--recover:hover{border-color:var(--amber);color:var(--amber);}
 @media (max-width:760px){ #bgTaskPanel .rec-head{cursor:default;} }
+
+/* =========================================================================
+   HYBRID VISUAL ENGINE — SVG tất định + Puter.js Auth (Settings) + thông báo
+   ========================================================================= */
+#puterAuthSection [hidden] { display: none !important; }
+#puterAuthSection .set-desc { margin: 0 0 12px; font-size: 12.5px; line-height: 1.55; color: var(--muted); }
+.puter-auth-status-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.puter-status {
+  display: inline-flex; align-items: center; padding: 3px 11px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 600; border: 1px solid var(--rule); background: var(--paper-2); color: var(--text);
+}
+.puter-status[data-status="authenticated"] { color: #15803d; border-color: rgba(21, 128, 61, 0.45); background: rgba(21, 128, 61, 0.1); }
+.puter-status[data-status="unauthenticated"] { color: #b45309; border-color: rgba(180, 83, 9, 0.45); background: rgba(180, 83, 9, 0.1); }
+.puter-status[data-status="error"] { color: var(--danger, #dc2626); border-color: rgba(220, 38, 38, 0.45); background: rgba(220, 38, 38, 0.09); }
+.puter-user { font-size: 12.5px; color: var(--muted); }
+.puter-auth-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.puter-auth-btn { font-weight: 700; }
+.puter-auth-btn:disabled { opacity: 0.6; cursor: progress; }
+.puter-auth-help { margin: 10px 0 0; font-size: 12.5px; line-height: 1.55; color: var(--muted); }
+
+/* Popup THÔNG BÁO lần đầu (không phải popup Auth): thẻ nhỏ góc dưới, không chặn thao tác. */
+.puter-notice {
+  position: fixed; right: 18px; bottom: 18px; z-index: 2300; width: min(390px, calc(100vw - 36px));
+  padding: 16px 16px 14px; border-radius: 14px; background: var(--paper-3, #fff); color: var(--text);
+  border: 1px solid var(--rule); box-shadow: 0 10px 34px rgba(0, 0, 0, 0.22);
+  animation: puterNoticeIn 0.22s ease-out;
+}
+.puter-notice-title { font-size: 14.5px; font-weight: 700; margin: 0 0 6px; }
+.puter-notice-body { margin: 0 0 12px; font-size: 13.5px; line-height: 1.55; }
+.puter-notice-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.puter-notice-btn {
+  font: inherit; font-size: 13px; padding: 7px 12px; border-radius: 9px; cursor: pointer;
+  border: 1px solid var(--rule); background: var(--paper-2); color: var(--text);
+}
+.puter-notice-btn:hover { border-color: var(--primary, #4f46e5); }
+.puter-notice-btn:focus-visible { outline: 2px solid var(--primary, #4f46e5); outline-offset: 2px; }
+.puter-notice-btn.primary { background: var(--primary, #4f46e5); border-color: var(--primary, #4f46e5); color: #fff; font-weight: 600; }
+.puter-notice-btn.subtle { background: transparent; color: var(--muted); }
+@keyframes puterNoticeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@media (max-width: 640px) { .puter-notice { left: 12px; right: 12px; bottom: 12px; width: auto; } }
+@media (prefers-reduced-motion: reduce) { .puter-notice { animation: none; } }
+
+/* Thẻ hình SVG tất định / thông báo / cần Auth */
+.visual-svg-wrap { display: flex; justify-content: center; padding: 6px; border-radius: 12px; background: #fff; overflow: hidden; }
+.visual-svg-wrap .visual-svg-img { display: block; width: 100%; max-width: 100%; height: auto; max-height: 460px; object-fit: contain; cursor: zoom-in; border-radius: 0; }
+.visual-svg-note { margin: 8px 0 0; }
+.visual-svg-lightbox-img { background: #fff; padding: 8px; border-radius: 10px; }
+.visual-card-notice { border: 1px dashed var(--rule); }
+.visual-notice-text { text-align: left; opacity: 0.9; }
+.visual-auth-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 640px) { .visual-svg-wrap .visual-svg-img { max-height: 320px; } }
