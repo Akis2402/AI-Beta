@@ -7,9 +7,11 @@
 // routes/chat.js chỉ import file này, không import trực tiếp từng module con.
 module.exports = {
   ...require('./visualPipeline'),
-  policy: require('./visualPolicy'),
   decisionEngine: require('./visualDecisionEngine'),
   determinationEngine: require('./visualDeterminationEngine'),
+  // V6.17.3: contract canonical của visual payload trong result cache (policy version, cờ hoàn tất,
+  // cửa đọc cache fail-closed). routes/chat.js dùng DUY NHẤT module này cho mọi nhánh writer/reader.
+  policy: require('./visualPolicy'),
   deterministic: require('./deterministic'),
   specBuilder: require('./visualSpecBuilder'),
   rendererRouter: require('./visualRendererRouter'),

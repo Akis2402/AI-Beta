@@ -33,7 +33,6 @@ const hqStore = require('./visualHqStore');
 const responseGuard = require('./visualResponseGuard');
 const determinationEngine = require('./visualDeterminationEngine');
 const deterministic = require('./deterministic');
-const visualPolicy = require('./visualPolicy');
 
 // Ngân sách thời gian RIÊNG cho toàn bộ hệ thống hình. Text answer luôn ưu tiên.
 const VISUAL_DEADLINE_MS = Number(process.env.VISUAL_DEADLINE_MS) || 12000;
@@ -172,7 +171,6 @@ async function runVisualPipeline(args) {
     // visualProviderAttempts: số lệnh gọi API THẬT tới image provider (có thể > 1 khi failover) —
     // hai con số này KHÁC NHAU và không bao giờ được gộp làm một (mục 35).
     visualStage: stage,
-    visualPolicy: 'auto', visualPolicyReason: null, visualLifecycleAllowed: true, visualSkippedByPolicy: false,
     visualLifecycleLocked: false,
     visualGenerationLifecycleCount: 0,
     visualProviderAttempts: 0,
@@ -186,18 +184,6 @@ async function runVisualPipeline(args) {
   };
 
   try {
-    // ---------- V6.15.2 — POLICY GATE ĐI ĐẦU TIÊN (trước stage lock/deadline/SVG/judge/cache/provider) ----------
-    // BUG CŨ (V6.15.0 Root Cause B/E): nhánh deadline "emergency" phía dưới thử deterministic.tryRender()
-    // TRƯỚC khi setting 'never' được áp dụng => người dùng chọn "Không bao giờ" vẫn có thể nhận SVG khi
-    // request sát deadline. `never` (không kèm yêu cầu tường minh) phải là VETO tuyệt đối: trả về ngay,
-    // KHÔNG dựng SVG, KHÔNG judge, KHÔNG đọc cache, KHÔNG chạm provider, KHÔNG mở I/O nào.
-    const policy = visualPolicy.resolveVisualPolicy({ userPreference, question: rawQuestion || question, stage });
-    telemetry.visualPolicy = policy.mode;
-    telemetry.visualPolicyReason = policy.reason;
-    telemetry.visualLifecycleAllowed = policy.allowVisualLifecycle;
-    if (!policy.allowVisualLifecycle) return visualPolicy.skippedResult(policy, stage);
-    telemetry.visualSkippedByPolicy = false;
-
     // ---------- MỤC 31/32: STAGE KHÔNG ĐƯỢC SINH HÌNH -> DÙNG LẠI, KHÔNG ĐI TIẾP ----------
     // Trả về TRƯỚC decisionEngine/judge/specBuilder/imageClient. Không phải \"guard thêm\" mà là một
     // nhánh trả về riêng: mọi lệnh gọi tốn token/tiền nằm SAU điểm này nên không thể lọt qua.

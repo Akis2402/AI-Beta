@@ -119,8 +119,18 @@ function parseSse(raw) {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
 
+  // TEST DRIFT ĐÃ SỬA (V6.17.5 — fixture, KHÔNG phải production):
+  // Fixture cũ dùng 'Vẽ đồ thị hàm số y = x^2 ...'. Câu đó nằm ĐÚNG trong tập mà Hybrid Visual
+  // Engine dựng được bằng SVG TẤT ĐỊNH (0 token, 0 lệnh gọi image model) nên
+  // visualDeterminationEngine trả visualType:'svg', renderer:'deterministic_svg' — KHÔNG BAO GIỜ
+  // là 'puter_image'. Hành vi đó là CHỦ ĐÍCH và đang được khoá bởi hai test khác đang PASS:
+  //   test/visual-system.test.js       : ['Vẽ đồ thị hàm số y = x^2 - 2x - 3', 'math'] -> 'svg'
+  //   test/hybrid-svg-engine.test.js   : '... bằng AI' -> nhánh ảnh AI (WANT_AI_RE)
+  // Vì vậy fixture cũ fail ở TẦNG QUYẾT ĐỊNH RENDERER, chưa bao giờ chạm tới thứ test này muốn
+  // kiểm (cache/visualJob). Thêm "bằng AI" để request thực sự đi nhánh Puter client-primary —
+  // KHÔNG hạ chuẩn production, không ép SVG thành ảnh AI.
   const visualBody = {
-    query: 'Vẽ đồ thị hàm số y = x^2 và trình bày các điểm đặc biệt của parabol này.',
+    query: 'Vẽ bằng AI hình minh hoạ đồ thị hàm số y = x^2 và trình bày các điểm đặc biệt của parabol này.',
     stage: 'approach', stream: true, deepThinking: false, crossCheck: false,
     settings: { lang: 'Tiếng Việt', detail: 'tiêu chuẩn', school: 'thpt', grade: '10', visual: 'always' }
   };
@@ -163,7 +173,7 @@ function parseSse(raw) {
   try {
     const jsonBody = {
       ...visualBody, stream: false,
-      query: 'Vẽ đồ thị hàm số y = 2x^2 - 1 và trình bày các điểm đặc biệt của parabol này.'
+      query: 'Vẽ bằng AI hình minh hoạ đồ thị hàm số y = 2x^2 - 1 và trình bày các điểm đặc biệt của parabol này.'
     };
     const res = await postChat(port, jsonBody);
     assert.strictEqual(res.status, 200, 'JSON non-stream phải trả 200: ' + res.raw.slice(0, 300));

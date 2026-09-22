@@ -3,7 +3,6 @@
 const express = require('express');
 const router = express.Router();
 const { getActiveProviders, ensureProvidersReady, callWithFailover } = require('../utils/aiProviders');
-const anthropicClient = require('../utils/anthropicClient');
 const { buildRecommendSystemPrompt } = require('../utils/promptBuilder');
 const { parseJSONSafe } = require('../utils/jsonSafe');
 const { createRecommendCache } = require('../utils/recommendCache');
@@ -72,46 +71,37 @@ function buildSuggestedLinks(query) {
   return siteLinks;
 }
 
-// ============================================================================================
-// V6.16.2/V6.16.26 — GAP ĐÃ PHÁT HIỆN QUA AUDIT: `anthropicClient.callClaudeWebSearch()` (hàm DUY
-// NHẤT trong codebase trả về URL THẬT từ web_search_tool_result) được export nhưng KHÔNG NƠI NÀO
-// gọi. Route này (TRƯỚC KHI vá) gọi callWithFailover() (generic, đa provider) rồi TIN THẲNG URL
-// model tự viết ra trong JSON — vi phạm "model says 'Nguồn: url' không đủ, phải có tool result
-// chứa URL đó" (V6.16.26). Phần sanitize/grounding thuần (0 dependency) đã tách ra
-// server/utils/source/linkGrounding.js để test trực tiếp không cần `npm install` — cùng quy ước
-// với citationValidator.js/sourceProvenance.js. Chi tiết 2 đường GROUNDED/UNGROUNDED: xem comment
-// đầu file linkGrounding.js.
-const { sanitizeGroundedLinks, domainOnlySearchLinks } = require('../utils/source/linkGrounding');
-
-/**
- * Đường CÓ GROUNDING THẬT: chỉ dùng khi ANTHROPIC_API_KEY được cấu hình. Gọi thẳng
- * callClaudeWebSearch() (không qua callWithFailover, vì đây là hàm DUY NHẤT trả về `results` —
- * danh sách URL thật mà Anthropic đã tự query) rồi sanitizeGroundedLinks() đối chiếu.
- * Trả về null nếu không cấu hình/lỗi/không có link nào khớp registry — KHÔNG throw.
- */
-async function fetchGroundedLinks(query) {
-  if (!anthropicClient.isConfigured()) return null;
-  try {
-    const { text, results } = await anthropicClient.callClaudeWebSearch({
-      system: buildRecommendSystemPrompt(),
-      messages: [{ role: 'user', content: query }],
-      maxTokens: 1350,
-      timeoutMs: RECOMMEND_TIMEOUT_MS
+// Lọc + chuẩn hoá danh sách link AI trả về: chỉ giữ url http(s) hợp lệ, cắt độ dài title/note, bỏ
+// trùng domain (AI đôi khi trả nhiều link cùng 1 trang), giới hạn tối đa MAX_LINKS.
+function sanitizeAiLinks(rawLinks) {
+  if (!Array.isArray(rawLinks)) return [];
+  const seenDomains = new Set();
+  const out = [];
+  for (const item of rawLinks) {
+    if (!item || typeof item.url !== 'string') continue;
+    let url;
+    try { url = new URL(item.url); } catch (e) { continue; }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+    const domain = url.hostname.replace(/^www\./, '');
+    if (seenDomains.has(domain)) continue;
+    seenDomains.add(domain);
+    out.push({
+      url: url.toString(),
+      title: String(item.title || domain).trim().slice(0, 120),
+      note: String(item.note || '').trim().slice(0, 200),
+      domain
     });
-    const parsed = parseJSONSafe(text);
-    const links = sanitizeGroundedLinks(parsed.links, (results || []).map((r) => r.url));
-    return links.length ? links : null;
-  } catch (err) {
-    return null;
+    if (out.length >= MAX_LINKS) break;
   }
+  return out;
 }
 
-// Gọi AI + web search (đa provider, KHÔNG có grounding URL thật — xem ghi chú đầu file) để tìm
-// domain liên quan tới câu hỏi. Trả về null (KHÔNG throw) khi không có provider phù hợp/AI lỗi/
-// không tìm ra domain nào — để router bên dưới rơi thẳng về fallback tĩnh.
+// Gọi AI + web search thật để tìm link liên quan tới câu hỏi. Trả về null (KHÔNG throw) khi không
+// có provider phù hợp/AI lỗi/không tìm ra link nào — để router bên dưới rơi thẳng về fallback tĩnh
+// mà không cần try/catch lồng nhau ở nơi gọi.
 async function fetchAiLinks(query) {
   await ensureProvidersReady();
-  const webSearchProviders = getActiveProviders().filter((p) => p.supportsWebSearch && p.providerKey !== 'anthropic');
+  const webSearchProviders = getActiveProviders().filter((p) => p.supportsWebSearch);
   if (!webSearchProviders.length) return null; // chưa cấu hình provider nào hỗ trợ web search
 
   try {
@@ -123,10 +113,7 @@ async function fetchAiLinks(query) {
       timeoutMs: RECOMMEND_TIMEOUT_MS
     });
     const parsed = parseJSONSafe(text);
-    // KHÔNG tin URL model viết ra ở đây: OpenAI/Gemini qua callWithFailover chỉ trả text tổng hợp,
-    // codebase hiện chưa parse được tool-result URL thật của 2 provider này (khác Anthropic). Hạ
-    // cấp về link "site:domain" (Google tự resolve thật, không có rủi ro link chết/bịa).
-    const links = domainOnlySearchLinks(parsed.links, query);
+    const links = sanitizeAiLinks(parsed.links);
     return links.length ? links : null;
   } catch (err) {
     return null; // mọi lỗi (timeout, tất cả provider lỗi, JSON hỏng...) đều rơi về fallback tĩnh
@@ -146,7 +133,7 @@ router.post('/', async (req, res, next) => {
     const cached = await recommendCache.getAsync(query);
     if (cached) return res.json({ ...cached, fromCache: true, cacheTier: recommendCache.tiers() });
 
-    const aiLinks = (await fetchGroundedLinks(query)) || (await fetchAiLinks(query));
+    const aiLinks = await fetchAiLinks(query);
     const links = aiLinks || buildSuggestedLinks(query);
     const payload = { topic, links, source: aiLinks ? 'ai' : 'fallback' };
     await recommendCache.setAsync(query, payload); // ghi cả L1 và L2 (nếu có); L2 lỗi không chặn response
@@ -155,4 +142,4 @@ router.post('/', async (req, res, next) => {
 });
 
 module.exports = router;
-module.exports.__test__ = { buildSuggestedLinks, recommendCache };
+module.exports.__test__ = { buildSuggestedLinks, sanitizeAiLinks, recommendCache };
