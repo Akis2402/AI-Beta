@@ -43,13 +43,17 @@ test('4. lượt tiếp nối dùng phase recovery (reasoning giảm, answer bá
 
 // ---------- 2. Hệ thống hình: không được block/giết text ----------
 test('5. visual pipeline CHỈ chạy sau khi text answer đã xong', () => {
-  // Ở nhánh streaming, "done" (kèm visualPending) phải đi TRƯỚC lệnh gọi tạo hình — người dùng
-  // đọc xong lời giải rồi hình mới tới, và hình không bao giờ giữ chân text.
-  const pendingIdx = codeSrc.indexOf('visualPending: true');
+  // Ở nhánh streaming, "done" (kèm cờ visualPending/visualBlocking) phải đi TRƯỚC lệnh gọi tạo
+  // hình — người dùng đọc xong lời giải rồi hình mới tới, và hình không bao giờ giữ chân text.
+  // V6.15.5: cờ này KHÔNG còn hard-code `true` — nó phải phản ánh đúng visualPolicy đã resolve
+  // (policy.completionFlags()), vì 'never' (không kèm yêu cầu tường minh) phải phát ra false để
+  // client không chờ một đuôi hình sẽ không bao giờ tới (Root Cause C/D của V6.15.0).
+  const pendingIdx = codeSrc.indexOf('policy.completionFlags(routeVisualPolicy');
   const visualIdx = codeSrc.indexOf('await runVisualsFor(');
-  assert.ok(pendingIdx > 0, 'nhánh streaming phải gửi done kèm visualPending');
+  assert.ok(pendingIdx > 0, 'nhánh streaming phải gửi done kèm cờ policy.completionFlags(routeVisualPolicy, …)');
   assert.ok(visualIdx > 0, 'phải có lệnh gọi tạo hình');
   assert.ok(pendingIdx < visualIdx, 'PHẦN 20/21: "done" (text xong) phải được gửi TRƯỚC khi bắt đầu tạo hình');
+  assert.ok(codeSrc.includes('resolveVisualPolicy'), 'V6.15.2: route phải resolve visual policy qua cổng trung tâm, không tự viết lại logic never');
 });
 
 test('6. mọi lượt gọi visual đều đi qua runVisualsFor (lớp bọc không-bao-giờ-throw)', () => {

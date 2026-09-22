@@ -1235,6 +1235,15 @@ router.post('/', async (req, res, next) => {
       })
     };
 
+    // ---------- V6.15.2/V6.15.5 — POLICY resolve MỘT LẦN Ở ROUTE, dùng lại cho cache-guard + SSE flags ----------
+    // Đây LÀ snapshot cho execution này (V6.15.8): input.settings.visual đã được đọc và đóng băng lúc
+    // planRequest() chạy ở đầu route — không đọc lại setting sống giữa chừng request.
+    const routeVisualPolicy = visualSystem.policy.resolveVisualPolicy({
+      userPreference: input.settings.visual,
+      question: problemText,
+      stage: visualBase.stage
+    });
+
     // ---------- Cache hit: trả thẳng response đã tính trước, KHÔNG gọi lại AI (mục 21.18) ----------
     // MỤC 28: L1 (đồng bộ, trong tePlan) miss -> thử L2 BỀN VỮNG. L2 là best-effort tuyệt đối: lỗi
     // hoặc chậm thì coi như miss, không bao giờ làm request chính treo (xem CacheAdapter.getAsync).
@@ -1250,22 +1259,30 @@ router.post('/', async (req, res, next) => {
     reqLogger.log({ stage: 'result_cache_lookup', resultCacheHit, resultCacheLevel, l2Enabled: cacheLevels.l2, l2Reason: cacheLevels.reason });
     if (resultCacheHit && resultCacheValue) {
       reqLogger.log({ stage: 'token_economy_cache_hit', resultCacheLevel });
+      // ---------- V6.15.7 — CACHE POLICY HARDENING ----------
+      // BUG CŨ: visualJob còn trong payload cache được phát lại nguyên văn bất kể policy hiện tại —
+      // một cache được ghi lúc userPreference='auto' (có visualJob) bị 'never' (không explicit) của
+      // MỘT request KHÁC dùng lại y nguyên, tự ý bật vòng đời hình trái policy đang active. Guard:
+      // sanitizeCachedPayload() gỡ visuals/visualJob khỏi payload phát ra khi policy hiện tại không
+      // cho phép, và coi cache thiếu `visualPolicyVersion` (ghi bởi bản cũ chưa hiểu policy) là
+      // không đáng tin cho phần hình — vẫn dùng lại phần TEXT (an toàn, không đổi theo policy).
+      const cacheGuard = visualSystem.policy.sanitizeCachedPayload(resultCacheValue, routeVisualPolicy);
+      const safeCacheValue = cacheGuard.payload;
       if (wantsStream) {
         sseHeaders(res);
-        sseWrite(res, 'delta', { text: resultCacheValue.text });
-        sseWrite(res, 'done', { ...resultCacheValue, fromCache: true, cacheLevel: resultCacheLevel });
-        // BUG FIX (P0 — Puter phase final §3): text cache hit trước đây chỉ gửi "done" rồi đóng SSE
-        // ngay — client CHỈ enqueue Puter qua đúng 1 sự kiện "visual:request" (xem apiPostStream()
-        // trong app.js), "done" mang field visualJob không tự kích hoạt gì cả. Không phát lại sự
-        // kiện này thì mọi cache-hit (kể cả cùng nội dung câu hỏi) vĩnh viễn KHÔNG có hình, đúng bug
-        // "text cache hit == no visual" mà yêu cầu cấm tuyệt đối. renderer === 'puter_image' đảm bảo
-        // chỉ áp dụng cho nhánh client-primary — không đụng tới legacy server_fallback.
-        if (resultCacheValue.visualJob && resultCacheValue.visualJob.renderer === 'puter_image') {
-          sseWrite(res, 'visual:request', resultCacheValue.visualJob);
+        sseWrite(res, 'delta', { text: safeCacheValue.text });
+        sseWrite(res, 'done', {
+          ...safeCacheValue, fromCache: true, cacheLevel: resultCacheLevel,
+          ...visualSystem.policy.completionFlags(routeVisualPolicy, { visualMayFollow: cacheGuard.visualReplayAllowed })
+        });
+        // BUG FIX (P0 — Puter phase final §3), giữ nguyên NHƯNG nay đi qua cổng policy ở trên:
+        // chỉ phát "visual:request" khi cache thực sự được phép replay hình cho policy hiện tại.
+        if (cacheGuard.visualReplayAllowed && safeCacheValue.visualJob && safeCacheValue.visualJob.renderer === 'puter_image') {
+          sseWrite(res, 'visual:request', safeCacheValue.visualJob);
         }
         return res.end();
       }
-      return res.json({ ...resultCacheValue, fromCache: true, cacheLevel: resultCacheLevel });
+      return res.json({ ...safeCacheValue, fromCache: true, cacheLevel: resultCacheLevel });
     }
 
     // ============================================================================================
@@ -1338,7 +1355,12 @@ router.post('/', async (req, res, next) => {
         };
 
         if (wantsStream) {
-          sseWrite(res, 'done', { ...payload, visualPending: true });
+          // V6.15.6: hình là PRIMARY ARTIFACT ở nhánh image-only -> visualBlocking=true (khác nhánh
+          // giải bài, nơi hình luôn optional).
+          const imageOnlyPolicy = visualSystem.policy.resolveVisualPolicy({
+            userPreference: 'always', question: imageVisualBase.question, stage: 'image_only', explicitRequest: true
+          });
+          sseWrite(res, 'done', { ...payload, ...visualSystem.policy.completionFlags(imageOnlyPolicy, { visualMayFollow: true }) });
           const run = await runVisualsFor({
             ...imageVisualBase, finalAnswer: captionText, answerComplete: true,
             onEvent: (ev) => { const { type, ...rest } = ev; sseWrite(res, type, rest); }
@@ -1573,7 +1595,9 @@ router.post('/', async (req, res, next) => {
           // Người dùng đọc được lời giải đầy đủ trước, hình tới sau (hoặc không bao giờ tới) mà
           // KHÔNG ảnh hưởng gì. Với cross-check, tới đây candidates đã được reconcile xong nên hình
           // chắc chắn dựng từ FINAL VERIFIED FACTS, không phải candidate đầu tiên.
-          sseWrite(res, 'done', { ...donePayload, visualPending: true });
+          // V6.15.5: visualPending/visualBlocking phản ánh ĐÚNG policy đã resolve ở đầu route — khi
+          // 'never' (không explicit) chặn, cả hai đều false ngay tại đây, không còn hard-code true.
+          sseWrite(res, 'done', { ...donePayload, ...visualSystem.policy.completionFlags(routeVisualPolicy, { visualMayFollow: routeVisualPolicy.allowVisualLifecycle }) });
           const visualRun = await runVisualsFor({
             ...visualBase, finalAnswer: full, answerComplete: !outcome.partial, candidates,
             onEvent: (ev) => { const { type, ...rest } = ev; sseWrite(res, type, rest); }
@@ -1704,7 +1728,7 @@ router.post('/', async (req, res, next) => {
           citationMap: citationIndex.citationMap
         };
         // PHẦN 21: text xong -> "done" ngay; hình đi bằng sự kiện riêng, không chèn vào text stream.
-        sseWrite(res, 'done', { ...directDonePayload, visualPending: true });
+        sseWrite(res, 'done', { ...directDonePayload, ...visualSystem.policy.completionFlags(routeVisualPolicy, { visualMayFollow: routeVisualPolicy.allowVisualLifecycle }) });
         const directVisualRun = await runVisualsFor({
           ...visualBase, finalAnswer: full, answerComplete: !directOutcome.partial,
           onEvent: (ev) => { const { type, ...rest } = ev; sseWrite(res, type, rest); }
