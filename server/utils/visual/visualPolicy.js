@@ -1,173 +1,190 @@
 'use strict';
 
 // ============================================================================================
-// V6.15 — VISUAL POLICY GATE DUY NHẤT (resolveVisualPolicy)
+// VISUAL POLICY — CANONICAL VISUAL CACHE CONTRACT (Master Prompt V6.17.3 / V6.17.4)
 // ============================================================================================
-// Root cause (audit V6.15.0):
-//   A. `settings.visual = 'never'` chỉ được kiểm tra BÊN TRONG decisionEngine — tức là SAU khi
-//      pipeline đã đi qua nhánh deadline/degrade, nhánh emergency (dựng SVG tất định) và
-//      decisionEngine.evaluateVisualNeed(). "never" là một policy, không phải một tuỳ chọn UI.
-//   B. Route vẫn gọi runVisualsFor() -> runVisualPipeline() cho MỌI câu trả lời thường và giữ SSE mở
-//      cho tới khi pipeline trả về.
-//   C. Cache hit phát lại `visual:request` từ visualJob cũ bất kể policy hiện tại.
+// Vấn đề gốc mà module này giải quyết (PRODUCTION BUG T1):
 //
-// Module này là ĐIỂM QUYẾT ĐỊNH DUY NHẤT. visualPipeline, route chat và đường phát lại cache đều
-// gọi hàm này — không nơi nào tự viết lại logic "never" (V6.15.14: không copy vào 5-10 file).
+//   Trước bản này, `routes/chat.js` ghi thẳng `donePayload` / `directDonePayload` /
+//   `jsonDonePayload` / `finalJsonPayload` vào `tokenEconomy.globalCache`. Payload đó có
+//   `visualJob` nhưng KHÔNG có bất kỳ metadata policy nào. Hệ quả:
 //
-// Nguồn của "yêu cầu tường minh" là CHÍNH bộ tín hiệu explicit của decisionEngine
-// (visualScoringConfig.GENERIC_SIGNALS) nên hai nơi không thể lệch nhau.
-// ============================================================================================
+//     1. Không có cách nào phân biệt cache entry sinh ra dưới policy nào, ở phiên bản contract
+//        nào — một entry cũ (trước khi có visualJob) và một entry mới nhìn giống hệt nhau.
+//     2. Nhánh cache-hit replay `visual:request` VÔ ĐIỀU KIỆN theo `renderer === 'puter_image'`:
+//        người dùng đổi setting sang "never" vẫn bị phát lại job hình (fail-OPEN).
+//     3. Một entry cũ/stale vẫn được replay dù contract của job đã đổi.
+//
+//   Module này là SOURCE OF TRUTH DUY NHẤT cho:
+//     - `VISUAL_POLICY_VERSION`  : phiên bản hợp lệ của cache replay.
+//     - `resolveRoutePolicy()`   : policy hiệu lực của REQUEST HIỆN TẠI (không phải của cache).
+//     - `completionFlags()`      : metadata policy gắn vào MỌI payload rời khỏi route.
+//     - `finalizeVisualCachePayload()` : shape canonical được GỬI ĐI và GHI VÀO CACHE (một shape).
+//     - `sanitizeCachedPayload()`: cửa đọc cache, FAIL-CLOSED.
+//
+// NGUYÊN TẮC FAIL-CLOSED (V6.17.14 — KHÔNG ĐƯỢC NỚI LỎNG):
+//   Thiếu `visualPolicyVersion`, hoặc sai phiên bản, hoặc policy hiện tại chặn hình
+//   -> GIỮ TEXT, GỠ artifact hình, KHÔNG replay `visual:request`, KHÔNG tự sinh ảnh mới.
+//   Cache KHÔNG BAO GIỜ được trở thành lý do tạo ảnh mới (V6.17.8).
+//
+// PHÂN TÁCH DANH TÍNH (V6.17.4) — không được trộn:
+//   visualId            = danh tính ARTIFACT
+//   visualFingerprint   = danh tính CACHE của hình
+//   visualPolicyVersion = tính hợp lệ của REPLAY
+//   cacheKeyParts       = danh tính CACHE của text
+// Cache hit != new generation. Cache replay != provider call.
 
-const CFG = require('./visualScoringConfig');
+const decisionEngine = require('./visualDecisionEngine');
+const { stageMayGenerate } = require('./visualPipeline');
 
-const { SETTING, GENERIC_SIGNALS } = CFG;
+// Phiên bản contract của visual payload nằm trong result cache. TĂNG SỐ NÀY mỗi khi shape của
+// `visualJob` / `visuals` / cờ policy thay đổi theo cách khiến entry cũ không còn replay đúng.
+// Entry ghi ở phiên bản khác sẽ bị coi là stale và bị sanitize (fail-closed), KHÔNG bị "châm chước".
+const VISUAL_POLICY_VERSION = 'vp-1';
 
-/** Tăng khi ngữ nghĩa policy đổi: cache tạo bởi phiên bản cũ (chưa hiểu policy) tự thành MISS. */
-const VISUAL_POLICY_VERSION = 'vp2';
-
-const VALID_MODES = Object.freeze([SETTING.AUTO, SETTING.ALWAYS, SETTING.NEVER]);
-
-const REASON = Object.freeze({
-  NEVER: 'user_preference_never',
-  EXPLICIT_OVERRIDE_NEVER: 'explicit_override_never',
-  ALWAYS: 'user_preference_always',
-  AUTO: 'user_preference_auto',
-  EXPLICIT: 'explicit_visual_request',
-  IMAGE_ONLY: 'image_only_request'
-});
-
-/** Chuẩn hoá về đúng 1 trong auto|always|never. Giá trị lạ -> 'auto' (khớp validators.js). */
-function normalizeVisualMode(value) {
-  const v = String(value == null ? '' : value).trim().toLowerCase();
-  return VALID_MODES.includes(v) ? v : SETTING.AUTO;
-}
+const POLICY = { AUTO: 'AUTO', ALWAYS: 'ALWAYS', NEVER: 'NEVER' };
 
 /**
- * Người dùng có YÊU CẦU TƯỜNG MINH một hình cho chính lượt này không.
- * Dùng cùng danh sách tín hiệu explicit với visualDecisionEngine.
+ * normalizePolicy() — quy setting người dùng ('auto'|'always'|'never') về policy canonical.
+ * Giá trị lạ/không có -> AUTO (an toàn: AUTO vẫn bị decision engine chấm điểm, không ép hình).
+ * @param {string} [userPreference]
+ * @returns {'AUTO'|'ALWAYS'|'NEVER'}
  */
-function detectExplicitVisualIntent(question) {
-  const q = String(question == null ? '' : question);
-  if (!q) return false;
-  return GENERIC_SIGNALS.some((s) => s && s.explicit && s.re.test(q));
+function normalizePolicy(userPreference) {
+  const v = String(userPreference == null ? '' : userPreference).trim().toLowerCase();
+  if (v === 'never') return POLICY.NEVER;
+  if (v === 'always') return POLICY.ALWAYS;
+  return POLICY.AUTO;
 }
 
 /**
- * resolveVisualPolicy() — cổng policy. Thuần hàm, 0 I/O, 0 token, KHÔNG đọc setting sống.
+ * resolveRoutePolicy() — policy hình của REQUEST HIỆN TẠI (0 token, thuần heuristic).
+ *
+ * Phải luôn giải theo request đang chạy, KHÔNG BAO GIỜ theo giá trị nằm trong cache: đó chính là
+ * điều khiến một cache entry cũ có thể "ghi đè" lựa chọn mới của người dùng.
  *
  * @param {object} a
- * @param {'auto'|'always'|'never'} [a.userPreference] snapshot lúc bắt đầu request (đã qua validator)
- * @param {string} [a.question] câu gốc của người dùng (còn nguyên động từ "vẽ…")
- * @param {string} [a.stage] 'approach'|'detail'|'image_only'…
- * @param {boolean} [a.explicitRequest] caller đã biết đây là yêu cầu hình tường minh (vd đường image-only)
- * @returns {{mode:string, explicitRequest:boolean, allowVisualLifecycle:boolean, reason:string,
- *   blocking:boolean, policyVersion:string}}
+ * @param {string} [a.userPreference] settings.visual
+ * @param {string} [a.stage] 'approach'|'detail'|'image_only'
+ * @param {string} [a.question] câu hỏi gốc — để phát hiện yêu cầu hình TƯỜNG MINH
+ * @param {boolean} [a.imageOnly] route đã phân loại đây là request "chỉ lấy hình"
+ * @returns {{version:string, policy:string, explicitVisualRequest:boolean,
+ *   allowVisualLifecycle:boolean, allowVisualReplay:boolean}}
  */
-function resolveVisualPolicy({ userPreference, question, stage, explicitRequest } = {}) {
-  const mode = normalizeVisualMode(userPreference);
-  const explicit = explicitRequest === true || detectExplicitVisualIntent(question);
-  const st = String(stage == null ? 'approach' : stage).toLowerCase();
-
-  let allow;
-  let reason;
-  if (mode === SETTING.NEVER) {
-    allow = explicit;
-    reason = explicit ? REASON.EXPLICIT_OVERRIDE_NEVER : REASON.NEVER;
-  } else {
-    allow = true;
-    reason = explicit ? REASON.EXPLICIT : (mode === SETTING.ALWAYS ? REASON.ALWAYS : REASON.AUTO);
-  }
-  // `blocking`: hình là artifact CHÍNH của request (đường image-only) -> chỉ khi đó tail hình mới
-  // được coi là một phần của "hoàn tất". Hình phụ trợ (auto/always) KHÔNG bao giờ là critical path.
-  const blocking = allow && st === 'image_only';
-  return Object.freeze({ mode, explicitRequest: explicit, allowVisualLifecycle: allow, reason, blocking, policyVersion: VISUAL_POLICY_VERSION });
-}
-
-/**
- * Telemetry bất biến cho nhánh "bị policy chặn" (V6.15.10). Mọi bộ đếm = 0; `visualSkippedByPolicy`
- * tách BẠCH với lỗi (failed) và với "không cần hình" (below_threshold).
- */
-function skippedTelemetry(policy, stage) {
+function resolveRoutePolicy(a = {}) {
+  const policy = normalizePolicy(a.userPreference);
+  const explicitVisualRequest = !!a.imageOnly
+    || decisionEngine.isExplicitVisualRequest(a.question || '');
+  // A3 (visualDecisionEngine): setting "never" vẫn THUA một yêu cầu tường minh của người dùng.
+  // Giữ đúng cùng một quy tắc ở đây để policy của cache không mâu thuẫn với policy của pipeline.
+  const visualAllowed = policy !== POLICY.NEVER || explicitVisualRequest;
+  // Sinh hình MỚI chỉ hợp lệ ở stage được phép (approach / image_only) — mục 31/32.
+  const lifecycleStage = stageMayGenerate(a.imageOnly ? 'image_only' : a.stage);
   return {
-    visualPolicy: policy.mode,
-    visualPolicyReason: policy.reason,
-    visualPolicyVersion: policy.policyVersion,
-    visualLifecycleAllowed: false,
-    visualBlocking: false,
-    visualWorkStarted: false,
-    visualSkippedByPolicy: true,
-    visualJudgeCalls: 0,
-    visualProviderAttempts: 0,
-    visualCacheRead: false,
-    visualCacheDispatch: false,
-    visualGenerationLifecycleCount: 0,
-    visualStage: stage == null ? 'approach' : stage,
-    visualError: null,
-    // Cùng shape với telemetry nhánh bình thường (visualPipeline.js) để mọi consumer (route log,
-    // test, dashboard) đọc field nào cũng có giá trị xác định — không phải suy luận từ "vắng mặt".
-    visualDeterministic: false, visualType: 'no_visual', visualRenderer: 'none', visualDecision: false
-  };
-}
-
-/** Kết quả pipeline chuẩn cho nhánh bị policy chặn. `decision` giữ hình dạng cũ (test/log cũ đọc reason). */
-function skippedResult(policy, stage) {
-  return {
-    status: 'skipped',
-    skippedByPolicy: true,
-    decision: {
-      shouldGenerateImage: false, confidence: 0, visualType: 'no_visual', visualPurpose: '',
-      suggestedCount: 0, placement: 'none', generationPriority: 'low', score: 0, threshold: Infinity,
-      borderline: false, reason: policy.reason, imageNecessity: 'NONE', signals: {}
-    },
-    visuals: [],
-    telemetry: skippedTelemetry(policy, stage)
+    version: VISUAL_POLICY_VERSION,
+    policy,
+    explicitVisualRequest,
+    allowVisualLifecycle: visualAllowed && lifecycleStage,
+    // REPLAY (phát lại job/artifact ĐÃ CÓ) không phải sinh hình mới, nên KHÔNG bị khoá theo stage:
+    // đây chính là đường "re-entry / reload -> ATTACH execution cũ" của V6.17.7.
+    allowVisualReplay: visualAllowed
   };
 }
 
 /**
- * Cờ hoàn tất SSE (V6.15.5). `visualBlocking` trả lời đúng MỘT câu hỏi cho client:
- * "sau sự kiện done còn sự kiện hình nào trên stream này không?".
- *   false -> không còn gì; client resolve NGAY, không chờ đuôi hình không tồn tại.
- *   true  -> còn visual:* trên stream; client đọc tiếp tới khi server đóng.
+ * completionFlags() — metadata policy gắn vào MỌI payload hoàn tất (SSE `done` và JSON).
+ *
+ * `visualPending` = "text xong rồi, hình CÓ THỂ tới sau bằng sự kiện riêng".
+ * `visualBlocking` = luôn false: hình KHÔNG BAO GIỜ chặn text (bất biến của visualPipeline).
+ *
+ * @param {object} routePolicy kết quả resolveRoutePolicy()
+ * @param {{visualMayFollow?:boolean}} [opts]
+ * @returns {{visualPolicyVersion:string, visualPolicy:string, visualPending:boolean, visualBlocking:boolean}}
  */
-function completionFlags(policy, { visualMayFollow } = {}) {
-  const follow = !!(policy && policy.allowVisualLifecycle && visualMayFollow);
+function completionFlags(routePolicy, opts = {}) {
+  const visualMayFollow = !!opts.visualMayFollow;
   return {
-    visualPending: follow,
-    visualBlocking: follow,
-    // Flat field (không lồng) để sanitizeCachedPayload() so sánh trực tiếp khi payload này sau đó
-    // được ghi vào cache và đọc lại ở một request khác.
     visualPolicyVersion: VISUAL_POLICY_VERSION,
-    visualPolicy: {
-      mode: policy ? policy.mode : SETTING.AUTO,
-      reason: policy ? policy.reason : REASON.AUTO,
-      lifecycleAllowed: !!(policy && policy.allowVisualLifecycle),
-      skippedByPolicy: !!(policy && !policy.allowVisualLifecycle),
-      version: VISUAL_POLICY_VERSION
-    }
+    visualPolicy: routePolicy ? routePolicy.policy : POLICY.AUTO,
+    visualPending: !!(visualMayFollow && routePolicy && routePolicy.allowVisualLifecycle),
+    visualBlocking: false
   };
 }
 
 /**
- * Lọc một payload cache trước khi PHÁT LẠI (V6.15.7). Khi policy hiện tại không cho vòng đời hình,
- * mọi artifact hình trong cache (visuals/visualJob/…) bị gỡ và KHÔNG được phát visual:request.
- * Cache do phiên bản cũ (thiếu policyVersion) cũng bị coi là không đáng tin cho hình.
+ * finalizeVisualCachePayload() — shape CANONICAL DUY NHẤT của một kết quả đã hoàn tất.
+ *
+ * Đây là điểm gom V6.17.3.D: KHÔNG lặp lại công thức `visualPolicyVersion: ...` ở 4-6 chỗ trong
+ * route. Giá trị trả về vừa là thứ được GỬI cho client, vừa là thứ được GHI vào result cache —
+ * "send one shape, cache another shape" là chính bug đang vá nên không được phép tồn tại.
+ *
+ * @param {object} basePayload payload text đã hoàn tất
+ * @param {object|null} visualRun kết quả runVisualPipeline()
+ * @param {object} routePolicy kết quả resolveRoutePolicy()
+ * @returns {object} payload canonical
  */
-function sanitizeCachedPayload(payload, policy) {
-  if (!payload || typeof payload !== 'object') return { payload, visualReplayAllowed: false };
-  const stale = payload.visualPolicyVersion !== VISUAL_POLICY_VERSION;
-  const allowed = !!(policy && policy.allowVisualLifecycle) && !stale;
-  if (allowed) return { payload, visualReplayAllowed: true };
-  const clean = { ...payload };
-  delete clean.visuals;
-  delete clean.visualJob;
-  delete clean.visualStatus;
-  clean.visualPending = false;
-  return { payload: clean, visualReplayAllowed: false };
+function finalizeVisualCachePayload(basePayload, visualRun, routePolicy) {
+  const visuals = visualRun && Array.isArray(visualRun.visuals) ? visualRun.visuals : [];
+  return {
+    ...(basePayload || {}),
+    visuals,
+    visualStatus: visualRun ? (visualRun.status || null) : null,
+    visualJob: visualRun ? (visualRun.visualJob || null) : null,
+    // Payload đã hoàn tất: không còn gì "sẽ tới sau" nữa.
+    ...completionFlags(routePolicy, { visualMayFollow: false })
+  };
+}
+
+/**
+ * sanitizeCachedPayload() — CỬA ĐỌC CACHE, FAIL-CLOSED.
+ *
+ * Text trong cache LUÔN được giữ (V6.17.10 C8: cache text vẫn hợp lệ kể cả khi hình bị gỡ).
+ * Artifact hình chỉ sống sót khi CẢ HAI điều kiện đều đúng:
+ *   1. entry được ghi ở đúng `VISUAL_POLICY_VERSION` hiện tại; và
+ *   2. policy của REQUEST HIỆN TẠI cho phép hình.
+ *
+ * @param {object} cached giá trị lấy từ result cache
+ * @param {object} routePolicy kết quả resolveRoutePolicy()
+ * @returns {{payload:object, stale:boolean, visualReplayAllowed:boolean, hasVisualJob:boolean, reason:string}}
+ */
+function sanitizeCachedPayload(cached, routePolicy) {
+  const payload = { ...(cached || {}) };
+  const version = payload.visualPolicyVersion;
+  const stale = version !== VISUAL_POLICY_VERSION;
+  const policyAllows = !!(routePolicy && routePolicy.allowVisualReplay);
+  const job = payload.visualJob;
+  const hasVisualJob = !!(job && job.renderer);
+
+  let reason = 'replay_allowed';
+  if (stale) reason = version == null ? 'missing_policy_version' : 'stale_policy_version';
+  else if (!policyAllows) reason = 'policy_blocks_visual';
+  else if (!hasVisualJob) reason = 'no_visual_job';
+
+  const keepVisuals = !stale && policyAllows;
+  if (!keepVisuals) {
+    // GỠ artifact hình, GIỮ NGUYÊN text. Không "sửa" entry cũ cho hợp lệ, không hạ chuẩn guard.
+    payload.visualJob = null;
+    payload.visuals = [];
+    payload.visualStatus = null;
+  }
+  // Payload đi ra ngoài luôn mang cờ policy của REQUEST HIỆN TẠI, không phải cờ của entry cũ.
+  Object.assign(payload, completionFlags(routePolicy, { visualMayFollow: false }));
+
+  return {
+    payload,
+    stale,
+    visualReplayAllowed: keepVisuals && hasVisualJob,
+    hasVisualJob,
+    reason
+  };
 }
 
 module.exports = {
-  VISUAL_POLICY_VERSION, REASON, VALID_MODES,
-  normalizeVisualMode, detectExplicitVisualIntent, resolveVisualPolicy,
-  skippedTelemetry, skippedResult, completionFlags, sanitizeCachedPayload
+  VISUAL_POLICY_VERSION,
+  POLICY,
+  normalizePolicy,
+  resolveRoutePolicy,
+  completionFlags,
+  finalizeVisualCachePayload,
+  sanitizeCachedPayload
 };

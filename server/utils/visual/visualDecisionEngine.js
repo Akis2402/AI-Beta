@@ -336,8 +336,25 @@ function detectImageOnlyRequest(question) {
   return { imageOnly: true, topic, reason: 'image_only_request' };
 }
 
+/**
+ * isExplicitVisualRequest() — người dùng có YÊU CẦU TƯỜNG MINH một hình không? (0 token)
+ *
+ * Tách ra để `visualPolicy` dùng lại ĐÚNG bộ tín hiệu mà `evaluateVisualNeed()` dùng ở nhánh
+ * override setting "never" (dòng `explicitRequest` bên trên). Nếu copy regex sang file khác thì
+ * policy của cache và policy của pipeline sẽ trôi khỏi nhau — đúng loại lỗi V6.17.3.D cấm.
+ *
+ * @param {string} question
+ * @returns {boolean}
+ */
+function isExplicitVisualRequest(question) {
+  const q = String(question || '').trim();
+  if (!q) return false;
+  return GENERIC_SIGNALS.some((s) => s.explicit && s.re.test(q));
+}
+
 module.exports = {
   detectImageOnlyRequest,
+  isExplicitVisualRequest,
   evaluateVisualNeed,
   NECESSITY,
   classifyNecessity,

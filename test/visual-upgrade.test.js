@@ -277,10 +277,32 @@ function createDom() {
     click() { this.dispatch('click', { target: this }); }
     focus() { this._focused = true; }
     all() { return this.children.reduce((acc, c) => acc.concat([c], c.all()), []); }
+    // Harness DOM phải khớp hành vi TRÌNH DUYỆT THẬT ở mức mà production đang dựa vào.
+    // Trước đây hàm này chỉ nhận MỘT selector đơn: chuỗi '.visual-loading, [data-visual-card]'
+    // (production dùng để dọn placeholder trong renderVisuals) bị coi là một tên class duy nhất
+    // nên không khớp gì cả -> cleanup no-op TRONG TEST dù production đúng. Đó là hạn chế của
+    // harness, không phải rendering bug: bổ sung selector list (dấu phẩy) + selector thuộc tính.
     querySelectorAll(sel) {
-      const raw = String(sel);
-      if (raw.startsWith('.')) return this.all().filter((e) => e.classList.contains(raw.slice(1)));
-      return this.all().filter((e) => e.tagName === raw.toUpperCase());
+      const parts = String(sel).split(',').map((s) => s.trim()).filter(Boolean);
+      const nodes = this.all();
+      const seen = new Set();
+      const out = [];
+      parts.forEach((raw) => {
+        let match;
+        if (raw.startsWith('.')) match = (e) => e.classList.contains(raw.slice(1));
+        else if (raw.startsWith('[') && raw.endsWith(']')) {
+          const body = raw.slice(1, -1);
+          const eq = body.indexOf('=');
+          if (eq === -1) match = (e) => e.getAttribute(body) !== null;
+          else {
+            const name = body.slice(0, eq).trim();
+            const want = body.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+            match = (e) => e.getAttribute(name) === want;
+          }
+        } else match = (e) => e.tagName === raw.toUpperCase();
+        nodes.forEach((e) => { if (match(e) && !seen.has(e)) { seen.add(e); out.push(e); } });
+      });
+      return out;
     }
     querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
     findText(txt) { return this.all().filter((e) => e.textContent === txt); }
@@ -375,13 +397,37 @@ async function overlayTests() {
     assert.ok(card.querySelector('.visual-img'), 'thiếu ảnh');
   });
 
-  await test('status pending -> hiện dòng "đang tạo hình", KHÔNG để trống (PHẦN 16)', () => {
+  // TEST DRIFT ĐÃ SỬA (V6.17.1 / V6.17.11): assertion cũ chờ key 'chat.visualGenerating'.
+  // Production (public/js/app.js — renderVisuals) đã chuyển placeholder sang key CHUYÊN BIỆT
+  // 'visual.status.ai' ("Đang tạo hình ảnh AI…") — khác nghĩa với 'chat.visualGenerating'
+  // ("Đang tạo hình minh họa…", vẫn dùng cho nút/status chung). Cả hai key đều tồn tại trong
+  // translations.js với ngữ nghĩa khác nhau, nên đây là TEST DRIFT, KHÔNG phải rendering bug:
+  // không được bẻ renderVisuals() về key cũ chỉ để test xanh.
+  // U1-U3: đúng MỘT placeholder, dùng canonical key hiện tại, bị dọn khi có hình thật.
+  await test('U1-U3. status pending -> ĐÚNG 1 placeholder mang canonical key visual.status.ai (PHẦN 16)', () => {
     const container = doc.createElement('div');
     api.renderVisuals(container, [], 'pending');
-    const note = container.querySelector('.visual-loading');
-    assert.ok(note && note.textContent === 'chat.visualGenerating');
+    const notes = container.querySelectorAll('.visual-loading');
+    assert.strictEqual(notes.length, 1, 'phải có ĐÚNG một placeholder, không nhân bản');
+    const note = notes[0];
+    assert.ok(note.textContent && note.textContent.length > 0, 'placeholder KHÔNG được để trống');
+    assert.strictEqual(note.textContent, 'visual.status.ai', 'harness dùng t:(k)=>k nên quan sát thẳng canonical key production đang gọi');
     api.renderVisuals(container, [imageVisual], 'ready');
     assert.strictEqual(container.querySelectorAll('.visual-loading').length, 0, 'phải dọn placeholder khi có hình thật');
+  });
+
+  // U4-U5: assert Ở TẦNG TRANSLATION (tách khỏi implementation key) — người dùng thật phải đọc
+  // được chữ, không phải nhìn đúng một chuỗi khoá i18n.
+  await test('U4-U5. visual.status.ai dịch ra chữ THẬT, khác rỗng, ở CẢ vi và en', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'i18n', 'translations.js'), 'utf8');
+    const hits = [...src.matchAll(/'visual\.status\.ai'\s*:\s*'([^']+)'/g)].map((m) => m[1]);
+    assert.ok(hits.length >= 2, 'phải có bản dịch ở CẢ hai ngôn ngữ vi + en, thấy: ' + hits.length);
+    hits.forEach((textValue) => {
+      assert.ok(textValue.trim().length > 0, 'bản dịch không được rỗng');
+      assert.ok(!/^visual\./.test(textValue.trim()), 'bản dịch không được là chính cái key');
+    });
+    // Không xoá key cũ: 'chat.visualGenerating' vẫn được dùng ở nút/status chung (app.js).
+    assert.ok(/'chat\.visualGenerating'\s*:/.test(src), 'chat.visualGenerating vẫn phải tồn tại — nó có call-site riêng');
   });
 
   await test('CÓ toạ độ thật -> nhãn NEO theo % lên ảnh (không đoán vị trí)', () => {
