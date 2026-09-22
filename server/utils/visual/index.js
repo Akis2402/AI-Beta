@@ -7,6 +7,7 @@
 // routes/chat.js chỉ import file này, không import trực tiếp từng module con.
 module.exports = {
   ...require('./visualPipeline'),
+  policy: require('./visualPolicy'),
   decisionEngine: require('./visualDecisionEngine'),
   determinationEngine: require('./visualDeterminationEngine'),
   deterministic: require('./deterministic'),
