@@ -477,7 +477,32 @@ function buildChatSystemPrompt(input) {
   return buildChatSystemPromptParts(input).text;
 }
 
-function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '', sourceReadiness = null, unmatchedRequirementLabels = [] }) {
+// ---------- V6.21.4/.5/.6 — chỉ thị định dạng theo responseDepth (D0-D4), KHÔNG theo stage ----------
+// Mỗi mức chỉ ràng buộc ĐỘ DÀI/HÌNH THỨC — không mức nào được phép bịa thêm mục "Hướng giải"/"Lời
+// giải"/"Kiểm tra kết quả"/"Nguồn tham khảo" nếu người dùng không hỏi (V6.21.6). D2 trở lên MỚI được
+// phép dùng tiêu đề "## " phụ (khi câu hỏi thực sự gộp nhiều khái niệm/phải so sánh nhiều nhánh) —
+// D0/D1 tuyệt đối không tiêu đề mục, trả lời như một khối văn bản/gạch đầu dòng liền mạch.
+const KNOWLEDGE_DEPTH_DIRECTIVE = {
+  D0: 'Trả lời TRỰC TIẾP trong 1-3 câu ngắn. KHÔNG tiêu đề mục, KHÔNG dẫn dắt/mở đầu, KHÔNG liệt kê thừa — chỉ đúng nội dung được hỏi.',
+  D1: 'Trả lời bằng 3-8 gạch đầu dòng NGẮN GỌN, MỖI gạch đầu dòng CHỈ 1 CÂU (không câu phụ/diễn giải thêm): khái niệm/định nghĩa chính, đại lượng và công thức quan trọng trực tiếp liên quan, phân biệt các loại/trường hợp CHỈ KHI thực sự cần để trả lời đúng câu hỏi. KHÔNG dùng tiêu đề mục "## " — một khối gạch đầu dòng liền mạch. KHÔNG tự thêm ví dụ minh họa, lịch sử phát triển, ứng dụng mở rộng, hay nguồn tham khảo trừ khi người dùng hỏi thêm những phần đó.',
+  D2: 'Trả lời bằng 8-20 gạch đầu dòng hoặc đoạn văn ngắn, có thể dùng tối đa 2-3 tiêu đề phụ "## " NẾU câu hỏi thực sự gộp nhiều khái niệm/nhánh cần tách bạch (vd so sánh 2 khái niệm) — không thêm tiêu đề chỉ để "cho có cấu trúc". Vẫn KHÔNG được thêm các mục thuộc về giải bài tập ("Hướng giải", "Kiểm tra kết quả"...).',
+  D3: 'Trả lời đầy đủ, có thể dùng vài tiêu đề phụ "## " theo từng khía cạnh câu hỏi thực sự yêu cầu, kèm ví dụ minh họa NGẮN nếu giúp làm rõ. Vẫn là một câu trả lời KIẾN THỨC — không tự chuyển thành khuôn "giải bài tập".',
+  D4: 'Phân tích sâu, có thể chia nhiều tiêu đề phụ "## " theo khía cạnh, kèm ví dụ/đối chiếu nếu cần làm rõ bản chất. Vẫn là một câu trả lời KIẾN THỨC.'
+};
+
+function buildKnowledgeDynamicPart({ settings, questionProfile, subjectBlock, deepBlock, imageBlock, rulesBlock, requirementIntegrityBlock, contextBlock, contexts, sourceManifest }) {
+  const depthDirective = KNOWLEDGE_DEPTH_DIRECTIVE[questionProfile.responseDepth] || KNOWLEDGE_DEPTH_DIRECTIVE.D1;
+  return `${buildLanguageContract(settings.lang)}
+${buildLanguageDirective(settings.lang)}
+${buildSchoolGradeDirective(settings.school, settings.grade)}
+
+NHIỆM VỤ Ở BƯỚC NÀY: đây là câu hỏi KIẾN THỨC/LÝ THUYẾT (định nghĩa, khái niệm, công thức, tóm tắt, phân biệt/so sánh khái niệm) — KHÔNG PHẢI một bài tập có dữ kiện cần giải. TUYỆT ĐỐI KHÔNG dùng khuôn mẫu giải bài tập — KHÔNG tạo các mục "Tóm tắt đề bài", "Hướng giải", "Lời giải", "Kết luận", "Lỗi sai thường gặp" — chỉ trả lời THẲNG vào đúng điều được hỏi.
+${depthDirective}
+Nếu người dùng đã yêu cầu rõ mức độ (vd "giải thích chi tiết"/"tóm tắt ngắn gọn"), ưu tiên tuân theo đúng yêu cầu đó hơn cả hướng dẫn độ dài mặc định ở trên.
+${buildSourcePolicyBlock({ hasContexts: contexts.length > 0, hasWebSearch: false, hasSourceNoContext: !contexts.length && !!sourceManifest })}${NO_DRAWING_NOTE}${subjectBlock}${deepBlock}${imageBlock}${rulesBlock}${requirementIntegrityBlock}${contextBlock}`;
+}
+
+function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, stage, approachText, problemText = '', subjectId = 'general', secondarySubjectId = null, subjectSource = 'auto', sourceManifest = '', sourceReadiness = null, unmatchedRequirementLabels = [], questionProfile = null }) {
   const subjectBlock = buildSubjectDirective(subjectId, secondarySubjectId, subjectSource);
   const drawingNeeded = needsDrawingInstructions({ problemText, approachText, hasImage: !!image });
   let contextBlock = '';
@@ -504,6 +529,21 @@ function buildChatDynamicPart({ deepThinking, image, rules, contexts, settings, 
   const imageBlock = image
     ? `\n\nNgười dùng gửi kèm MỘT HÌNH ẢNH chứa đề bài (có thể viết tay hoặc in). Đọc chính xác toàn bộ nội dung trong ảnh trước khi giải, không suy đoán ngoài những gì nhìn thấy; nếu có phần khó đọc, nêu rõ giả định trong "Tóm tắt đề bài".`
     : '';
+
+  // ============================================================================================
+  // V6.21.0-13 — NHÁNH KIẾN THỨC (kind=KNOWLEDGE): TRẢ LỜI THẲNG, KHÔNG ÉP KHUÔN "GIẢI BÀI TẬP"
+  // ============================================================================================
+  // Đây là fix trực tiếp cho "OUTPUT GRANULARITY BUG" (xem questionClassifier.js đầu file đó để
+  // biết root cause). Nhánh này ĐỨNG TRƯỚC if(stage==='approach') nên áp dụng cho CẢ 2 giá trị
+  // stage client gửi lên — 'approach' lẫn 'detail' — vì với câu hỏi lý thuyết, khái niệm "hướng
+  // giải trước / chi tiết sau" của UI giải bài tập không có ý nghĩa (không có gì để "giải" từng
+  // bước) — trả lời ĐÚNG NGAY một lần, độ dài co giãn theo responseDepth thay vì theo stage.
+  if (questionProfile && questionProfile.kind === 'KNOWLEDGE') {
+    return buildKnowledgeDynamicPart({
+      settings, questionProfile, subjectBlock, deepBlock, imageBlock, rulesBlock,
+      requirementIntegrityBlock, contextBlock, contexts, sourceManifest
+    });
+  }
 
   // ---------- Giai đoạn "approach": chỉ đưa HƯỚNG GIẢI, chưa giải chi tiết ----------
   if (stage === 'approach') {
@@ -746,7 +786,11 @@ QUY TẮC BẮT BUỘC:
 // v6: siết lại chỉ thị "## Hướng giải" (stage=approach) — tối đa 5 gạch đầu dòng, mỗi gạch 1 câu
 // ngắn, không câu phụ — để hướng giải GỌN hơn nhưng vẫn giữ đủ ý khoa học (công thức/bước/điều
 // kiện). Thay đổi output rõ rệt so với v5 => bump để không trả nhầm hướng giải dài kiểu cũ từ cache.
-const PROMPT_VERSION = 'chat-prompt-v9'; // v9 (mục 1 audit HARD SUBJECT LOCK): manual subject giờ chèn
+const PROMPT_VERSION = 'chat-prompt-v10'; // v10 (V6.21.0-13): thêm nhánh KNOWLEDGE (questionClassifier.js)
+// — câu hỏi lý thuyết/kiến thức không còn bị ép qua khuôn "Hướng giải/Lời giải chi tiết" của bài
+// tập. Output đổi RÕ RỆT cho toàn bộ lớp câu hỏi kind=KNOWLEDGE so với v9 => bump để cache L1 cũ
+// (sinh ra khi CHƯA phân biệt KNOWLEDGE/PROBLEM) không bị trả nhầm câu trả lời kiểu "bài giảng" cũ.
+// v9 (mục 1 audit HARD SUBJECT LOCK): manual subject giờ chèn
 // khối RÀNG BUỘC MÔN HỌC (buildManualLockDirective trong subjects.js) khác hẳn nội dung mềm cũ —
 // output cho request manual subject đổi rõ rệt so với v8 => bump để cache L1/manual cũ (nếu có) không
 // bị trả nhầm câu trả lời chưa áp dụng hard lock.
