@@ -101,7 +101,14 @@ const BASE_TARGET = {
   // thấp hơn NHIỀU so với detail để không lỡ tay cấp ngân sách của 1 bài giải đầy đủ cho 1 tác vụ
   // chỉ cần vài câu JSON/structured output ngắn.
   selfCheck: { short: 300, medium: 500, large: 800, very_large: 1200 },
-  similar: { short: 250, medium: 400, large: 600, very_large: 900 }
+  similar: { short: 250, medium: 400, large: 600, very_large: 900 },
+  // ---------- V6.21.5/.19: budget RIÊNG cho câu hỏi KIẾN THỨC (questionClassifier.js kind=KNOWLEDGE) ----------
+  // Thấp hơn hẳn "approach" (900-3300) vì câu trả lời kiến thức KHÔNG có phần dựng lời giải/derivation
+  // — chỉ là các gạch đầu dòng sự kiện/công thức/định nghĩa (xem KNOWLEDGE_DEPTH_DIRECTIVE trong
+  // promptBuilder.js). `level` ở đây vẫn đến từ estimateProblemComplexity(problemText) — với KNOWLEDGE
+  // hầu như luôn 'short' (câu hỏi lý thuyết thường ngắn), 'medium'+ chỉ xảy ra khi câu hỏi gộp nhiều
+  // khái niệm/subQuestionCount cao (đã được questionClassifier nâng complexity lên MODERATE tương ứng).
+  knowledge: { short: 500, medium: 900, large: 1500, very_large: 2200 }
 };
 
 function estimateExpectedOutputBudget({ complexity, stage, deepThinking = false, crossCheck = false }) {

@@ -28,6 +28,24 @@ const { fetchWebSource } = require('../utils/source/webSource');
 const { fetchYoutubeSource } = require('../utils/source/youtubeSource');
 const singleFlight = require('../utils/singleFlight');
 const { contentFingerprint } = require('../utils/queryFingerprint');
+const globalWorkerPool = require('../utils/globalWorkerPool');
+
+// ---------- V6.21.19/.87 (audit): 3 route trong file này ĐỀU là việc CHUẨN BỊ NGUỒN (background) ----------
+// không phải pipeline trả lời chat trực tiếp (interactive) — client gọi các route này RIÊNG lúc
+// upload/thêm nguồn, không phải lúc chờ câu trả lời. Trước audit này, cả 3 route KHÔNG qua bất kỳ
+// admission control nào chung với '/api/chat' — nếu nhiều lượt "thêm nguồn" chạy đồng thời (vd nhiều
+// tab cùng thêm PDF/YouTube), chúng cạnh tranh CPU/network của CÙNG 1 tiến trình Node với chat request
+// đang chờ, đúng kịch bản sự cố V6.21.19 mô tả. Gắn priority=background vào Global Worker Pool
+// (globalWorkerPool.js) để '/api/chat' (priority=interactive, đã wiring từ trước) luôn được xếp hàng
+// trước. release() do pool.acquire() trả về đã TỰ idempotent (xem globalWorkerPool.js) — không cần
+// tự theo dõi thêm ở đây, chỉ cần gắn thẳng vào res.on('finish')/res.on('close') (CÙNG idiom chat.js).
+async function acquireBackgroundSlot(res, timeoutMs) {
+  const release = await globalWorkerPool.defaultPool.acquire({
+    priority: globalWorkerPool.PRIORITY.BACKGROUND, timeoutMs
+  });
+  res.on('finish', release);
+  res.on('close', release);
+}
 
 // Vision extraction là tác vụ PHỤ (chuẩn bị cache), không phải pipeline giải bài chính — ngân sách
 // thời gian ngắn hơn hẳn GLOBAL_REQUEST_DEADLINE_MS của /api/chat, và giới hạn concurrency để không
@@ -38,6 +56,7 @@ const VISION_PAGE_CONCURRENCY = Number(process.env.VISION_PAGE_CONCURRENCY) || 3
 router.post('/vision-extract', async (req, res, next) => {
   try {
     const input = validateSourceVisionBody(req.body);
+    await acquireBackgroundSlot(res, VISION_BATCH_DEADLINE_MS);
     await ensureProvidersReady();
     const activeProviders = getActiveProviders();
     if (!activeProviders.length) {
@@ -103,6 +122,7 @@ router.post('/vision-extract', async (req, res, next) => {
 router.post('/web', async (req, res, next) => {
   try {
     const { url } = validateSourceUrlBody(req.body);
+    await acquireBackgroundSlot(res, VISION_BATCH_DEADLINE_MS);
     const result = await fetchWebSource(url);
     res.json(result);
   } catch (err) {
@@ -119,6 +139,7 @@ router.post('/web', async (req, res, next) => {
 router.post('/youtube', async (req, res, next) => {
   try {
     const { url } = validateSourceUrlBody(req.body);
+    await acquireBackgroundSlot(res, VISION_BATCH_DEADLINE_MS);
     const result = await fetchYoutubeSource(url);
     res.json(result);
   } catch (err) {

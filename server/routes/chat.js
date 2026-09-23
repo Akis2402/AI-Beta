@@ -23,8 +23,10 @@ const {
 // A1: system prompt đi xuống provider dưới dạng PromptParts để khối TĨNH thực sự được prompt-cache
 // (Anthropic: cache_control tường minh; OpenAI/Gemini: prefix trùng => implicit cache).
 const { appendToSystem, systemToString, estimatePromptTokens } = require('../utils/systemPromptParts');
+const { classifyQuestion } = require('../utils/questionClassifier');
 // PHẦN BG/21: lưu vòng đời + KẾT QUẢ CUỐI của 1 lượt giải, độc lập với kết nối SSE tạo ra nó.
 const aiJobStore = require('../utils/aiJobStore');
+const globalWorkerPool = require('../utils/globalWorkerPool');
 
 /**
  * B10 — các field telemetry token MỚI, phẳng hoá để đi thẳng vào log (không lồng object).
@@ -547,6 +549,16 @@ router.post('/', async (req, res, next) => {
   // return rải rác trong handler — 1 dòng log 'request_end' duy nhất, luôn đúng latency thật.
   res.on('finish', () => reqLogger.end({ statusCode: res.statusCode }));
 
+  // ---------- V6.21.18/.19/.20: Global Worker Pool — giữ đúng 1 slot cho SUỐT vòng đời request ----------
+  // `releasePoolSlot` được gán bên trong try{} (sau khi acquire() thành công) — khai báo ở đây (ngoài
+  // try) để res.on('finish')/res.on('close') phía dưới LUÔN gọi được nó dù request kết thúc ở nhánh
+  // nào (thành công/lỗi/client ngắt kết nối) — CÙNG pattern với res.__aiJob và reqLogger.end() ở trên.
+  // Nếu acquire() timeout (hàng đợi quá lâu — pool bão hoà), releasePoolSlot vẫn là null -> không có
+  // gì để nhả, đúng (request đó chưa từng được admit).
+  let releasePoolSlot = null;
+  res.on('finish', () => { if (releasePoolSlot) releasePoolSlot(); });
+  res.on('close', () => { if (releasePoolSlot) releasePoolSlot(); });
+
   // ---------- Cancellation (mục 4): client đóng kết nối/bấm "Dừng" giữa chừng ----------
   // `abortController.signal` được truyền xuống MỌI lệnh gọi provider bên dưới (qua field `signal`
   // trong args) — mỗi client (anthropicClient.js/openaiClient.js/geminiClient.js/
@@ -611,6 +623,18 @@ router.post('/', async (req, res, next) => {
     // generation -> validation -> continuation -> finalization.
     const globalDeadline = createRequestDeadline(GLOBAL_REQUEST_DEADLINE_MS);
     const input = validateChatBody(req.body);
+
+    // ---------- V6.21.18/.19/.20: xin 1 slot Global Worker Pool, priority=interactive ----------
+    // '/api/chat' LÀ đường tương tác (người dùng đang chờ trực tiếp) — mọi request qua route này đều
+    // priority=interactive; việc nền (source/YouTube ingestion...) dùng priority=background ở module
+    // riêng (KHÔNG wiring trong lần audit này — xem V6.21-AUDIT-REPORT.md mục "chưa làm"). timeoutMs
+    // giới hạn bằng đúng deadline chung của request — không có lý do xếp hàng chờ slot LÂU HƠN thời
+    // gian mà request sẽ tự huỷ vì hết giờ; hết hạn -> lỗi 503 rõ ràng, trả qua next(err) như mọi lỗi
+    // khác (KHÔNG cần thêm nhánh xử lý lỗi riêng, xem catch(err) cuối handler).
+    releasePoolSlot = await globalWorkerPool.defaultPool.acquire({
+      priority: globalWorkerPool.PRIORITY.INTERACTIVE, timeoutMs: GLOBAL_REQUEST_DEADLINE_MS
+    });
+    reqLogger.log({ stage: 'worker_pool_admit', priority: 'interactive', ...globalWorkerPool.defaultPool.snapshot() });
 
     // ============================================================================================
     // PROMPT V5 — PHẦN E/F: ĐỊNH TUYẾN BẰNG LUẬT + EARLY EXIT, TRƯỚC MỌI CHUẨN BỊ TỐN KÉM
@@ -719,6 +743,32 @@ router.post('/', async (req, res, next) => {
     }
     const problemText = input.query || 'Hãy đọc kỹ và giải chi tiết bài tập có trong hình ảnh này.';
     userContent.push({ type: 'text', text: problemText });
+
+    // ---------- V6.21.0-13: phân loại KIẾN THỨC/BÀI TOÁN — 1 lần duy nhất, luật thuần (0 AI call) ----------
+    // Chạy 1 lần rồi gắn vào `input` — CÙNG pattern với subjectId ngay dưới đây — để mọi lệnh gọi
+    // buildChatSystemPrompt/buildChatSystemPromptParts phía sau tự nhận questionProfile qua spread
+    // `input`, không phải sửa từng điểm gọi riêng lẻ. Đây là fix cho bug "câu hỏi lý thuyết bị ép
+    // thành bài giảng theo khuôn giải bài tập" (xem questionClassifier.js).
+    input.questionProfile = classifyQuestion({ problemText, hasImage: hasAnyImage });
+    reqLogger.log({
+      stage: 'question_classify',
+      kind: input.questionProfile.kind,
+      complexity: input.questionProfile.complexity,
+      responseDepth: input.questionProfile.responseDepth,
+      reason: input.questionProfile.reason
+    });
+    // ---------- V6.21.38: KHÔNG cross-check câu hỏi KIẾN THỨC — dù client có bật toggle ----------
+    // "Cross-check" nghĩa là gọi AI thứ 2 để ĐỐI CHIẾU/XÁC MINH kết quả — có giá trị thật với BÀI
+    // TOÁN (kết quả có thể sai/lệch), nhưng vô nghĩa với câu hỏi ĐỊNH NGHĨA/LÝ THUYẾT thuần (không
+    // có "kết quả tính toán" nào để đối chiếu — 2 lần gọi AI chỉ tốn thêm 1 lệnh gọi, đúng lãng phí
+    // mà V6.21.38 muốn tránh). CHỈ áp dụng cho kind=KNOWLEDGE — SIMPLE_COMPUTE (bài toán 1 bước) vẫn
+    // được cross-check nếu người dùng bật, đúng V6.21.39 ("fast không được bỏ correctness check bắt
+    // buộc") — không tắt tràn lan theo complexity để tránh xoá mất 1 tính năng người dùng chủ động
+    // chọn dùng cho trường hợp nó thực sự có ý nghĩa.
+    if (input.crossCheck && input.questionProfile.kind === 'KNOWLEDGE') {
+      reqLogger.log({ stage: 'cross_check_suppressed', reason: 'V6.21.38_knowledge_question' });
+      input.crossCheck = false;
+    }
 
     // ---------- Mục 14.2/14.3: nhận diện môn học (auto) hoặc dùng lựa chọn thủ công ----------
     // Chạy 1 lần duy nhất ở đây rồi gắn vào `input` — mọi lệnh gọi buildChatSystemPrompt/
@@ -1027,6 +1077,18 @@ router.post('/', async (req, res, next) => {
         complexityLevel: plan.complexity.level
       };
     };
+    // ---------- V6.21.5/.19 — 'knowledge' có ngân sách RIÊNG, không dùng chung bảng 'approach'/'detail' ----------
+    // Trước đây MỌI request "trực tiếp" (không cross-check) đều lấy budget theo input.stage
+    // ('approach' hay 'detail') dù nội dung có phải bài tập hay không — một câu hỏi lý thuyết ngắn
+    // vẫn được cấp nguyên ngân sách "lời giải chi tiết" (BASE_TARGET.detail, xem adaptiveBudget.js),
+    // khiến model có ĐỦ chỗ để viết dài dù prompt đã yêu cầu ngắn — đây là 1 trong các nguyên nhân
+    // (không phải duy nhất) khiến câu trả lời kiến thức vẫn dài hơn cần thiết. Gộp lại MỘT hàm duy
+    // nhất (6 điểm gọi cũ trùng lặp ternary input.stage==='approach'?'approach':'detail' — DRY) và
+    // ưu tiên 'knowledge' khi questionProfile.kind==='KNOWLEDGE', bất kể client đang gửi stage nào.
+    const directStage = () => (
+      input.questionProfile && input.questionProfile.kind === 'KNOWLEDGE' ? 'knowledge'
+        : input.stage === 'approach' ? 'approach' : 'detail'
+    );
     // Giữ tên cũ cho các nơi vẫn cần {min,target,max} thô (vd budget hiển thị debug) — KHÔNG còn
     // dùng .target trực tiếp làm maxTokens của lượt gọi model thật (xem trên).
     const budgetOf = budgetPlanOf;
@@ -1643,7 +1705,7 @@ router.post('/', async (req, res, next) => {
         // LỖI GỐC (ảnh người dùng gửi): giai đoạn "hướng giải" (approach) bị cắt ngang giữa
         // câu ("- Khai thác tính") vì maxTokens cố định 700 bất kể độ dài đề bài/deepThinking. FIX:
         // dùng ADAPTIVE TOKEN BUDGET (mục III, xem adaptiveBudget.js) thay vì hằng số cố định.
-        const directBudget = budgetOf(input.stage === 'approach' ? 'approach' : 'detail');
+        const directBudget = budgetOf(directStage());
         // PHẦN 8 FIX: modelTier (đã tính ở tePlan) nay THỰC SỰ ảnh hưởng lựa chọn model — trước đây
         // chỉ log (dead optimization). 'cheap'/'fast' tier -> model nhẹ; 'standard'/'strong'/
         // 'strong_reasoning' -> model đầy đủ dù deepThinking chưa bật (không ép fast cho bài phức tạp).
@@ -1653,7 +1715,7 @@ router.post('/', async (req, res, next) => {
         // ---------- PHẦN B/L: RESUMABLE STREAM cho nhánh 1 lượt (approach / Nhanh) ----------
         const coverageList = extractCoverageList(problemText);
         const directReserveState = { budget: directBudget.reserveBudget, used: 0 };
-        const directStageName = input.stage === 'approach' ? 'approach' : 'detail';
+        const directStageName = directStage();
         const directRun = await runResumableStream({
           providers: activeProviders,
           streamFn: streamWithFailover,
@@ -1919,7 +1981,7 @@ router.post('/', async (req, res, next) => {
     // chuyển sang callWithFailover() — vẫn tự động failover khi lỗi, nhưng thử TUẦN TỰ theo rotation
     // công bằng với model ĐẦY ĐỦ (fast:false) thay vì đua nhiều target bằng model nhẹ.
     const system = systemPack.parts; // PHẦN D (TIER 4): bản đã nén boilerplate (A1: dạng PromptParts)
-    const directBudget = budgetOf(input.stage === 'approach' ? 'approach' : 'detail');
+    const directBudget = budgetOf(directStage());
     const directCaller = callMode.fast ? callFastest : callWithFailover;
     // PHẦN 8 FIX: modelTier THỰC SỰ ảnh hưởng lựa chọn model (trước đây chỉ log — dead optimization).
     const useFastModel = callMode.fast && tokenEconomy.tierUsesFastModel(tePlan.modelTier);
@@ -1953,7 +2015,7 @@ router.post('/', async (req, res, next) => {
       reqLogger,
       reserveState: jsonDirectReserveState, deadline: globalDeadline,
       maxGrant: input.stage === 'approach' ? APPROACH_MAX_CONTINUATION_TOKENS : undefined,
-      recalcTarget: () => budgetOf(input.stage === 'approach' ? 'approach' : 'detail').target
+      recalcTarget: () => budgetOf(directStage()).target
     });
     let { text, completeness, continuations, provider, partial: directJsonPartial } = await ensureCompleteNonStream(
       (msgs, recoveryCompleteness, grantedMaxTokens) => directCaller(
@@ -1977,7 +2039,7 @@ router.post('/', async (req, res, next) => {
 
     // Mục II: repair NGẮN cho stage 'approach' nếu vi phạm compactness contract (xem streaming ở trên).
     text = await maybeRepairApproach({
-      stageName: input.stage === 'approach' ? 'approach' : 'detail', text, activeProviders,
+      stageName: directStage(), text, activeProviders,
       requestId: reqLogger.requestId, signal, deadline: globalDeadline, reqLogger
     });
 
@@ -1989,7 +2051,7 @@ router.post('/', async (req, res, next) => {
     // WRITER 4/4 — normal JSON. Xem giải thích đầy đủ ở nhánh cross-check JSON phía trên.
     Object.assign(finalJsonPayload, visualSystem.policy.finalizeVisualCachePayload(finalJsonPayload, directJsonVisualRun, routeVisualPolicy));
     if (!tePlan.cacheBypassed && !directJsonPartial && !isAuthDependentVisualRun(directJsonVisualRun)) tokenEconomy.globalCache.set('L1', tePlan.cacheKeyParts, finalJsonPayload);
-    if (!directJsonPartial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: input.stage === 'approach' ? 'approach' : 'detail', provider: provider && provider.providerKey, model: provider && provider.modelId, ...outcomeSample(requestUsage, text), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
+    if (!directJsonPartial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: directStage(), provider: provider && provider.providerKey, model: provider && provider.modelId, ...outcomeSample(requestUsage, text), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
     teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
     teTelemetry.record('outputTokens', text.length / 3.2);
     reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });

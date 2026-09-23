@@ -173,7 +173,10 @@ test('20. PROMPT_VERSION đã bump khi thêm subject directive (tránh dùng nh�
   // thật) + A2/A3 đổi chính sách reasoning cap và visual override -> output có thể khác bản trước.
   // v9 (mục 1 audit HARD SUBJECT LOCK): manual subject directive đổi nội dung (buildManualLockDirective)
   // -> bump để không trả nhầm câu trả lời cache từ trước khi có hard lock.
-  assert.strictEqual(PROMPT_VERSION, 'chat-prompt-v9');
+  // v10 (Master Prompt V6.21.0-13): thêm nhánh KNOWLEDGE (questionClassifier.js) — câu hỏi lý
+  // thuyết/kiến thức không còn bị ép qua khuôn "Hướng giải/Lời giải chi tiết" của bài tập -> output
+  // đổi rõ rệt cho toàn bộ lớp câu hỏi kind=KNOWLEDGE, bump để không trả nhầm cache "bài giảng" cũ.
+  assert.strictEqual(PROMPT_VERSION, 'chat-prompt-v10');
 });
 
 // ---------- getSubject fallback ----------
