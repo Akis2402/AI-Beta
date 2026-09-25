@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-22T13:52:23.061Z",
+  "generatedAt": "2026-09-25T15:14:35.918Z",
   "assets": {
     "boot.js": "/js/boot.29aa9029e5.js",
     "payloadBudget.js": "/js/payloadBudget.c9bd656bea.js",
@@ -12,7 +12,7 @@
     "exprEval.js": "/js/exprEval.b06b7b8995.js",
     "scene3d.js": "/js/scene3d.eab03768bc.js",
     "voiceInput.js": "/js/voiceInput.66463c87c2.js",
-    "app.js": "/js/app.14935bacef.js",
+    "app.js": "/js/app.bf89d80347.js",
     "translations.js": "/js/i18n/translations.58819ae070.js",
     "languageStore.js": "/js/i18n/languageStore.763a541496.js",
     "i18n.js": "/js/i18n/i18n.20d12a2b84.js",
@@ -22,6 +22,6 @@
     "puterAuthUI.js": "/js/ui/puterAuthUI.5384d8ecb0.js",
     "conversationTaskManager.js": "/js/tasks/conversationTaskManager.1eb7e20b62.js",
     "backgroundTaskUI.js": "/js/tasks/backgroundTaskUI.915a2a6d32.js",
-    "styles.css": "/css/styles.4db96a4990.css"
+    "styles.css": "/css/styles.ad13b519c1.css"
   }
 }

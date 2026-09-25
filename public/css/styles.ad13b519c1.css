@@ -387,6 +387,11 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 }
 .source-card.expanded .preview{max-height:110px;opacity:1;margin-top:8px;padding-top:8px;border-top:1px solid var(--sidebar-rule);overflow-y:auto;}
 .source-card.dim{opacity:.5;}
+/* MỤC IV/LIX (rework notebook) — Notebook Guide, mở trong chính source-card (sidebar, tông tối). */
+.source-card .guide-open-btn{background:none;border:none;color:var(--sidebar-muted);cursor:pointer;font-size:12px;flex-shrink:0;padding:2px 4px;line-height:1;}
+.source-card .guide-open-btn:hover{color:var(--primary);}
+.source-card .guide-panel{display:none;font-size:11.5px;color:var(--sidebar-text);}
+.source-card.expanded .guide-panel.open{display:block;margin-top:8px;padding-top:8px;border-top:1px solid var(--sidebar-rule);max-height:260px;overflow-y:auto;}
 #dropHint{
   border:1.5px dashed var(--sidebar-rule);border-radius:var(--r-md);padding:18px 10px;text-align:center;font-size:12px;color:var(--sidebar-muted);
   cursor:pointer;transition:border-color .15s var(--ease),background-color .15s var(--ease),transform .15s var(--ease);line-height:1.5;
@@ -1177,6 +1182,25 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 .recent-src-remove{background:none;border:none;color:var(--muted);cursor:pointer;flex-shrink:0;font-size:13px;padding:4px;}
 .recent-src-remove:hover{color:var(--danger);}
 #recentSourcesEmpty{margin:0;}
+/* MỤC IV/LIX (rework notebook) — Notebook Guide cho nguồn URL (Web/YouTube), tông "paper" sáng. */
+.recent-src-item.url-src-item{display:block;}
+.recent-src-item.url-src-item .recent-src-row{display:flex;align-items:center;gap:8px;}
+.recent-src-guide{background:none;border:none;color:var(--muted);cursor:pointer;flex-shrink:0;font-size:13px;padding:4px;line-height:1;}
+.recent-src-guide:hover{color:var(--primary);}
+.recent-src-item .guide-panel{display:none;font-size:11.5px;color:var(--text);}
+.recent-src-item .guide-panel.open{display:block;margin-top:8px;padding-top:8px;border-top:1px solid var(--rule);max-height:240px;overflow-y:auto;}
+/* Nội dung Guide dùng chung — theme-agnostic (kế thừa màu từ .guide-panel theo từng ngữ cảnh). */
+.guide-panel h5{margin:8px 0 4px;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;opacity:.65;}
+.guide-panel h5:first-child{margin-top:0;}
+.guide-panel p{margin:0 0 6px;line-height:1.45;}
+.guide-panel ul{margin:0 0 6px;padding-left:16px;}
+.guide-panel li{margin-bottom:4px;line-height:1.4;}
+.guide-panel .guide-faq-q{font-weight:600;}
+.guide-panel .guide-loading{opacity:.65;font-style:italic;margin:0;}
+.guide-panel .guide-error{color:var(--danger);margin:0 0 6px;}
+.guide-panel .guide-coverage-note{font-size:10px;opacity:.65;margin:6px 0 0;}
+.guide-panel .guide-regen{background:none;border:1px solid currentColor;opacity:.7;border-radius:var(--r-sm,4px);color:inherit;cursor:pointer;font-size:10.5px;padding:3px 8px;margin-top:2px;}
+.guide-panel .guide-regen:hover{opacity:1;color:var(--primary);border-color:var(--primary);}
 /* PHẦN AK/AO: thêm nguồn URL — hàng input+nút tối giản, tái dùng đúng token màu/spacing hiện có. */
 .url-source-row{display:flex;gap:8px;margin-bottom:10px;}
 .url-source-row input{
