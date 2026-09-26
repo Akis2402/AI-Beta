@@ -474,6 +474,17 @@ function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode, probl
 // đang đối chiếu đa hướng ở chế độ Sâu — không có delta nào trong lúc này), "done" (kết thúc
 // thành công, kèm metadata provider/crossChecked), "error" (kết thúc do lỗi).
 function sseWrite(res, event, data) {
+  // ---------- V6.21.25/.26/.48 (audit): TTFB THẬT, đo tại ĐÚNG 1 điểm nghẽn duy nhất ----------
+  // Lý do hook ở ĐÂY (không phải sửa từng điểm gọi sseWrite rải rác trong handler): comment ngay
+  // trên hàm này đã tự xác nhận MỌI nhánh (cache hit/direct/cross-check/visual/error) đều đi qua
+  // đúng hàm này — nên đây CHÍNH XÁC là "điểm nghẽn" đơn nhất y hệt lý do PHẦN BG/21 dùng để gắn
+  // aiJobStore.observeSseEvent() ở dòng dưới. `reqLogger.elapsed()` dùng đồng hồ THẬT
+  // (Date.now() - startedAt của chính request đó, xem logger.js) — không suy diễn/không hard-code
+  // số ms nào. Chỉ ghi 1 LẦN DUY NHẤT (byte đầu tiên) — các lần sseWrite sau không phải TTFB nữa.
+  if (res.__reqLogger && !res.__ttfbLogged) {
+    res.__ttfbLogged = true;
+    res.__reqLogger.log({ stage: 'ttfb', ttfbMs: res.__reqLogger.elapsed(), firstEvent: event });
+  }
   // PHẦN BG/21: mọi nhánh `done`/`error` của pipeline (cache hit, direct, cross-check, visual...)
   // đều đi qua đúng hàm này — ghi nhận job ở ĐÂY nên không thể sót nhánh return nào, và không phải
   // sửa rải rác trong handler. Ghi vào store là best-effort, không chặn luồng ghi SSE.
@@ -544,6 +555,10 @@ router.post('/', async (req, res, next) => {
   // trong — cross-check, retry, tổng hợp...) — dùng để nối các dòng log lại thành 1 timeline khi
   // debug production. Không log body/API key, chỉ log route/stage/latency/status/error class.
   const reqLogger = createRequestLogger({ route: '/api/chat', method: 'POST' });
+  // sseWrite() được định nghĩa Ở NGOÀI router.post (dòng ~476), KHÔNG có closure access tới
+  // reqLogger (biến cục bộ của handler) — gắn vào `res` để sseWrite() đọc lại được, CÙNG pattern
+  // res.__aiJob đã dùng ngay trong chính hàm đó (xem sseWrite()).
+  res.__reqLogger = reqLogger;
   reqLogger.log({ stage: 'request_start', stream: wantsStream });
   // 'finish' bắt MỌI đường kết thúc response (JSON thường lẫn SSE) mà không cần sửa từng nhánh
   // return rải rác trong handler — 1 dòng log 'request_end' duy nhất, luôn đúng latency thật.
@@ -591,6 +606,30 @@ router.post('/', async (req, res, next) => {
   // toàn bộ phần này trở thành no-op, hành vi giữ nguyên như trước.
   const clientRequestId = (req.body && typeof req.body.clientRequestId === 'string') ? req.body.clientRequestId.trim() : '';
   if (clientRequestId) {
+    // ---------- V6.21.52 (lượt 6): CHẶN double-submit THẬT trước khi tạo job/gọi AI ----------
+    // Đính chính báo cáo trước: createJob() TRƯỚC ĐÂY được gọi VÔ ĐIỀU KIỆN — 2 request cùng
+    // clientRequestId (double-click Send, hoặc client tự động retry khi mất mạng) sẽ ghi ĐÈ job cũ
+    // và CẢ HAI vẫn tiếp tục gọi AI riêng, tốn gấp đôi (đúng lỗi V6.21.52 mô tả). Kiểm tra job CÙNG
+    // requestId đã RUNNING chưa TRƯỚC KHI tạo job mới — nếu có, từ chối thẳng, không bắt đầu lệnh
+    // gọi AI thứ 2. Client dùng CHÍNH cơ chế resume đã có (GET /api/chat/jobs/:id) để lấy kết quả
+    // khi request đầu xong — không cần hạ tầng fan-out 1 stream cho nhiều socket.
+    // Coi RUNNING quá 2×GLOBAL_REQUEST_DEADLINE_MS là job bị BỎ RƠI (server crash giữa chừng, trước
+    // khi kịp markDisconnected/finishJob ở res.on('close') phía trên) — không chặn tới hết TTL 30p.
+    // KHÔNG throw ở đây: đoạn này chạy TRƯỚC try{} chính (dòng ~631) — throw sẽ thành unhandled
+    // rejection, không ra response đúng. Trả lỗi trực tiếp + return, cùng kiểu early-exit đã có sẵn
+    // ở chỗ khác trong handler này.
+    const existingJob = await aiJobStore.getJob(clientRequestId);
+    const isRunning = existingJob && existingJob.status === aiJobStore.STATUS.RUNNING;
+    const isAbandoned = isRunning && (Date.now() - existingJob.updatedAt) > GLOBAL_REQUEST_DEADLINE_MS * 2;
+    if (isRunning && !isAbandoned) {
+      reqLogger.log({ stage: 'duplicate_request_blocked', clientRequestId, existingStatus: existingJob.status });
+      res.status(409).json({
+        error: 'duplicate_request_in_progress',
+        message: 'Yêu cầu này đang được xử lý, vui lòng đợi kết quả thay vì gửi lại.',
+        requestId: clientRequestId
+      });
+      return;
+    }
     res.__aiJob = aiJobStore.createJob({
       requestId: clientRequestId,
       conversationId: (req.body && typeof req.body.conversationId === 'string') ? req.body.conversationId : null,
@@ -634,7 +673,10 @@ router.post('/', async (req, res, next) => {
     releasePoolSlot = await globalWorkerPool.defaultPool.acquire({
       priority: globalWorkerPool.PRIORITY.INTERACTIVE, timeoutMs: GLOBAL_REQUEST_DEADLINE_MS
     });
-    reqLogger.log({ stage: 'worker_pool_admit', priority: 'interactive', ...globalWorkerPool.defaultPool.snapshot() });
+    reqLogger.log({
+      stage: 'worker_pool_admit', priority: 'interactive', queueWaitMs: reqLogger.elapsed(),
+      ...globalWorkerPool.defaultPool.snapshot()
+    });
 
     // ============================================================================================
     // PROMPT V5 — PHẦN E/F: ĐỊNH TUYẾN BẰNG LUẬT + EARLY EXIT, TRƯỚC MỌI CHUẨN BỊ TỐN KÉM
@@ -750,11 +792,27 @@ router.post('/', async (req, res, next) => {
     // `input`, không phải sửa từng điểm gọi riêng lẻ. Đây là fix cho bug "câu hỏi lý thuyết bị ép
     // thành bài giảng theo khuôn giải bài tập" (xem questionClassifier.js).
     input.questionProfile = classifyQuestion({ problemText, hasImage: hasAnyImage });
+    // ---------- V6.21.76-79 (audit lượt 5): Task Profile — GỘP quyết định chính sách vào CÙNG object ----------
+    // classifyQuestion trả về PHÂN LOẠI thuần (kind/complexity/responseDepth) — không biết gì về
+    // input.crossCheck hay input.stage (đúng nguyên tắc hàm thuần, không nhận input không liên quan
+    // tới việc phân loại). Nhưng 2 QUYẾT ĐỊNH CHÍNH SÁCH dựa trên phân loại đó (có cho cross-check
+    // không, dùng bảng ngân sách nào) trước đây nằm rải rác: 1 khối `if` riêng ngay dưới đây, và 1
+    // hàm `directStage()` phải tự tính lại (gọi input.stage/input.questionProfile.kind) mỗi lần cần
+    // ở tận 6 chỗ khác nhau trong file. Tính đúng 1 lần Ở ĐÂY, gắn thẳng vào `questionProfile` —
+    // driver duy nhất, chỗ dùng sau chỉ ĐỌC lại, không tự quyết định lại (V6.21.79 "Single Source of
+    // Truth"). KHÔNG gộp visual/source policy vào đây — 2 hệ đó đã trưởng thành, có test riêng, độc
+    // lập (`visualPolicyGate`/`sourceBudgetPlanner`) — gộp chỉ vì "cho gọn" mà không có lỗi cụ thể
+    // cần sửa là rủi ro không cần thiết, đúng bài học lượt 4 (đừng sửa cái đang chạy tốt).
+    input.questionProfile.crossCheckAllowed = input.questionProfile.kind !== 'KNOWLEDGE';
+    input.questionProfile.budgetStage = input.questionProfile.kind === 'KNOWLEDGE'
+      ? 'knowledge' : (input.stage === 'approach' ? 'approach' : 'detail');
     reqLogger.log({
       stage: 'question_classify',
       kind: input.questionProfile.kind,
       complexity: input.questionProfile.complexity,
       responseDepth: input.questionProfile.responseDepth,
+      crossCheckAllowed: input.questionProfile.crossCheckAllowed,
+      budgetStage: input.questionProfile.budgetStage,
       reason: input.questionProfile.reason
     });
     // ---------- V6.21.38: KHÔNG cross-check câu hỏi KIẾN THỨC — dù client có bật toggle ----------
@@ -765,7 +823,7 @@ router.post('/', async (req, res, next) => {
     // được cross-check nếu người dùng bật, đúng V6.21.39 ("fast không được bỏ correctness check bắt
     // buộc") — không tắt tràn lan theo complexity để tránh xoá mất 1 tính năng người dùng chủ động
     // chọn dùng cho trường hợp nó thực sự có ý nghĩa.
-    if (input.crossCheck && input.questionProfile.kind === 'KNOWLEDGE') {
+    if (input.crossCheck && !input.questionProfile.crossCheckAllowed) {
       reqLogger.log({ stage: 'cross_check_suppressed', reason: 'V6.21.38_knowledge_question' });
       input.crossCheck = false;
     }
@@ -923,11 +981,21 @@ router.post('/', async (req, res, next) => {
     // client tự quyết cơ chế reasoning NATIVE hay prompt-based dựa theo capability của provider được
     // chọn tại thời điểm gọi thực (xem thinkingRouter.js + anthropicClient/geminiClient/openaiClient).
     const callMode = resolveThinkingMode({ deepThinking: !!input.deepThinking });
+    // ---------- V6.21.33/.34 (lượt 7): budget history NÉN HƠN cho câu hỏi KIẾN THỨC ----------
+    // Đính chính: trước đây compressHistoryForBudget() KHÔNG nhận budgetTokens từ đây — luôn dùng
+    // mặc định DEFAULT_HISTORY_BUDGET_TOKENS=3000 (semanticCompression.js) BẤT KỂ fast/deep hay độ
+    // phức tạp câu hỏi. Một câu "Dao động cơ là gì?" giữa 1 hội thoại dài vẫn mang theo tối đa 3000
+    // token history y hệt 1 bài toán phức tạp — không đúng tinh thần "Fast nén nhiều hơn". Siết còn
+    // 1200 (~60%, cùng tỷ lệ đã áp cho BASE_TARGET.knowledge so với detail) khi kind=KNOWLEDGE. AN
+    // TOÀN: MIN_KEPT_TURNS=2 (semanticCompression.js) luôn giữ tối thiểu 2 lượt gần nhất BẤT KỂ budget
+    // — siết ngân sách chỉ làm rớt lịch sử CŨ hơn, không cắt mạch hội thoại đang diễn ra.
+    const historyBudgetTokens = input.questionProfile.kind === 'KNOWLEDGE' ? 1200 : undefined;
     const { history: compressedHistory } = compressHistoryForBudget(input.history, {
       contextsTokenLoad: contextsText.length / 3.2,
       approachTokenLoad: input.approachText.length / 3.2,
       problemTokenLoad: problemText.length / 3.2,
-      currentProblemText: problemText
+      currentProblemText: problemText,
+      ...(historyBudgetTokens ? { budgetTokens: historyBudgetTokens } : {})
     });
 
     // ---------- PHẦN D/E/F: LOSS-AWARE SEMANTIC COMPRESSION (lớp thứ 2, sau khi đã bỏ lượt cũ) ----------
@@ -1077,18 +1145,18 @@ router.post('/', async (req, res, next) => {
         complexityLevel: plan.complexity.level
       };
     };
-    // ---------- V6.21.5/.19 — 'knowledge' có ngân sách RIÊNG, không dùng chung bảng 'approach'/'detail' ----------
+    // ---------- V6.21.5/.19/.76-79 — 'knowledge' có ngân sách RIÊNG; budgetStage tính 1 LẦN DUY NHẤT ----------
     // Trước đây MỌI request "trực tiếp" (không cross-check) đều lấy budget theo input.stage
     // ('approach' hay 'detail') dù nội dung có phải bài tập hay không — một câu hỏi lý thuyết ngắn
     // vẫn được cấp nguyên ngân sách "lời giải chi tiết" (BASE_TARGET.detail, xem adaptiveBudget.js),
     // khiến model có ĐỦ chỗ để viết dài dù prompt đã yêu cầu ngắn — đây là 1 trong các nguyên nhân
-    // (không phải duy nhất) khiến câu trả lời kiến thức vẫn dài hơn cần thiết. Gộp lại MỘT hàm duy
-    // nhất (6 điểm gọi cũ trùng lặp ternary input.stage==='approach'?'approach':'detail' — DRY) và
-    // ưu tiên 'knowledge' khi questionProfile.kind==='KNOWLEDGE', bất kể client đang gửi stage nào.
-    const directStage = () => (
-      input.questionProfile && input.questionProfile.kind === 'KNOWLEDGE' ? 'knowledge'
-        : input.stage === 'approach' ? 'approach' : 'detail'
-    );
+    // (không phải duy nhất) khiến câu trả lời kiến thức vẫn dài hơn cần thiết. Giá trị này giờ được
+    // TÍNH 1 LẦN ngay sau khi phân loại (`input.questionProfile.budgetStage`, xem phía trên) — hàm
+    // dưới đây giờ chỉ ĐỌC lại, không tự quyết định lại (Task Profile, V6.21.76-79 "Single Source of
+    // Truth"; trước đó đã gộp 6 điểm gọi ternary trùng lặp `input.stage==='approach'?...` thành 1 hàm
+    // — bước sau đó là gộp NỐT phần tính toán vào đúng nơi phân loại thay vì tính lại mỗi lần hàm
+    // này được gọi).
+    const directStage = () => input.questionProfile.budgetStage;
     // Giữ tên cũ cho các nơi vẫn cần {min,target,max} thô (vd budget hiển thị debug) — KHÔNG còn
     // dùng .target trực tiếp làm maxTokens của lượt gọi model thật (xem trên).
     const budgetOf = budgetPlanOf;

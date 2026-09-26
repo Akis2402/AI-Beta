@@ -80,6 +80,21 @@ test('wiring: chat.js require globalWorkerPool, acquire() priority=interactive, 
   assert.ok(/res\.on\('close',\s*\(\)\s*=>\s*\{\s*if\s*\(releasePoolSlot\)\s*releasePoolSlot\(\)/.test(src), 'phải nhả slot khi response close (guard cả trường hợp lỗi/client ngắt kết nối)');
 });
 
+test('V6.21.25/.26/.48: sseWrite() ghi TTFB thật (reqLogger.elapsed()) đúng 1 lần cho byte đầu tiên', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'chat.js'), 'utf8');
+  assert.ok(/if\s*\(res\.__reqLogger\s*&&\s*!res\.__ttfbLogged\)/.test(src), 'phải guard chỉ ghi TTFB 1 lần, đọc reqLogger qua res.__reqLogger (sseWrite không có closure access biến cục bộ handler)');
+  assert.ok(/stage:\s*'ttfb',\s*ttfbMs:\s*res\.__reqLogger\.elapsed\(\)/.test(src), 'TTFB phải dùng đồng hồ thật res.__reqLogger.elapsed(), không hard-code');
+});
+test('V6.21.27/.48: worker_pool_admit log kèm queueWaitMs thật', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'chat.js'), 'utf8');
+  assert.ok(/stage:\s*'worker_pool_admit',\s*priority:\s*'interactive',\s*queueWaitMs:\s*reqLogger\.elapsed\(\)/.test(src),
+    'phải ghi queueWaitMs = reqLogger.elapsed() tại đúng thời điểm admit');
+});
+
 (async () => {
   let passed = 0, failed = 0;
   console.log('\n== Regression: GLOBAL WORKER POOL (V6.21.18/.19/.20) ==');

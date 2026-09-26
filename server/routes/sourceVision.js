@@ -22,10 +22,11 @@
 const express = require('express');
 const router = express.Router();
 const { getActiveProviders, ensureProvidersReady, callWithFailover, mapWithConcurrency, createDeadline } = require('../utils/aiProviders');
-const { validateSourceVisionBody, validateSourceUrlBody } = require('../utils/validators');
+const { validateSourceVisionBody, validateSourceUrlBody, validateNotebookGuideBody } = require('../utils/validators');
 const { VISION_EXTRACT_SYSTEM, parseVisionJson } = require('../utils/visionExtract');
 const { fetchWebSource } = require('../utils/source/webSource');
 const { fetchYoutubeSource } = require('../utils/source/youtubeSource');
+const { generateNotebookGuide } = require('../utils/source/notebookGuide');
 const singleFlight = require('../utils/singleFlight');
 const { contentFingerprint } = require('../utils/queryFingerprint');
 const globalWorkerPool = require('../utils/globalWorkerPool');
@@ -141,6 +142,36 @@ router.post('/youtube', async (req, res, next) => {
     const { url } = validateSourceUrlBody(req.body);
     await acquireBackgroundSlot(res, VISION_BATCH_DEADLINE_MS);
     const result = await fetchYoutubeSource(url);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ============================================================================================
+// MỤC IV/LIV/LV (rework notebook) — POST /api/source/guide (Notebook Guide)
+// ============================================================================================
+// Cùng loại việc với /vision-extract, /web, /youtube: CHUẨN BỊ nguồn (background priority), không
+// phải pipeline trả lời chat trực tiếp — client gọi route này khi người dùng bấm "Tạo Guide"/
+// "Regenerate" trong Source Workspace (mục XXIII: KHÔNG tự động gọi sau mỗi câu hỏi), không phải mỗi
+// lượt hỏi. Toàn bộ logic nén/cache/gọi AI nằm trong notebookGuide.js — route chỉ validate input và
+// chuyển tiếp, đúng ranh giới "1 route = 1 việc" đã áp dụng cho /web và /youtube ở trên.
+const GUIDE_DEADLINE_MS = Number(process.env.GUIDE_DEADLINE_MS) || 60000;
+router.post('/guide', async (req, res, next) => {
+  try {
+    const input = validateNotebookGuideBody(req.body);
+    await acquireBackgroundSlot(res, GUIDE_DEADLINE_MS);
+    await ensureProvidersReady();
+    const activeProviders = getActiveProviders();
+    if (!activeProviders.length) {
+      const err = new Error('Máy chủ chưa cấu hình bất kỳ nhà cung cấp AI nào.');
+      err.status = 500;
+      throw err;
+    }
+    const deadline = createDeadline(GUIDE_DEADLINE_MS);
+    const result = await generateNotebookGuide(input, activeProviders, {
+      callWithFailover, requestId: req.requestId, deadline, noCache: req.body && req.body.noCache === true
+    });
     res.json(result);
   } catch (err) {
     next(err);

@@ -1158,6 +1158,98 @@ function updateComposerSourceState() {
   }
 }
 
+/* ============================================================================================
+ * MỤC IV/XIX/XXIV/LIX (rework notebook) — NOTEBOOK GUIDE (UI)
+ * ============================================================================================
+ * Guide dùng lại NGUYÊN chunk đã có trên client (doc.chunks / urlSource.chunks — đúng dữ liệu
+ * collectAvailableEvidence() đã dùng, KHÔNG đọc lại file) + gọi route mới POST /api/source/guide
+ * (server tự nén/cache/gọi AI 1 lần — xem server/utils/source/notebookGuide.js). Chỉ sinh khi người
+ * dùng bấm (mục XXIII: không tự động sau mỗi câu hỏi); server cache theo fingerprint nên mở lại
+ * KHÔNG tốn thêm AI call, chỉ "Tạo lại" (regenerate) mới ép bỏ cache (noCache) — đúng mục LIX
+ * "regenerate phải là explicit user action".
+ */
+function guideChunksPayload(chunks) {
+  return (chunks || []).map((c) => ({ text: c.text, locator: c.locator || null, chunkIndex: c.chunkIndex || null }));
+}
+
+async function requestNotebookGuide({ sourceId, name, fingerprint, extractionVersion, chunks, noCache }) {
+  if (!fingerprint) return { ok: false, reason: 'missing_fingerprint' };
+  let data;
+  try {
+    const resp = await fetch('/api/source/guide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourceId, name, fingerprint, extractionVersion,
+        language: (state.settings && state.settings.lang) || 'vi',
+        chunks: guideChunksPayload(chunks), noCache: !!noCache
+      })
+    });
+    try { data = await resp.json(); } catch (e) { data = null; }
+  } catch (e) {
+    return { ok: false, reason: 'network_error' };
+  }
+  return data || { ok: false, reason: 'invalid_response' };
+}
+
+const GUIDE_BRIEF_SECTIONS = [
+  ['coreIdeas', 'Ý chính'], ['formulas', 'Công thức'], ['definitions', 'Định nghĩa'],
+  ['misconceptions', 'Dễ nhầm'], ['keyData', 'Số liệu quan trọng'], ['conclusions', 'Kết luận']
+];
+const GUIDE_REASON_MESSAGES = {
+  missing_fingerprint: 'Nguồn chưa sẵn sàng để tạo Guide.',
+  no_content: 'Nguồn chưa có nội dung nào để tạo Guide.',
+  no_provider: 'Máy chủ chưa cấu hình nhà cung cấp AI nào.',
+  invalid_response_shape: 'AI trả về không đúng định dạng — thử \u201cTạo lại\u201d.',
+  network_error: 'Không kết nối được máy chủ — thử lại.',
+  invalid_response: 'Không nhận được phản hồi hợp lệ — thử lại.'
+};
+
+function renderGuidePanelHtml(guide) {
+  const section = (title, bodyHtml) => (bodyHtml ? `<h5>${escapeHtml(title)}</h5>${bodyHtml}` : '');
+  const list = (items) => (items && items.length ? `<ul>${items.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '');
+  const faqHtml = (guide.faq || []).length
+    ? `<ul>${guide.faq.map((f) => `<li><span class="guide-faq-q">${escapeHtml(f.question)}</span><br>${escapeHtml(f.answer)}</li>`).join('')}</ul>`
+    : '';
+  const briefHtml = GUIDE_BRIEF_SECTIONS.map(([key, label]) => section(label, list((guide.brief || {})[key]))).join('');
+  const coverageNote = guide.sampled
+    ? `<p class="guide-coverage-note">⚠️ Nguồn dài — Guide dựa trên khoảng ${Math.round((guide.coverageRatio || 0) * 100)}% nội dung (lấy mẫu đại diện dọc tài liệu), không phải toàn văn.</p>`
+    : '';
+  const hasAnything = guide.summary || faqHtml || (guide.deepQuestions || []).length || briefHtml || (guide.topics || []).length;
+  if (!hasAnything) return `<p class="guide-error">Không tạo được Guide có nội dung — thử lại.</p><button type="button" class="guide-regen">↻ Thử lại</button>`;
+  return [
+    guide.summary ? `<h5>Tóm tắt</h5><p>${escapeHtml(guide.summary)}</p>` : '',
+    section('Câu hỏi thường gặp', faqHtml),
+    section('Câu hỏi đào sâu', list(guide.deepQuestions)),
+    briefHtml,
+    section('Chủ đề liên quan', list(guide.topics)),
+    coverageNote,
+    '<button type="button" class="guide-regen">↻ Tạo lại</button>'
+  ].join('');
+}
+
+/**
+ * @param {HTMLElement} panelEl  container .guide-panel rỗng, đã có trong DOM
+ * @param {{sourceId:string, name:string, fingerprint:string, extractionVersion?:string, chunks:Array}} descriptor
+ */
+async function openNotebookGuide(panelEl, descriptor, { force = false } = {}) {
+  if (!panelEl) return;
+  panelEl.classList.add('open');
+  if (!force && panelEl.dataset.loaded === '1') return; // đã có sẵn trong phiên này, không gọi lại
+  panelEl.dataset.loaded = '0';
+  panelEl.innerHTML = '<p class="guide-loading">Đang tạo Guide…</p>';
+  const result = await requestNotebookGuide({ ...descriptor, noCache: force });
+  if (!result || !result.ok) {
+    const msg = GUIDE_REASON_MESSAGES[result && result.reason] || 'Không tạo được Guide — thử lại.';
+    panelEl.innerHTML = `<p class="guide-error">${escapeHtml(msg)}</p><button type="button" class="guide-regen">↻ Thử lại</button>`;
+  } else {
+    panelEl.innerHTML = renderGuidePanelHtml(result);
+    panelEl.dataset.loaded = '1';
+  }
+  const regenBtn = panelEl.querySelector('.guide-regen');
+  if (regenBtn) regenBtn.onclick = (e) => { e.stopPropagation(); openNotebookGuide(panelEl, descriptor, { force: true }); };
+}
+
 function renderSources() {
   updateComposerSourceState();
   const list = el('sourceList');
@@ -1189,9 +1281,11 @@ function renderSources() {
           <div class="nm">${escapeHtml(doc.name)}</div>
           <div class="sub">${coverageLabel} · đang dùng</div>
         </div>
+        <button class="guide-open-btn" title="Tạo Notebook Guide (tóm tắt, FAQ, câu hỏi đào sâu...)">📘</button>
         <button class="rm" title="Xóa nguồn">✕</button>
       </div>
       <div class="preview">${previewText}</div>
+      <div class="guide-panel"></div>
     `;
     li.querySelector('.rm').onclick = (e) => {
       e.stopPropagation();
@@ -1199,8 +1293,16 @@ function renderSources() {
       // thể khôi phục lại (mục B2/B5), thay vì mất trắng như trước (state.docs.filter(...) cũ).
       moveDocToRecent(doc.id);
     };
+    li.querySelector('.guide-open-btn').onclick = (e) => {
+      e.stopPropagation();
+      li.classList.add('expanded');
+      openNotebookGuide(li.querySelector('.guide-panel'), {
+        sourceId: String(doc.id), name: doc.name, fingerprint: doc.fingerprint,
+        extractionVersion: doc.extractionVersion, chunks: doc.chunks
+      });
+    };
     li.querySelector('.row').addEventListener('click', (e) => {
-      if (e.target.closest('.rm')) return;
+      if (e.target.closest('.rm') || e.target.closest('.guide-open-btn')) return;
       li.classList.toggle('expanded');
     });
     list.appendChild(li);
@@ -2667,6 +2769,7 @@ async function addUrlSource(rawUrl) {
     videoId: data.videoId || null,
     title: data.title || (kind === 'YOUTUBE' ? data.videoId : url),
     fingerprint: data.fingerprint || null,
+    extractorVersion: data.extractorVersion || null,
     chunks: Array.isArray(data.chunks) ? data.chunks : [],
     addedAt: Date.now()
   };
@@ -2690,16 +2793,26 @@ function renderUrlSources() {
   listEl.innerHTML = '';
   (state.urlSources || []).forEach((s) => {
     const li = document.createElement('li');
-    li.className = 'recent-src-item';
+    li.className = 'recent-src-item url-src-item';
     const kindLabel = s.sourceType === 'YOUTUBE' ? 'YouTube' : 'Web';
     li.innerHTML = `
-      <div class="recent-src-info">
-        <span class="recent-src-name">${escapeHtml(s.title || s.url)}</span>
-        <span class="recent-src-meta">${escapeHtml(kindLabel)} · ${(s.chunks || []).length} đoạn</span>
+      <div class="recent-src-row">
+        <div class="recent-src-info">
+          <span class="recent-src-name">${escapeHtml(s.title || s.url)}</span>
+          <span class="recent-src-meta">${escapeHtml(kindLabel)} · ${(s.chunks || []).length} đoạn</span>
+        </div>
+        <button class="recent-src-guide" title="Tạo Notebook Guide">📘</button>
+        <button class="recent-src-remove" aria-label="Xoá nguồn">✕</button>
       </div>
-      <button class="recent-src-remove" aria-label="Xoá nguồn">✕</button>
+      <div class="guide-panel"></div>
     `;
     li.querySelector('.recent-src-remove').onclick = () => removeUrlSource(s.id);
+    li.querySelector('.recent-src-guide').onclick = () => {
+      openNotebookGuide(li.querySelector('.guide-panel'), {
+        sourceId: String(s.id), name: s.title || s.url, fingerprint: s.fingerprint,
+        extractionVersion: s.extractorVersion, chunks: s.chunks
+      });
+    };
     listEl.appendChild(li);
   });
 }

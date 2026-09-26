@@ -129,11 +129,41 @@ test("promptBuilder.js: nhánh questionProfile.kind==='KNOWLEDGE' đứng TRƯ�
 });
 
 // ---------- 9. V6.21.38 — cross-check bị tắt cho KNOWLEDGE dù client bật toggle ----------
-test('wiring: chat.js tắt input.crossCheck khi questionProfile.kind===KNOWLEDGE (V6.21.38)', () => {
+test('wiring: chat.js tắt input.crossCheck khi questionProfile.crossCheckAllowed===false (V6.21.38, refactor lượt 5: đọc field Task Profile thay vì tự kiểm tra kind lần nữa)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'chat.js'), 'utf8');
-  assert.ok(/if\s*\(input\.crossCheck\s*&&\s*input\.questionProfile\.kind\s*===\s*'KNOWLEDGE'\)/.test(src),
-    'phải có guard tắt crossCheck cho kind=KNOWLEDGE');
+  assert.ok(/if\s*\(input\.crossCheck\s*&&\s*!input\.questionProfile\.crossCheckAllowed\)/.test(src),
+    'phải có guard tắt crossCheck khi crossCheckAllowed===false');
   assert.ok(/input\.crossCheck\s*=\s*false;/.test(src), 'phải thực sự set input.crossCheck = false');
+});
+
+// ---------- 10. V6.21.76-79 — Task Profile: crossCheckAllowed/budgetStage tính 1 lần, gắn vào questionProfile ----------
+test('wiring: input.questionProfile.crossCheckAllowed tính ngay sau classify (Task Profile, không rải rác)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'chat.js'), 'utf8');
+  assert.ok(/input\.questionProfile\.crossCheckAllowed\s*=\s*input\.questionProfile\.kind\s*!==\s*'KNOWLEDGE';/.test(src),
+    'phải gắn crossCheckAllowed vào questionProfile');
+  assert.ok(/if\s*\(input\.crossCheck\s*&&\s*!input\.questionProfile\.crossCheckAllowed\)/.test(src),
+    'nhánh tắt cross-check phải ĐỌC lại field đã tính, không tự kiểm tra kind lần nữa');
+});
+test('wiring: input.questionProfile.budgetStage tính 1 lần, directStage() chỉ đọc lại (không tự quyết định lại)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'chat.js'), 'utf8');
+  assert.ok(/input\.questionProfile\.budgetStage\s*=\s*input\.questionProfile\.kind\s*===\s*'KNOWLEDGE'/.test(src),
+    'phải gắn budgetStage vào questionProfile ngay sau classify');
+  assert.ok(/const directStage = \(\) => input\.questionProfile\.budgetStage;/.test(src),
+    'directStage() giờ phải chỉ đọc lại field đã tính, không còn tự tính ternary riêng (Single Source of Truth)');
+});
+
+// ---------- 11. V6.21.33/.34 — history compression budget siết hơn cho KNOWLEDGE ----------
+test('wiring: chat.js truyền budgetTokens=1200 cho compressHistoryForBudget khi kind=KNOWLEDGE', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'chat.js'), 'utf8');
+  assert.ok(/const historyBudgetTokens = input\.questionProfile\.kind === 'KNOWLEDGE' \? 1200 : undefined;/.test(src),
+    'phải tính historyBudgetTokens dựa trên kind');
+  assert.ok(/compressHistoryForBudget\(input\.history,\s*\{[^}]*historyBudgetTokens/s.test(src),
+    'phải truyền historyBudgetTokens vào compressHistoryForBudget');
+});
+test('wiring: PROBLEM kind không bị ép budgetTokens=1200 (chỉ KNOWLEDGE mới siết, giữ mặc định 3000 cho bài toán)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'chat.js'), 'utf8');
+  assert.ok(/kind === 'KNOWLEDGE' \? 1200 : undefined/.test(src),
+    'PROBLEM phải rơi vào nhánh undefined (dùng DEFAULT_HISTORY_BUDGET_TOKENS mặc định của semanticCompression.js), không bị siết nhầm');
 });
 
 let passed = 0, failed = 0;

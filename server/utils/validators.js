@@ -565,6 +565,36 @@ function validateSourceUrlBody(body) {
   return { url };
 }
 
+// POST /api/source/guide (notebookGuide.js) — client gửi lại các chunk ĐÃ index (cùng dữ liệu đã
+// dùng cho retrieveContext()), không phải file gốc. Trần độ dài dùng lại ĐÚNG hằng số đã có cho
+// contexts chat (MAX_CONTEXTS/MAX_CONTEXT_LEN) — guide và chat cùng đọc 1 loại dữ liệu, không cần 1
+// bộ trần riêng (mục LXVII: không thêm magic number khi hằng số phù hợp đã tồn tại).
+const MAX_GUIDE_FINGERPRINT_LEN = 200;
+const MAX_GUIDE_EXTRACTION_VERSION_LEN = 40;
+const MAX_GUIDE_LANGUAGE_LEN = 10;
+function validateNotebookGuideBody(body) {
+  if (!body || typeof body !== 'object') throw new ValidationError('Yêu cầu không hợp lệ.');
+  const fingerprint = clip(String(body.fingerprint || '').trim(), MAX_GUIDE_FINGERPRINT_LEN);
+  if (!fingerprint) throw new ValidationError('Thiếu fingerprint của nguồn.');
+
+  const rawChunks = Array.isArray(body.chunks) ? body.chunks : [];
+  const chunks = rawChunks.slice(0, MAX_CONTEXTS).map((c) => ({
+    text: clip(String((c && c.text) || '').trim(), MAX_CONTEXT_LEN),
+    locator: c && c.locator != null ? clip(String(c.locator), 60) : undefined,
+    chunkIndex: c && Number.isFinite(Number(c.chunkIndex)) ? Number(c.chunkIndex) : undefined
+  })).filter((c) => c.text);
+  if (!chunks.length) throw new ValidationError('Nguồn chưa có nội dung để tạo Guide.');
+
+  return {
+    sourceId: body.sourceId != null ? clip(String(body.sourceId), 80) : undefined,
+    name: body.name != null ? clip(String(body.name).trim(), MAX_DOC_NAME) : undefined,
+    fingerprint,
+    extractionVersion: body.extractionVersion != null ? clip(String(body.extractionVersion), MAX_GUIDE_EXTRACTION_VERSION_LEN) : undefined,
+    language: body.language != null ? clip(String(body.language).trim(), MAX_GUIDE_LANGUAGE_LEN) : undefined,
+    chunks
+  };
+}
+
 module.exports = {
   ValidationError,
   validateChatBody,
@@ -574,6 +604,7 @@ module.exports = {
   validateSimilarBody,
   validateSourceVisionBody,
   validateSourceUrlBody,
+  validateNotebookGuideBody,
   parseSourceImagesDetailed,
   assertWithinRequestBudget,
   normalizeRules,
