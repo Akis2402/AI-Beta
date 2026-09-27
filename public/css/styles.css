@@ -65,6 +65,19 @@
   --motion-emphasis:480ms;
   --ease-standard:var(--ease);
   --ease-emphasized:cubic-bezier(.22,1,.36,1);
+
+  /* ---------- v2 (đại tu UI/animation) ----------
+     3 bổ sung có chủ đích, KHÔNG thay thế 6 token motion/ease ở trên:
+       --motion-instant  phản hồi vi mô NHANH HƠN cả --motion-fast — dành cho press-state tức thời
+                         (nút bấm, tick chọn) nơi 130ms đã bắt đầu cảm thấy "có độ trễ".
+       --ease-bounce     easing kiểu lò xo (overshoot nhẹ) — CHỈ dùng cho khoảnh khắc ăn mừng/thành
+                         công có chủ đích (hoàn thành bộ flashcard, badge...), không dùng cho thao
+                         tác thường ngày (xem mục "Sự thú vị đúng lúc" của brief nâng cấp UI).
+       --stagger-step    nhịp so le tường minh — trước đây hardcode "18ms" rải rác ở nhiều keyframe
+                         animation-delay; gom về đây để chỉnh nhịp so le toàn site ở 1 chỗ. */
+  --motion-instant:80ms;
+  --ease-bounce:cubic-bezier(.34,1.56,.64,1);
+  --stagger-step:18ms;
 }
 *{box-sizing:border-box;}
 /* Accessibility: focus-visible rõ ràng cho toàn hệ thống, không phá layout hiện có */
@@ -286,7 +299,7 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
      Vào khung hình nhẹ nhàng, so le theo thứ tự (biến --i do JS gán) — 1 nhịp duy nhất lúc danh
      sách dựng lại, không lặp lại khi hover. */
   animation:hist-card-in .32s var(--ease) both;
-  animation-delay:calc(var(--i, 0) * 18ms);
+  animation-delay:calc(var(--i, 0) * var(--stagger-step));
 }
 @keyframes hist-card-in{from{opacity:0;transform:translateY(4px) scale(.98);}to{opacity:1;transform:translateY(0) scale(1);}}
 .hist-card:hover{background:var(--sidebar-2);transform:translateX(1px);}
@@ -311,6 +324,17 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .hist-del:active{transform:scale(.92);}
 /* Xoá 1 thẻ: co gọn mượt thay vì biến mất đột ngột (JS thêm .hist-card--leaving trước khi remove) */
 .hist-card.hist-card--leaving{animation:none;transition:opacity .18s var(--ease),transform .18s var(--ease),max-height .22s var(--ease) .05s,margin .22s var(--ease) .05s,padding .22s var(--ease) .05s;opacity:0;transform:translateX(-6px) scale(.97);max-height:0;margin:0;padding-top:0;padding-bottom:0;}
+/* MỤC 5.3 (đại tu UI/animation): nhân rộng đúng pattern trên cho MỌI item danh sách có thể xoá
+   trong toàn app — ghi chú (.note-card), nguồn (.source-card), bộ flashcard đã lưu (.flash-set-card)
+   — trước đây chỉ lịch sử hội thoại có, 3 loại còn lại biến mất tức thì khi bấm xoá. Class riêng
+   ".card--leaving" (khác tên ".hist-card--leaving" để không đụng CSS đặc thù của lịch sử) nhưng
+   CÙNG giá trị hoạt ảnh hệt như trên — giữ đúng nguyên tắc "1 chữ ký chuyển động nhất quán", không
+   tự sáng tác biến thể khác cho từng loại thẻ. */
+.note-card.card--leaving,.source-card.card--leaving,.flash-set-card.card--leaving{
+  animation:none;pointer-events:none;
+  transition:opacity .18s var(--ease),transform .18s var(--ease),max-height .22s var(--ease) .05s,margin .22s var(--ease) .05s,padding .22s var(--ease) .05s;
+  opacity:0;transform:translateX(-6px) scale(.97);max-height:0;margin:0;padding-top:0;padding-bottom:0;
+}
 
 /* ---------- Ghi chú ---------- */
 /* Ghi chú = trang vở kỹ thuật số: viền trái nổi bật khi hover + nâng nhẹ như giở 1 trang note */
@@ -320,15 +344,19 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 /* So le nhẹ khi danh sách dựng lại — 10 item đầu mỗi lần render, item sau đó vào cùng lúc (tránh
    chờ lâu với list dài). Áp dụng chung cho note-card/source-card/formula-card. */
 .note-card:nth-child(1),.source-card:nth-child(1),.formula-card:nth-child(1){animation-delay:0ms}
-.note-card:nth-child(2),.source-card:nth-child(2),.formula-card:nth-child(2){animation-delay:16ms}
-.note-card:nth-child(3),.source-card:nth-child(3),.formula-card:nth-child(3){animation-delay:32ms}
-.note-card:nth-child(4),.source-card:nth-child(4),.formula-card:nth-child(4){animation-delay:48ms}
-.note-card:nth-child(5),.source-card:nth-child(5),.formula-card:nth-child(5){animation-delay:64ms}
-.note-card:nth-child(6),.source-card:nth-child(6),.formula-card:nth-child(6){animation-delay:80ms}
-.note-card:nth-child(7),.source-card:nth-child(7),.formula-card:nth-child(7){animation-delay:96ms}
-.note-card:nth-child(8),.source-card:nth-child(8),.formula-card:nth-child(8){animation-delay:112ms}
-.note-card:nth-child(9),.source-card:nth-child(9),.formula-card:nth-child(9){animation-delay:128ms}
-.note-card:nth-child(n+10){animation-delay:144ms}
+.note-card:nth-child(2),.source-card:nth-child(2),.formula-card:nth-child(2){animation-delay:calc(var(--stagger-step) * 1)}
+.note-card:nth-child(3),.source-card:nth-child(3),.formula-card:nth-child(3){animation-delay:calc(var(--stagger-step) * 2)}
+.note-card:nth-child(4),.source-card:nth-child(4),.formula-card:nth-child(4){animation-delay:calc(var(--stagger-step) * 3)}
+.note-card:nth-child(5),.source-card:nth-child(5),.formula-card:nth-child(5){animation-delay:calc(var(--stagger-step) * 4)}
+.note-card:nth-child(6),.source-card:nth-child(6),.formula-card:nth-child(6){animation-delay:calc(var(--stagger-step) * 5)}
+.note-card:nth-child(7),.source-card:nth-child(7),.formula-card:nth-child(7){animation-delay:calc(var(--stagger-step) * 6)}
+.note-card:nth-child(8),.source-card:nth-child(8),.formula-card:nth-child(8){animation-delay:calc(var(--stagger-step) * 7)}
+.note-card:nth-child(9),.source-card:nth-child(9),.formula-card:nth-child(9){animation-delay:calc(var(--stagger-step) * 8)}
+/* FIX nhất quán (mục 8 brief nâng cấp UI — "nhất quán hơn là mới lạ"): trước đây CHỈ .note-card có
+   catch-all cho item thứ 10 trở đi (144ms cố định) — .source-card/.formula-card không có, nên item
+   10+ ở 2 danh sách đó rơi về animation-delay mặc định 0ms, vào cùng lúc thay vì tiếp nối đúng nhịp
+   so le như phần đầu danh sách. Bổ sung để cả 3 danh sách hành xử giống nhau. */
+.note-card:nth-child(n+10),.source-card:nth-child(n+10),.formula-card:nth-child(n+10){animation-delay:calc(var(--stagger-step) * 8)}
 .note-q{font-size:12.5px;font-weight:600;color:var(--sidebar-text);margin-bottom:4px;line-height:1.4;}
 .note-a{font-size:11.5px;color:var(--sidebar-muted);line-height:1.55;white-space:pre-wrap;}
 .note-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--sidebar-rule);}
@@ -392,6 +420,29 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .source-card .guide-open-btn:hover{color:var(--primary);}
 .source-card .guide-panel{display:none;font-size:11.5px;color:var(--sidebar-text);}
 .source-card.expanded .guide-panel.open{display:block;margin-top:8px;padding-top:8px;border-top:1px solid var(--sidebar-rule);max-height:260px;overflow-y:auto;}
+/* MỤC LX (rework notebook) — Source Search: input + dropdown kết quả, tông sidebar tối. */
+.src-search-box{position:relative;margin:0 0 10px;}
+#sourceSearchInput{
+  width:100%;box-sizing:border-box;background:var(--sidebar-2);border:1px solid var(--sidebar-rule);border-radius:var(--r-md);
+  color:var(--sidebar-text);font-size:12.5px;padding:7px 10px;outline:none;
+}
+#sourceSearchInput:focus{border-color:var(--primary);}
+#sourceSearchInput::placeholder{color:var(--sidebar-muted);}
+.src-search-results{
+  position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:20;max-height:320px;overflow-y:auto;
+  background:var(--sidebar-2);border:1px solid var(--sidebar-rule);border-radius:var(--r-md);box-shadow:var(--shadow-sm);
+}
+.src-search-results[hidden]{display:none;}
+.src-search-empty{padding:10px;font-size:11.5px;color:var(--sidebar-muted);}
+.src-result-item{display:block;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid var(--sidebar-rule);
+  color:var(--sidebar-text);cursor:pointer;padding:8px 10px;font:inherit;font-size:11.5px;line-height:1.4;}
+.src-result-item:last-child{border-bottom:none;}
+.src-result-item:hover{background:var(--highlight);}
+.src-result-src{font-weight:600;font-size:10.5px;opacity:.75;margin-bottom:2px;display:flex;justify-content:space-between;gap:6px;}
+.src-result-snippet .hl{background:var(--highlight);color:var(--primary);border-radius:2px;padding:0 1px;}
+/* Nhấp nháy nhẹ để chỉ đúng source-card vừa jump tới từ kết quả tìm kiếm (mục LX). */
+@keyframes srcJumpFlash{0%,100%{box-shadow:none;}30%{box-shadow:0 0 0 2px var(--primary);}}
+.source-card.jump-flash,.recent-src-item.jump-flash{animation:srcJumpFlash 1s ease;}
 #dropHint{
   border:1.5px dashed var(--sidebar-rule);border-radius:var(--r-md);padding:18px 10px;text-align:center;font-size:12px;color:var(--sidebar-muted);
   cursor:pointer;transition:border-color .15s var(--ease),background-color .15s var(--ease),transform .15s var(--ease);line-height:1.5;
@@ -420,9 +471,10 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
   position:fixed;top:76px;right:16px;width:302px;max-height:calc(100vh - 96px);
   background:var(--paper-3);border:1px solid var(--rule);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
   display:flex;flex-direction:column;overflow:hidden;z-index:35;
-  transform:translateX(calc(100% + 32px));opacity:0;pointer-events:none;transition:transform .22s ease,opacity .22s ease;
+  transform:translateX(calc(100% + 32px)) scale(.97);opacity:0;pointer-events:none;
+  transition:transform var(--motion-smooth) var(--ease-emphasized),opacity var(--motion-smooth) var(--ease-emphasized);
 }
-#recommendPanel.open{transform:translateX(0);opacity:1;pointer-events:auto;}
+#recommendPanel.open{transform:translateX(0) scale(1);opacity:1;pointer-events:auto;}
 .rec-head{display:flex;align-items:center;justify-content:space-between;padding:13px 15px;border-bottom:1px solid var(--rule);flex-shrink:0;}
 .rec-head-title{font-family:var(--font-display);font-size:13.5px;font-weight:600;color:var(--text);}
 .rec-close{background:var(--paper-2);border:1px solid var(--rule);border-radius:var(--r-sm);width:25px;height:25px;cursor:pointer;font-size:11px;color:var(--text);flex-shrink:0;}
@@ -447,9 +499,10 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
   position:fixed;top:76px;left:16px;width:302px;max-height:calc(100vh - 96px);
   background:var(--paper-3);border:1px solid var(--rule);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
   display:flex;flex-direction:column;overflow:hidden;z-index:35;
-  transform:translateX(calc(-100% - 32px));opacity:0;pointer-events:none;transition:transform .22s ease,opacity .22s ease;
+  transform:translateX(calc(-100% - 32px)) scale(.97);opacity:0;pointer-events:none;
+  transition:transform var(--motion-smooth) var(--ease-emphasized),opacity var(--motion-smooth) var(--ease-emphasized);
 }
-#flashcardPanel.open{transform:translateX(0);opacity:1;pointer-events:auto;}
+#flashcardPanel.open{transform:translateX(0) scale(1);opacity:1;pointer-events:auto;}
 @media (max-width:760px){
   #flashcardPanel{top:auto;bottom:0;left:0;right:0;width:auto;max-height:62vh;border-radius:var(--r-lg) var(--r-lg) 0 0;
     transform:translateY(calc(100% + 20px));}
@@ -628,6 +681,9 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .citations .cite-note{font-size:12px;color:var(--muted);line-height:1.55;font-style:italic;}
 .citations .cite-title-web{margin-top:2px;}
 .citations .cite-web{color:var(--text);}
+/* MỤC XXX (rework notebook) — cảnh báo nhẹ khi citation đến từ transcript ASR (Gemini nghe audio),
+   không phải phụ đề có sẵn, xem collectAvailableEvidence()/renderCitations() trong app.js. */
+.citations .cite-asr-note{opacity:.65;font-style:italic;}
 
 /* ---------- Khung "Lỗi sai thường gặp" ---------- */
 .mistakes-box{margin:18px 0 8px;border:1px solid rgba(219,154,52,.35);background:var(--warn-tint);border-radius:var(--r-md);padding:13px 16px 15px;}
@@ -654,6 +710,48 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .stream-text{white-space:pre-wrap;font-size:15px;line-height:1.75;color:var(--text);}
 .stream-text.typing-cursor::after{content:'▍';display:inline-block;margin-left:1px;color:var(--primary);animation:blink 1s step-start infinite;}
 @keyframes blink{50%{opacity:0;}}
+
+/* ---------- 5.2 (đại tu UI/animation): mỗi đoạn (delta) SSE mới hiện dần thay vì "nhảy chữ" ----------
+   append(delta) trong app.js giờ bọc MỖI đoạn mới vào 1 <span class="stream-chunk"> thay vì ghi đè
+   textContent (xem startStreamingPreview()) — animation chỉ chạy 1 lần lúc đoạn đó xuất hiện, các
+   đoạn đã hiện trước đó không animate lại (chỉ đúng đoạn mới, giữ đúng "chuyển động có mục đích").
+   display:inline-block để transform áp dụng được (transform trên inline thuần không đáng tin cậy ở
+   mọi engine) nhưng vẫn xuống dòng tự nhiên vì mỗi span chỉ chứa 1 đoạn ngắn, không phá pre-wrap. */
+.stream-chunk{display:inline-block;animation:chunk-in var(--motion-fast) var(--ease-standard) both;}
+@keyframes chunk-in{from{opacity:0;transform:translateY(3px);}to{opacity:1;transform:translateY(0);}}
+
+/* ---------- Skeleton phản ánh đúng nội dung sắp tới (mục 5.2) ----------
+   Trước đây "đang tạo hình minh hoạ" chỉ là 1 dòng chữ trần (.visual-note.visual-loading) — không
+   truyền tải được HÌNH DẠNG nội dung sắp xuất hiện. .visual-skel là 1 PHẦN TỬ ANH EM ĐỘC LẬP được
+   chèn NGAY TRƯỚC .visual-note.visual-loading trong renderVisuals() (app.js) — KHÔNG lồng vào bên
+   trong nó — vì test/visual-upgrade.test.js đã neo cứng .visual-note.visual-loading phải giữ
+   nguyên dạng "1 dòng text phẳng" y hệt code gốc (note.textContent === 'visual.status.ai', DOM giả
+   dùng trong test không parse innerHTML nên không thể lồng cấu trúc con vào bên trong nó được).
+   Cùng tỉ lệ khung với thẻ ảnh thật (.visual-card-image) nên khi ảnh thật thay thế vào, không giật
+   layout (CLS). Shimmer dùng background-position (rẻ, GPU-friendly hơn animate background-color). */
+.visual-skel{
+  aspect-ratio:4/3;max-height:320px;margin-bottom:8px;position:relative;overflow:hidden;
+  border:1px solid var(--rule);border-radius:var(--r-md);
+  background-color:var(--paper-2);
+  background-image:linear-gradient(100deg,var(--paper-2) 30%,var(--paper-3) 45%,var(--paper-2) 60%);
+  background-size:250% 100%;
+  display:flex;align-items:center;justify-content:center;
+  animation:skel-shimmer 1.6s ease-in-out infinite,fadeInUp var(--motion-smooth) var(--ease-standard) both;
+}
+.visual-skel-icon{opacity:.35;line-height:0;}
+.visual-skel-icon svg{width:34px;height:34px;color:var(--muted);}
+/* Giai đoạn "đang tạo" (job đã dispatch, có visualId) khác "đang xếp hàng" (chưa có job) — chỉ khác
+   MÀU chấm góc (không đổi chữ, vì chữ caption dùng chung .visual-note.visual-loading bên dưới, giữ
+   nguyên đúng key canonical mà test đã neo) — KHÔNG bịa thêm trạng thái nào ngoài 2 cái app.js đã
+   thực sự phân biệt được (xem onVisualPending vs onVisualRequest trong app.js). */
+.visual-skel::after{content:'';position:absolute;top:9px;right:9px;width:7px;height:7px;border-radius:50%;background:var(--primary);animation:hist-pulse 1.2s ease-in-out infinite;}
+.visual-skel.is-generating::after{background:var(--amber);}
+@keyframes skel-shimmer{0%{background-position:200% 0;}100%{background-position:-50% 0;}}
+
+@media (prefers-reduced-motion:reduce){
+  .visual-skel{animation:none;background-image:none;}
+  .visual-skel::after{animation:none;}
+}
 
 /* Khung cho khối vẽ nhúng trong câu trả lời. Sau đợt chuyển sang AI image-first, khối này CHỈ còn
    phục vụ: (a) scene 3D tương tác Three.js (.draw-wrap-3d), (b) ghi chú cho khối ```plot/```shape
@@ -775,14 +873,42 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .flash-pager button{background:var(--paper-2);border:1px solid var(--rule);color:var(--text);border-radius:var(--r-sm);width:27px;height:27px;cursor:pointer;font-size:13px;}
 .flash-pager button:hover:not(:disabled){border-color:var(--primary);}
 .flash-pager button:disabled{opacity:.35;cursor:default;}
-.flash-card{
-  border:1px solid var(--rule);border-radius:var(--r-md);background:var(--paper-2);min-height:124px;padding:22px;
-  display:flex;align-items:center;justify-content:center;text-align:center;cursor:pointer;position:relative;transition:background-color .15s;
+/* ---------- MỤC 5.5 (đại tu UI/animation): Flashcard lật 3D thật ----------
+   .flash-card = khung ngoài (perspective). .flash-card-inner là khối THẬT SỰ xoay (preserve-3d).
+   2 mặt xếp CHỒNG lên nhau bằng kỹ thuật "CSS Grid stack" (cả 2 cùng grid-area:1/1, đặt trong 1
+   grid có 1 ô duy nhất) — cách này khiến ô lưới (và cả .flash-card-inner) TỰ cao bằng mặt CAO NHẤT
+   trong 2 mặt, không cần position:absolute (vốn sẽ làm mất khả năng tự co giãn theo nội dung, gây
+   cắt chữ với câu hỏi/đáp án dài) và không cần JS đo scrollHeight thủ công. Mặt sau xoay sẵn 180deg
+   + backface-visibility:hidden nên khi cả khối xoay đủ 180deg, đúng mặt sau lộ ra đúng chiều. */
+.flash-card{min-height:124px;cursor:pointer;perspective:1200px;}
+.flash-card-inner{
+  display:grid;transform-style:preserve-3d;
+  transition:transform var(--motion-emphasis) var(--ease-emphasized);
 }
-.flash-card .qlabel{position:absolute;top:11px;left:15px;font-family:var(--font-mono);font-size:10px;color:var(--muted);}
-.flash-card .txt{font-size:14.5px;line-height:1.6;color:var(--text);max-width:90%;}
-.flash-card.showing-a{background:var(--highlight);}
-.flash-card.showing-a .txt{color:var(--primary-dark);font-weight:600;}
+.flash-card.flipped .flash-card-inner{transform:rotateY(180deg);}
+.flash-face{
+  grid-area:1/1;min-height:124px;border:1px solid var(--rule);border-radius:var(--r-md);background:var(--paper-2);padding:22px;
+  display:flex;align-items:center;justify-content:center;text-align:center;position:relative;backface-visibility:hidden;
+}
+.flash-face-q .qlabel,.flash-face-a .qlabel{position:absolute;top:11px;left:15px;font-family:var(--font-mono);font-size:10px;color:var(--muted);}
+.flash-face .txt{font-size:14.5px;line-height:1.6;color:var(--text);max-width:90%;}
+.flash-face-a{transform:rotateY(180deg);background:var(--highlight);}
+.flash-face-a .txt{color:var(--primary-dark);font-weight:600;}
+/* Khoảnh khắc "hoàn thành bộ thẻ" (mục 5.5 — sự thú vị đúng lúc, dùng --ease-bounce, CHỈ 1 lần khi
+   lật xem đáp án của thẻ cuối, xem setFlipped() trong app.js) — glow xanh lá (--success-tint, cùng
+   token đã dùng cho badge "có câu trả lời mới"/trạng thái sẵn sàng — ngôn ngữ màu "hoàn tất" nhất
+   quán toàn app) + phồng nhẹ rồi trở lại bình thường, không phải hiệu ứng tồn tại vĩnh viễn. */
+.flash-card.flash-complete .flash-card-inner{animation:flash-complete-pulse .55s var(--ease-bounce);}
+@keyframes flash-complete-pulse{
+  0%{box-shadow:0 0 0 0 transparent;}
+  35%{box-shadow:0 0 0 10px var(--success-tint);transform:rotateY(180deg) scale(1.035);}
+  100%{box-shadow:0 0 0 0 transparent;transform:rotateY(180deg) scale(1);}
+}
+@media (prefers-reduced-motion:reduce){
+  .flash-face-a{transform:none;display:none;}
+  .flash-card.flipped .flash-face-q{display:none;}
+  .flash-card.flipped .flash-face-a{display:flex;}
+}
 .flash-progress{text-align:center;font-size:11.5px;color:var(--muted);margin-top:9px;}
 
 /* ---------- Mindmap trực quan ---------- */
@@ -1020,6 +1146,15 @@ body[data-theme="dark"]{
 #sendBtn:hover:not(:disabled){background:var(--primary-dark);transform:translateY(-1px);box-shadow:var(--shadow-md);}
 #sendBtn:active:not(:disabled){transform:translateY(0) scale(.98);}
 #sendBtn:disabled{opacity:.5;cursor:not-allowed;box-shadow:none;}
+/* MỤC 5.4 (đại tu UI/animation): hiệu ứng xác nhận "đã gửi" ngắn — nút Gửi lúc này ĐANG disabled
+   (sendMessage() set disabled=true trước khi gọi setChatStreaming), nên rule dưới đây đặt SAU
+   "#sendBtn:disabled" trong cùng file để thắng theo thứ tự cascade (2 rule specificity bằng nhau:
+   ID + 1 pseudo-class/class), không cần !important. Tick "✓" là ký tự thường, không phải icon SVG
+   mới, giữ đúng cách app đang dùng ký tự Unicode trực tiếp (✕ ‹ › ✨ 📘...) thay vì thêm phụ thuộc. */
+#sendBtn.send-confirm{opacity:1;animation:send-confirm-pop var(--motion-fast) var(--ease-bounce) both;}
+#sendBtn.send-confirm::after{content:'✓';margin-left:6px;display:inline-block;animation:send-confirm-tick var(--motion-normal) var(--ease-standard) both;}
+@keyframes send-confirm-pop{0%{transform:scale(1);}45%{transform:scale(1.08);}100%{transform:scale(1);}}
+@keyframes send-confirm-tick{from{opacity:0;transform:translateX(-4px);}to{opacity:1;transform:translateX(0);}}
 #stopBtn{
   margin-left:auto;background:#c0392b;color:#fff;border:none;border-radius:var(--r-sm);
   padding:0 17px;height:32px;font-weight:600;font-size:12.5px;cursor:pointer;box-shadow:var(--shadow-sm);
@@ -1192,10 +1327,14 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 /* Nội dung Guide dùng chung — theme-agnostic (kế thừa màu từ .guide-panel theo từng ngữ cảnh). */
 .guide-panel h5{margin:8px 0 4px;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;opacity:.65;}
 .guide-panel h5:first-child{margin-top:0;}
+.guide-panel .guide-title{margin:0 0 6px;font-size:12.5px;font-weight:700;}
 .guide-panel p{margin:0 0 6px;line-height:1.45;}
 .guide-panel ul{margin:0 0 6px;padding-left:16px;}
 .guide-panel li{margin-bottom:4px;line-height:1.4;}
 .guide-panel .guide-faq-q{font-weight:600;}
+/* MỤC LXI (rework notebook) — câu hỏi gợi ý bấm được (FAQ + đào sâu) -> đổ thẳng vào #qInput. */
+.guide-panel .guide-ask-q{background:none;border:none;color:inherit;cursor:pointer;font:inherit;padding:0;text-align:left;text-decoration:underline dotted;text-underline-offset:2px;}
+.guide-panel .guide-ask-q:hover{color:var(--primary);}
 .guide-panel .guide-loading{opacity:.65;font-style:italic;margin:0;}
 .guide-panel .guide-error{color:var(--danger);margin:0 0 6px;}
 .guide-panel .guide-coverage-note{font-size:10px;opacity:.65;margin:6px 0 0;}
@@ -1594,10 +1733,10 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
   position:fixed;top:76px;right:16px;width:330px;max-height:calc(100vh - 96px);
   background:var(--paper-3);border:1px solid var(--rule);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
   display:flex;flex-direction:column;overflow:hidden;z-index:40;
-  transform:translateX(calc(100% + 32px));opacity:0;pointer-events:none;
-  transition:transform .22s var(--ease),opacity .22s var(--ease);
+  transform:translateX(calc(100% + 32px)) scale(.97);opacity:0;pointer-events:none;
+  transition:transform var(--motion-smooth) var(--ease-emphasized),opacity var(--motion-smooth) var(--ease-emphasized);
 }
-#bgTaskPanel.open{transform:translateX(0);opacity:1;pointer-events:auto;}
+#bgTaskPanel.open{transform:translateX(0) scale(1);opacity:1;pointer-events:auto;}
 .bgtask-note{padding:8px 15px 0;font-size:11px;color:var(--muted);line-height:1.5;flex-shrink:0;}
 .bgtask-list{list-style:none;margin:0;padding:11px 13px 4px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;}
 .bgtask-item{

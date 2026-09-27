@@ -131,8 +131,32 @@ function setChatStreaming(isStreaming, conversationId) {
   // Nếu có truyền conversationId và nó KHÁC conversation đang mở trên màn hình -> đây là 1 task nền,
   // không đụng gì tới nút bấm hiện tại (chỉ cập nhật khi đúng là conv đang xem, hoặc gọi không kèm id).
   if (conversationId != null && (!currentConversation() || currentConversation().id !== conversationId)) return;
-  if (el('sendBtn')) el('sendBtn').style.display = isStreaming ? 'none' : '';
-  if (el('stopBtn')) el('stopBtn').style.display = isStreaming ? '' : 'none';
+  const sBtn = el('sendBtn'), stBtn = el('stopBtn');
+  if (isStreaming) {
+    // MỤC 5.4 (đại tu UI/animation): trước đây nút Gửi biến mất TỨC THÌ (display:none ngay lập tức)
+    // đúng lúc nút Dừng hiện ra — không có khoảnh khắc xác nhận "đã gửi" nào cả. Giờ nút Gửi phát
+    // 1 hiệu ứng xác nhận ngắn (.send-confirm — scale nhẹ + tick, xem @keyframes send-confirm trong
+    // styles.css) rồi MỚI ẩn đi ~170ms sau, trong khi nút Dừng vẫn hiện NGAY LẬP TỨC như cũ (không
+    // trễ) để không ảnh hưởng thời gian phản hồi thực của thao tác "dừng sinh câu trả lời".
+    // prefers-reduced-motion đã có quy tắc toàn cục bóp mọi animation/transition về .001ms nên
+    // setTimeout dưới đây với người dùng đó gần như tức thời, hành vi cuối cùng không đổi.
+    if (sBtn) {
+      sBtn.classList.add('send-confirm');
+      clearTimeout(sBtn._sendConfirmTimer);
+      sBtn._sendConfirmTimer = setTimeout(() => {
+        sBtn.style.display = 'none';
+        sBtn.classList.remove('send-confirm');
+      }, 170);
+    }
+    if (stBtn) stBtn.style.display = '';
+  } else {
+    if (sBtn) {
+      clearTimeout(sBtn._sendConfirmTimer);
+      sBtn.classList.remove('send-confirm');
+      sBtn.style.display = '';
+    }
+    if (stBtn) stBtn.style.display = 'none';
+  }
 }
 /** Gọi mỗi khi đổi conversation đang xem (loadConversation/startNewConversation) — đồng bộ lại nút
  * Gửi/Dừng theo ĐÚNG trạng thái generating của conversation VỪA MỞ (PHẦN F: trạng thái sinh câu trả
@@ -1208,8 +1232,14 @@ const GUIDE_REASON_MESSAGES = {
 function renderGuidePanelHtml(guide) {
   const section = (title, bodyHtml) => (bodyHtml ? `<h5>${escapeHtml(title)}</h5>${bodyHtml}` : '');
   const list = (items) => (items && items.length ? `<ul>${items.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '');
+  // MỤC LXI (rework notebook) — câu hỏi gợi ý PHẢI bấm được để hỏi luôn, không chỉ để đọc: mỗi câu
+  // hỏi trong FAQ/deepQuestions là 1 nút, click -> đổ vào #qInput (dùng lại đúng cơ chế insert đã có
+  // ở PHẦN transcript-vào-qInput, xem openNotebookGuide() bên dưới xử lý click qua delegation).
+  const askableList = (items) => (items && items.length
+    ? `<ul>${items.map((x) => `<li><button type="button" class="guide-ask-q" data-q="${escapeHtml(x)}">${escapeHtml(x)}</button></li>`).join('')}</ul>`
+    : '');
   const faqHtml = (guide.faq || []).length
-    ? `<ul>${guide.faq.map((f) => `<li><span class="guide-faq-q">${escapeHtml(f.question)}</span><br>${escapeHtml(f.answer)}</li>`).join('')}</ul>`
+    ? `<ul>${guide.faq.map((f) => `<li><button type="button" class="guide-ask-q guide-faq-q" data-q="${escapeHtml(f.question)}">${escapeHtml(f.question)}</button><br>${escapeHtml(f.answer)}</li>`).join('')}</ul>`
     : '';
   const briefHtml = GUIDE_BRIEF_SECTIONS.map(([key, label]) => section(label, list((guide.brief || {})[key]))).join('');
   const coverageNote = guide.sampled
@@ -1218,9 +1248,10 @@ function renderGuidePanelHtml(guide) {
   const hasAnything = guide.summary || faqHtml || (guide.deepQuestions || []).length || briefHtml || (guide.topics || []).length;
   if (!hasAnything) return `<p class="guide-error">Không tạo được Guide có nội dung — thử lại.</p><button type="button" class="guide-regen">↻ Thử lại</button>`;
   return [
+    guide.title ? `<h4 class="guide-title">${escapeHtml(guide.title)}</h4>` : '',
     guide.summary ? `<h5>Tóm tắt</h5><p>${escapeHtml(guide.summary)}</p>` : '',
     section('Câu hỏi thường gặp', faqHtml),
-    section('Câu hỏi đào sâu', list(guide.deepQuestions)),
+    section('Câu hỏi đào sâu', askableList(guide.deepQuestions)),
     briefHtml,
     section('Chủ đề liên quan', list(guide.topics)),
     coverageNote,
@@ -1246,8 +1277,93 @@ async function openNotebookGuide(panelEl, descriptor, { force = false } = {}) {
     panelEl.innerHTML = renderGuidePanelHtml(result);
     panelEl.dataset.loaded = '1';
   }
-  const regenBtn = panelEl.querySelector('.guide-regen');
-  if (regenBtn) regenBtn.onclick = (e) => { e.stopPropagation(); openNotebookGuide(panelEl, descriptor, { force: true }); };
+  // Delegation 1 lần cho cả .guide-regen lẫn .guide-ask-q — panel bị ghi đè innerHTML mỗi lần render
+  // lại nên bind trực tiếp từng nút (như trước) vẫn đúng, nhưng dùng chung 1 listener ở panelEl gọn
+  // hơn khi có nhiều nút .guide-ask-q (FAQ + deepQuestions) thay vì querySelectorAll từng loại.
+  panelEl.onclick = (e) => {
+    const regenBtn = e.target.closest('.guide-regen');
+    if (regenBtn) { e.stopPropagation(); openNotebookGuide(panelEl, descriptor, { force: true }); return; }
+    const askBtn = e.target.closest('.guide-ask-q');
+    if (askBtn && askBtn.dataset.q) {
+      e.stopPropagation();
+      const input = el('qInput');
+      if (input) {
+        input.value = askBtn.dataset.q;
+        input.dispatchEvent(new Event('input'));
+        input.focus();
+      }
+    }
+  };
+}
+
+/* ============================================================================================
+ * MỤC LX (rework notebook) — SOURCE SEARCH
+ * ============================================================================================
+ * Tìm CHỮ trong toàn bộ chunk đã index (PDF/OCR/transcript YouTube/web) — THUẦN client-side, không
+ * gọi AI/server (đúng yêu cầu mục LX: "không cần LLM chỉ để search"). Dùng lại normalizeForMatch()
+ * (đã có, chuẩn hoá dấu câu/chữ hoa) và highlightSnippet() (đã có, dùng để bôi vàng từ khớp trong
+ * citation) thay vì viết lại logic tương tự (mục LXVI).
+ */
+const SOURCE_SEARCH_MAX_RESULTS = 30;
+function searchAllSources(query) {
+  const q = normalizeForMatch(query);
+  if (q.length < 2) return [];
+  const results = [];
+  (state.docs || []).forEach((doc) => {
+    (doc.chunks || []).forEach((c) => {
+      if (c && c.text && !c.garbled && normalizeForMatch(c.text).includes(q)) {
+        results.push({ kind: 'doc', id: doc.id, name: doc.name, locator: c.locator || (c.chunkIndex ? `đoạn ${c.chunkIndex}` : ''), text: c.text });
+      }
+    });
+  });
+  (state.urlSources || []).forEach((s) => {
+    (s.chunks || []).forEach((c) => {
+      if (c && c.text && normalizeForMatch(c.text).includes(q)) {
+        results.push({ kind: 'url', id: s.id, name: s.title || s.url, locator: c.locator || '', text: c.text });
+      }
+    });
+  });
+  return results.slice(0, SOURCE_SEARCH_MAX_RESULTS);
+}
+
+function jumpToSourceCard(target) {
+  const selector = target.kind === 'doc'
+    ? `#sourceList li[data-doc-id="${CSS.escape(String(target.id))}"]`
+    : `#urlSourcesList li[data-url-source-id="${CSS.escape(String(target.id))}"]`;
+  const focusLi = () => {
+    const li = document.querySelector(selector);
+    if (!li) return;
+    li.classList.add('expanded');
+    li.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    li.classList.add('jump-flash');
+    setTimeout(() => li.classList.remove('jump-flash'), 1000);
+  };
+  if (target.kind === 'url') { openAddSourcePanel(); setTimeout(focusLi, 60); } else { focusLi(); }
+}
+
+function renderSourceSearchResults(query, results) {
+  const box = el('sourceSearchResults');
+  if (!box) return;
+  if (!query || normalizeForMatch(query).length < 2) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  if (!results.length) {
+    box.innerHTML = '<div class="src-search-empty">Không tìm thấy trong các nguồn hiện có.</div>';
+    return;
+  }
+  box.innerHTML = results.map((r, i) => `
+    <button type="button" class="src-result-item" data-idx="${i}">
+      <div class="src-result-src"><span>${escapeHtml(r.name)}</span>${r.locator ? `<span>${escapeHtml(r.locator)}</span>` : ''}</div>
+      <div class="src-result-snippet">${highlightSnippet(r.text, query)}</div>
+    </button>
+  `).join('');
+  box.querySelectorAll('.src-result-item').forEach((btn) => {
+    btn.onclick = () => {
+      const r = results[Number(btn.dataset.idx)];
+      box.hidden = true;
+      el('sourceSearchInput').value = '';
+      jumpToSourceCard(r);
+    };
+  });
 }
 
 function renderSources() {
@@ -1260,6 +1376,7 @@ function renderSources() {
   state.docs.forEach((doc) => {
     const li = document.createElement('li');
     li.className = 'source-card';
+    li.dataset.docId = String(doc.id); // MỤC LX (rework notebook) — Source Search cần jump-to-card
     const chars = doc.chunks.reduce((a, c) => a + c.text.length, 0);
     const firstChunk = doc.chunks[0];
     // PHẦN D: hiển thị coverage THẬT thay vì chỉ "X ký tự" — người dùng cần biết PDF đã đọc bao
@@ -1291,7 +1408,11 @@ function renderSources() {
       e.stopPropagation();
       // PHẦN B4: xóa source đang dùng KHÔNG xóa hẳn dữ liệu — chuyển sang "Nguồn gần đây" để có
       // thể khôi phục lại (mục B2/B5), thay vì mất trắng như trước (state.docs.filter(...) cũ).
-      moveDocToRecent(doc.id);
+      // MỤC 5.3 (đại tu UI/animation): co gọn duyên dáng trước khi rebuild danh sách, cùng pattern
+      // với lịch sử hội thoại và ghi chú (xem .card--leaving trong CSS) thay vì biến mất đột ngột.
+      li.classList.add('card--leaving');
+      li.addEventListener('transitionend', () => moveDocToRecent(doc.id), { once: true });
+      setTimeout(() => { if (li.isConnected) moveDocToRecent(doc.id); }, 400);
     };
     li.querySelector('.guide-open-btn').onclick = (e) => {
       e.stopPropagation();
@@ -1319,8 +1440,16 @@ function renderSources() {
  * nếu không nguồn gần đây sẽ KHÔNG sống sót qua reload (phá mục B8). */
 function persistDocs() {
   if (!window.docStore) return;
-  const activeTagged = state.docs.map((d) => ({ ...d, listStatus: 'active' }));
-  const recentTagged = (state.recentSources || []).map((d) => ({ ...d, listStatus: 'recent' }));
+  // MỤC XX (rework notebook) — doc.pdfBlob (nếu có, xem parsePDF() caller) CỐ Ý không lưu xuống
+  // IndexedDB: đây chỉ là tiện ích "mở đúng trang PDF" trong CÙNG phiên làm việc (dùng
+  // URL.createObjectURL + #page=N — trình duyệt tự render, không cần viết thêm PDF viewer). Lưu
+  // blob nhị phân của MỌI PDF vào IndexedDB mỗi lần persistDocs() chạy (rất thường xuyên — mỗi lần
+  // đổi tên, đổi trạng thái...) sẽ ghi lại toàn bộ dung lượng PDF liên tục, tốn hiệu năng/quota một
+  // cách không cần thiết cho một tính năng tiện lợi. Sau khi tải lại trang, doc.pdfBlob = undefined
+  // -> renderCitations() tự rơi về hành vi cũ ("· trang X", không clickable) — không lỗi, không giả.
+  const stripBlob = (d) => { const { pdfBlob, _pdfObjectUrl, ...rest } = d; return rest; };
+  const activeTagged = state.docs.map((d) => ({ ...stripBlob(d), listStatus: 'active' }));
+  const recentTagged = (state.recentSources || []).map((d) => ({ ...stripBlob(d), listStatus: 'recent' }));
   window.docStore.saveAll(activeTagged.concat(recentTagged));
 }
 
@@ -1701,6 +1830,10 @@ async function handleFiles(files) {
     if (state.docs.some((d) => d.fingerprint === fingerprint)) continue;
     const doc = {
       id: ++sourceCounter, name: file.name, ext, status: 'loading', fingerprint, updatedAt: Date.now(),
+      // MỤC XX (rework notebook) — giữ Blob gốc CHỈ trong bộ nhớ phiên này (KHÔNG persist, xem
+      // persistDocs()) để renderCitations() có thể mở đúng trang PDF bằng trình xem PDF có sẵn của
+      // trình duyệt (URL.createObjectURL(...)+'#page=N') — không cần viết PDF viewer riêng.
+      pdfBlob: ext === 'pdf' ? file : undefined,
       // Chunk báo trạng thái PHẢI có cờ placeholder — retrieveContext()/buildContexts() loại tuyệt
       // đối theo cờ này, không dựa vào việc "đoán nội dung" (TEST 13).
       chunks: [{ id: 1, text: '⏳ Đang đọc…', [SOURCE_PLACEHOLDER_FLAG]: true }]
@@ -2171,6 +2304,20 @@ function normalizeSourceFileList(fileList) {
 
 // --- Entry point 1: nút "+ Thêm nguồn" → mở panel (PHẦN B1, không đổi hành vi) ---
 el('addSourceBtn').onclick = (e) => openAddSourcePanel(e.currentTarget);
+
+// MỤC LX (rework notebook) — Source Search: gõ tới đâu lọc tới đó, Escape để đóng dropdown.
+if (el('sourceSearchInput')) {
+  el('sourceSearchInput').addEventListener('input', (e) => {
+    const q = e.target.value;
+    renderSourceSearchResults(q, searchAllSources(q));
+  });
+  el('sourceSearchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.target.value = ''; renderSourceSearchResults('', []); e.target.blur(); }
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.src-search-box')) { const box = el('sourceSearchResults'); if (box) box.hidden = true; }
+  });
+}
 
 // --- Entry point 2: click/drag&drop vùng "Thả tài liệu vào đây" ở sidebar ---
 el('dropHint').addEventListener('click', () => openSourceFilePicker('sidebar-click'));
@@ -2794,6 +2941,7 @@ function renderUrlSources() {
   (state.urlSources || []).forEach((s) => {
     const li = document.createElement('li');
     li.className = 'recent-src-item url-src-item';
+    li.dataset.urlSourceId = String(s.id); // MỤC LX (rework notebook) — Source Search jump-to-card
     const kindLabel = s.sourceType === 'YOUTUBE' ? 'YouTube' : 'Web';
     li.innerHTML = `
       <div class="recent-src-row">
@@ -2868,7 +3016,11 @@ function collectAvailableEvidence(query) {
         chunkIndex: ch.chunkIndex || null, totalChunks: ch.totalChunks || null,
         sourceId: urlSourceId(s),
         evidenceId: `${urlSourceId(s)}:c${ch.chunkIndex || (i + 1)}`,
-        extractionMethod: 'text',
+        // MỤC XXX (rework notebook): tôn trọng nhãn provenance THẬT của chunk (server đã stamp
+        // 'asr' cho nhánh Gemini transcribe trong youtubeSource.js) thay vì hardcode 'text' cho mọi
+        // chunk URL — trước đây dòng này luôn ép 'text' nên citation ASR và phụ đề thật hiển thị
+        // giống hệt nhau, người đọc không biết đoạn nào có thể sai do nhận dạng giọng nói tự động.
+        extractionMethod: ch.extractionMethod || 'text',
         extractionStatus: 'ok',
         // V6 — metadata locator theo LOẠI nguồn. `sourceUrl` đi qua sanitizeUrl() ngay tại cổng ra
         // để không bao giờ có javascript:/data: lọt vào payload rồi quay lại DOM ở lượt render sau
@@ -3992,7 +4144,13 @@ function renderNotesList() {
     li.querySelector('.note-foot-right span').textContent = timeAgo(note.createdAt);
     li.querySelector('.note-del').onclick = (e) => {
       e.stopPropagation();
-      deleteNote(note.convId, note.msgId);
+      // MỤC 5.3 (đại tu UI/animation): nhân rộng đúng pattern "co gọn duyên dáng" của lịch sử hội
+      // thoại (xem .card--leaving trong CSS, dùng chung style với .hist-card--leaving) — trước đây
+      // xoá ghi chú gọi thẳng deleteNote() -> renderNotesList() dựng lại toàn bộ <ul> ngay lập tức,
+      // thẻ biến mất đột ngột không có transition nào kịp chạy.
+      li.classList.add('card--leaving');
+      li.addEventListener('transitionend', () => deleteNote(note.convId, note.msgId), { once: true });
+      setTimeout(() => { if (li.isConnected) deleteNote(note.convId, note.msgId); }, 400);
     };
     li.onclick = () => goToNote(note);
     ul.appendChild(li);
@@ -4334,12 +4492,21 @@ function startStreamingPreview(container) {
   let text = '';
   return {
     wrap,
+    // MỤC 5.2 (đại tu UI/animation): trước đây ghi đè `pre.textContent = text` MỖI lần có delta mới
+    // — nghĩa là TOÀN BỘ văn bản đã hiện bị vẽ lại từ đầu mỗi lần (không có cách nào animate riêng
+    // phần MỚI, vì DOM cũ bị thay hoàn toàn). Giờ mỗi delta được bọc vào 1 <span class="stream-chunk">
+    // rồi APPEND (không xoá gì cũ) — CSS chỉ animate đúng đoạn vừa vào (opacity+dịch nhẹ theo Y, xem
+    // @keyframes chunk-in trong styles.css), phần đã hiện trước đó đứng yên. Vẫn dùng textContent
+    // (không phải innerHTML) cho từng span nên KHÔNG đổi gì về an toàn chống XSS so với bản cũ.
     append(delta) {
       if (!delta) return;
       text += delta;
       statusLine.style.display = 'none';
       pre.style.display = '';
-      pre.textContent = text;
+      const chunk = document.createElement('span');
+      chunk.className = 'stream-chunk';
+      chunk.textContent = delta;
+      pre.appendChild(chunk);
     },
     setStatus(message, state) {
       statusLine.style.display = '';
@@ -4388,6 +4555,15 @@ function renderPartialWarning(container, data) {
 
 // === VISUAL_DOWNLOAD_BLOCK_START === (neo cho test/visual-upgrade.test.js: loadVisualModule() trích
 // đúng khối hàm này để chạy trong sandbox DOM giả — không đổi/xoá dòng đánh dấu này khi sửa code.)
+/**
+ * MỤC 5.2 (đại tu UI/animation): icon khung ảnh cho skeleton "đang tạo hình minh hoạ" trong
+ * renderVisuals() bên dưới. Định nghĩa CỤC BỘ ngay trong VISUAL_DOWNLOAD_BLOCK (không lấy từ hằng
+ * số ICONS dùng chung ở ngoài) — vì test/visual-upgrade.test.js trích RIÊNG khối này chạy trong
+ * sandbox DOM giả, không nạp phần còn lại của app.js nên ICONS sẽ là ReferenceError trong sandbox
+ * đó dù chạy đúng trên trình duyệt thật (do thứ tự khai báo). Cùng bộ stroke 24x24/2px với ICONS.
+ */
+const VISUAL_SKEL_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>';
+
 /** MIME thật (đã qua validate — server hoặc blob.type từ Content-Type đã kiểm) -> extension file. */
 const VISUAL_EXT_BY_MIME = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
 
@@ -5043,10 +5219,32 @@ function renderVisualCard(v) {
  */
 function renderVisuals(container, visuals, status) {
   if (!container) return;
-  // Dọn placeholder loading của lượt trước (nếu có) trước khi vẽ kết quả thật.
-  container.querySelectorAll('.visual-loading, [data-visual-card]').forEach((el) => el.remove());
+  // Dọn placeholder loading của lượt trước (nếu có) trước khi vẽ kết quả thật. ".visual-skel" là
+  // khung xương THÊM MỚI (mục 5.2, xem nhánh 'pending' bên dưới) — quét dọn chung với 2 selector cũ.
+  container.querySelectorAll('.visual-loading, .visual-skel, [data-visual-card]').forEach((el) => el.remove());
 
   if (status === 'pending') {
+    // MỤC 5.2 (đại tu UI/animation): trước đây .visual-note.visual-loading LUÔN LÀ TOÀN BỘ nội dung
+    // hiển thị (chỉ 1 dòng chữ trần) — không truyền tải HÌNH DẠNG nội dung sắp tới. Giờ chèn THÊM
+    // 1 khung xương ảnh (.visual-skel) ngay TRƯỚC nó, KHÔNG lồng vào bên trong / KHÔNG đổi gì ở
+    // chính .visual-note.visual-loading (giữ nguyên 100% như code gốc — xem test/visual-upgrade.
+    // test.js: harness DOM giả không parse innerHTML nên cấu trúc lồng bên trong sẽ không query lại
+    // được, và test đã neo cứng .visual-note.visual-loading phải mang đúng key 'visual.status.ai'
+    // bất kể giai đoạn con nào — không được đổi TEXT theo giai đoạn, chỉ được đổi MÀU chấm góc của
+    // khung xương). 2 giai đoạn thật đã có sẵn trong state (xem bindClientVisualCallbacks()):
+    //   - onVisualPending: visuals CHƯA có gì (chỉ mới báo "sắp có việc", chưa rõ job).
+    //   - onVisualRequest: visuals[0].renderPending===true (job đã dispatch tới Puter, đang tạo thật).
+    // Không bịa thêm giai đoạn nào ngoài 2 cái này. Khung xương cùng tỉ lệ khung ảnh thật nên khi
+    // ảnh xong thay vào không giật layout (CLS).
+    const generating = Array.isArray(visuals) && visuals[0] && visuals[0].renderPending;
+    const skel = document.createElement('div');
+    skel.className = 'visual-skel' + (generating ? ' is-generating' : '');
+    const icon = document.createElement('span');
+    icon.className = 'visual-skel-icon';
+    icon.innerHTML = VISUAL_SKEL_ICON; // an toàn: hằng số SVG tĩnh trong code, không phải dữ liệu người dùng
+    skel.appendChild(icon);
+    container.appendChild(skel);
+
     const wait = document.createElement('div');
     wait.className = 'visual-note visual-loading';
     wait.textContent = t('visual.status.ai');
@@ -5270,12 +5468,29 @@ function renderCitations(container, contexts, query, answerText, webNote, citati
           const startS = Math.max(0, Math.floor(Number(c.timeStart) || 0));
           const jumpUrl = safeSrcUrl.includes('?') ? `${safeSrcUrl}&t=${startS}s` : `${safeSrcUrl}?t=${startS}s`;
           const mmss = `${Math.floor(startS / 60)}:${String(startS % 60).padStart(2, '0')}`;
-          meta = ` · <a href="${escapeHtml(jumpUrl)}" target="_blank" rel="noopener noreferrer">mốc ${mmss}</a>`;
+          // MỤC XXX: transcript nhánh ASR (Gemini nghe audio, không phải phụ đề có sẵn) độ tin cậy
+          // thấp hơn phụ đề thật — nêu rõ thay vì hiển thị y hệt để người đọc biết mức nên tin.
+          const asrNote = c.extractionMethod === 'asr' ? ' <i class="cite-asr-note">(phụ đề tự nhận dạng — có thể sai sót)</i>' : '';
+          meta = ` · <a href="${escapeHtml(jumpUrl)}" target="_blank" rel="noopener noreferrer">mốc ${mmss}</a>${asrNote}`;
         } else if (c.kind === 'web' && safeSrcUrl !== '#') {
           const anchor = c.sectionAnchor ? ` · đoạn “${escapeHtml(c.sectionAnchor)}”` : '';
           meta = ` · <a href="${escapeHtml(safeSrcUrl)}" target="_blank" rel="noopener noreferrer">mở trang</a>${anchor}`;
         } else if (pageLabel) {
-          meta = pageLabel; // đã có " · trang X" sẵn
+          // MỤC XX (rework notebook) — nếu PDF này vẫn còn Blob trong bộ nhớ phiên (doc.pdfBlob, xem
+          // persistDocs()) thì mở ĐÚNG TRANG bằng trình xem PDF có sẵn của trình duyệt qua tham số
+          // chuẩn '#page=N' (không cần viết PDF viewer riêng). Sau khi tải lại trang, pdfBlob không
+          // còn -> rơi về "· trang X" tĩnh như cũ, không lỗi.
+          const srcDoc = c.sourceId != null ? (state.docs || []).find((d) => d.id === c.sourceId) : null;
+          const jumpPage = c.page != null ? c.page : c.startPage;
+          if (srcDoc && srcDoc.pdfBlob && jumpPage != null) {
+            // Cache 1 object URL / doc (không tạo mới mỗi lần renderCitations() chạy lại — mỗi
+            // createObjectURL() giữ blob sống tới khi revoke, gọi lặp lại nhiều lần sẽ rò bộ nhớ).
+            if (!srcDoc._pdfObjectUrl) srcDoc._pdfObjectUrl = URL.createObjectURL(srcDoc.pdfBlob);
+            const objUrl = srcDoc._pdfObjectUrl + '#page=' + jumpPage;
+            meta = ` · <a href="${escapeHtml(objUrl)}" target="_blank" rel="noopener noreferrer">mở trang ${jumpPage}</a>`;
+          } else {
+            meta = pageLabel; // đã có " · trang X" sẵn
+          }
         }
         return `<div class="cite"><b>[${num}] ${escapeHtml(c.doc)}${meta} · đoạn ${escapeHtml(String(c.id))}</b><br>${body}</div>`;
       }).join('');
@@ -6296,7 +6511,7 @@ async function handleFlashcards(btn, aiRow, answerText) {
 
 function renderFlashcards(wrap, cards, { showBack = false } = {}) {
   if (!cards.length) { wrap.innerHTML = '<div class="rec-empty">Không tạo được thẻ ôn tập.</div>'; return; }
-  let idx = 0, showingAnswer = false;
+  let idx = 0, flipped = false, lastCardCelebrated = false;
   wrap.innerHTML = `
     <div class="flash-wrap">
       <div class="flash-head">
@@ -6304,13 +6519,24 @@ function renderFlashcards(wrap, cards, { showBack = false } = {}) {
         <span>${cards.length} thẻ</span>
         <div class="flash-nav"><button data-nav="prev">‹</button><button data-nav="next">›</button></div>
       </div>
-      <div class="flash-card"><span class="qlabel">Hỏi</span><div class="txt"></div></div>
+      <div class="flash-card">
+        <div class="flash-card-inner">
+          <div class="flash-face flash-face-q"><span class="qlabel">Hỏi</span><div class="txt txt-q"></div></div>
+          <div class="flash-face flash-face-a"><span class="qlabel">Đáp án</span><div class="txt txt-a"></div></div>
+        </div>
+      </div>
       <div class="flash-progress"></div>
     </div>
   `;
+  // MỤC 5.5 (đại tu UI/animation — "sự thú vị đúng lúc"): lật thẻ giờ là 1 phép quay 3D thật (2 mặt
+  // trước/sau của cùng 1 khối, xem .flash-card/.flash-card-inner/.flash-face trong styles.css) thay
+  // vì trước đây chỉ đổi textContent + màu nền phẳng — đúng ẩn dụ vật lý "lật thẻ" mà flashcard cần
+  // có. Cả 2 mặt được set nội dung 1 LẦN mỗi khi đổi thẻ (không phải mỗi lần lật) vì backface-
+  // visibility ẩn mặt sau bằng hình học 3D chứ không phải display:none — cả 2 mặt luôn nằm trong
+  // layout nên KaTeX của cả 2 phải render sẵn.
   const card = wrap.querySelector('.flash-card');
-  const txt = wrap.querySelector('.txt');
-  const qlabel = wrap.querySelector('.qlabel');
+  const txtQ = wrap.querySelector('.txt-q');
+  const txtA = wrap.querySelector('.txt-a');
   const progress = wrap.querySelector('.flash-progress');
   if (showBack) {
     // Quay lại danh sách = coi như đã "xong" với bộ thẻ đang xem -> lưu nó vào thư viện (nếu là
@@ -6318,21 +6544,31 @@ function renderFlashcards(wrap, cards, { showBack = false } = {}) {
     // không làm gì (an toàn gọi lại nhiều lần).
     wrap.querySelector('.flash-back').onclick = () => { commitActiveFlashcardSet(); renderFlashcardLibrary(); };
   }
-  function render() {
+  function renderCard() {
     const c = cards[idx];
-    txt.textContent = showingAnswer ? c.a : c.q;
-    qlabel.textContent = showingAnswer ? 'Đáp án' : 'Hỏi';
-    card.classList.toggle('showing-a', showingAnswer);
+    txtQ.textContent = c.q;
+    txtA.textContent = c.a;
     progress.textContent = `Thẻ ${idx + 1}/${cards.length} · bấm vào thẻ để lật`;
-    // LỖI GỐC: chỉ set textContent nên công thức LaTeX ($...$) hiển thị nguyên văn thay vì được
-    // KaTeX render thành ký hiệu toán học (renderMath chưa từng được gọi ở đây). FIX: gọi renderMath
-    // trên .txt sau mỗi lần đổi mặt thẻ/chuyển thẻ, giống cách renderMath() đã dùng cho khung chat.
-    renderMath(txt);
+    renderMath(txtQ);
+    renderMath(txtA);
   }
-  card.onclick = () => { showingAnswer = !showingAnswer; render(); };
-  wrap.querySelector('[data-nav="prev"]').onclick = () => { idx = (idx - 1 + cards.length) % cards.length; showingAnswer = false; render(); };
-  wrap.querySelector('[data-nav="next"]').onclick = () => { idx = (idx + 1) % cards.length; showingAnswer = false; render(); };
-  render();
+  function setFlipped(next) {
+    flipped = next;
+    card.classList.toggle('flipped', flipped);
+    // Ăn mừng nhẹ đúng 1 lần khi người dùng lật xem đáp án của THẺ CUỐI trong bộ (dấu mốc "đã xem
+    // hết bộ thẻ" — dữ liệu thật: idx là thẻ cuối + flipped vừa chuyển true), không lặp lại nếu họ
+    // lật tới/lật lui nhiều lần trên đúng thẻ đó (guardrail "chừng mực, không rợp mắt").
+    if (flipped && idx === cards.length - 1 && !lastCardCelebrated) {
+      lastCardCelebrated = true;
+      card.classList.remove('flash-complete');
+      void card.offsetWidth; // ép reflow để animation chạy lại nếu class từng bị gỡ trước đó
+      card.classList.add('flash-complete');
+    }
+  }
+  card.onclick = () => setFlipped(!flipped);
+  wrap.querySelector('[data-nav="prev"]').onclick = () => { idx = (idx - 1 + cards.length) % cards.length; setFlipped(false); renderCard(); };
+  wrap.querySelector('[data-nav="next"]').onclick = () => { idx = (idx + 1) % cards.length; setFlipped(false); renderCard(); };
+  renderCard();
 }
 
 // Chuyển bộ thẻ đang tạo (activeFlashcardSet, chưa lưu) vào thư viện flashcardSets + localStorage.
@@ -6392,7 +6628,13 @@ function renderFlashcardLibrary(resetPage) {
     if (!set) return;
     cardEl.querySelector('.rec-card-title').textContent = set.topic || '(Không có tiêu đề)';
     cardEl.querySelector('.rec-card-note').textContent = `${set.cards.length} thẻ · ${timeAgo(set.createdAt)}`;
-    cardEl.querySelector('.note-del').onclick = (e) => { e.stopPropagation(); deleteFlashcardSet(set.id); };
+    cardEl.querySelector('.note-del').onclick = (e) => {
+      e.stopPropagation();
+      // MỤC 5.3 (đại tu UI/animation): cùng pattern "co gọn duyên dáng" với lịch sử/ghi chú/nguồn.
+      cardEl.classList.add('card--leaving');
+      cardEl.addEventListener('transitionend', () => deleteFlashcardSet(set.id), { once: true });
+      setTimeout(() => { if (cardEl.isConnected) deleteFlashcardSet(set.id); }, 400);
+    };
     cardEl.onclick = () => {
       el('flashcardTopic').textContent = set.topic;
       renderFlashcards(wrap, set.cards, { showBack: true });

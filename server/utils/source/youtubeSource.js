@@ -97,8 +97,12 @@ function formatTimestamp(seconds) {
 /**
  * PHẦN AQ: gom cue thành chunk ~CHUNK_SECONDS giây — đơn vị retrieval là "một mốc thời gian", nên
  * citation của YouTube trỏ được tới đúng phút thay vì tới cả video.
+ * MỤC XXX (rework notebook): `method` stamp lên MỌI chunk trả về — 'text' cho phụ đề THẬT (2 nhánh
+ * captionTrack/timedtext), 'asr' cho nhánh Gemini transcribe (audio, có thể sai) — client/citation
+ * dựa vào field NÀY để không còn coi 2 nguồn tin cậy khác nhau là một (trước đây field asrGenerated
+ * ở payload cấp video tồn tại nhưng không chunk nào mang nó xuống evidence, xem PHẦN cuối file).
  */
-function chunkTranscript(cues, { chunkSeconds = CHUNK_SECONDS } = {}) {
+function chunkTranscript(cues, { chunkSeconds = CHUNK_SECONDS, method = 'text' } = {}) {
   const chunks = [];
   let current = null;
   (cues || []).forEach((cue) => {
@@ -117,7 +121,8 @@ function chunkTranscript(cues, { chunkSeconds = CHUNK_SECONDS } = {}) {
     startSeconds: Math.floor(c.startSeconds),
     endSeconds: Math.ceil(c.endSeconds),
     locator: `${formatTimestamp(c.startSeconds)}–${formatTimestamp(c.endSeconds)}`,
-    text: c.text.replace(/\s+/g, ' ').trim()
+    text: c.text.replace(/\s+/g, ' ').trim(),
+    extractionMethod: method
   }));
 }
 
@@ -306,7 +311,7 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
       if (asr && Array.isArray(asr.cues) && asr.cues.length) {
         // V6.1 token-opt: gộp cue sát nhau trước khi chunk → giảm số timestamp label ở locator.
         const mergedCues = youtubeAsr.mergeCues(asr.cues);
-        const chunks = chunkTranscript(mergedCues, opts);
+        const chunks = chunkTranscript(mergedCues, { ...opts, method: 'asr' });
         const payload = {
           ok: true,
           status: 'READY',

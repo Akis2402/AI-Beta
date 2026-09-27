@@ -33,6 +33,7 @@ const MAX_OUTPUT_TOKENS = Number(process.env.GUIDE_MAX_OUTPUT_TOKENS) || 2200;
 // Trần độ dài từng phần trong JSON trả về — chặn model trả lan man, và chặn 1 phản hồi hỏng làm
 // payload phình bất thường trước khi lưu cache.
 const LIMITS = {
+  TITLE_CHARS: 120,
   SUMMARY_CHARS: 2200,
   FAQ_ITEMS: 8,
   FAQ_Q_CHARS: 300,
@@ -136,6 +137,7 @@ function guideSystemPrompt(language) {
     '',
     'Trả về ĐÚNG 1 khối JSON hợp lệ (không markdown code fence, không text nào khác), đúng shape:',
     '{',
+    '  "title": "tiêu đề ngắn cho nguồn (khác tên file, tối đa ~8 từ)",',
     '  "summary": "tóm tắt ngắn gọn toàn bộ nội dung nguồn",',
     '  "faq": [{"question": "...", "answer": "..."}],',
     '  "deepQuestions": ["câu hỏi đào sâu tư duy dựa trên nội dung, không phải câu hỏi tra cứu đơn thuần"],',
@@ -151,7 +153,6 @@ function guideSystemPrompt(language) {
     '- Nếu các trích đoạn không đủ để trả lời một mục nào đó, để mảng/giá trị rỗng thay vì đoán.'
   ].join('\n');
 }
-
 /** Parse JSON guide từ model — chịu được model lỡ bọc ```json``` dù đã dặn không dùng. Trả null nếu
  * không parse được hoặc sai shape cơ bản; caller phải coi đó là lỗi (không cache, không giả vờ OK). */
 function parseGuideJson(text) {
@@ -175,6 +176,7 @@ function parseGuideJson(text) {
     : [];
 
   return {
+    title: clip(typeof parsed.title === 'string' ? parsed.title.trim() : '', LIMITS.TITLE_CHARS),
     summary: clip(typeof parsed.summary === 'string' ? parsed.summary.trim() : '', LIMITS.SUMMARY_CHARS),
     faq,
     deepQuestions: clipList(parsed.deepQuestions, LIMITS.DEEP_QUESTIONS, LIMITS.DEEP_QUESTION_CHARS),

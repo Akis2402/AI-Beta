@@ -32,7 +32,7 @@
      'self' — không cần SRI (không còn nguy cơ MITM ở CDN thứ 3), không còn timeout/DNS/content-
      blocker/Safari-cache-bug nào có thể chặn được nữa. Version pin y hệt trước (KaTeX 0.16.9). -->
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/css/styles.ad13b519c1.css">
+<link rel="stylesheet" href="/css/styles.335fda7b9e.css">
 </head>
 <body>
 <div id="app">
@@ -61,6 +61,12 @@
           <div class="sp-head">
             <h2><span data-i18n="sources.title">Tài liệu học tập</span><span class="sp-count" id="sourceCount"></span></h2>
             <button id="addSourceBtn" data-i18n="sources.add">＋ Thêm nguồn</button>
+          </div>
+          <!-- MỤC LX (rework notebook) — Source Search: tìm CHỮ trong nội dung đã index (PDF/OCR/
+               transcript/web), thuần client-side, KHÔNG gọi AI/server. -->
+          <div class="src-search-box">
+            <input type="search" id="sourceSearchInput" data-i18n-placeholder="sources.searchPlaceholder" placeholder="Tìm trong tài liệu…" autocomplete="off">
+            <div id="sourceSearchResults" class="src-search-results" hidden></div>
           </div>
           <div id="dropHint"><span class="drop-ic" id="icDrop"></span><br><b data-i18n="sources.dropTitle">Thả tài liệu vào đây</b><br><span class="drop-sub" data-i18n="sources.dropSub">PDF, DOCX hoặc TXT — hoặc bấm "Thêm nguồn"</span></div>
           <input type="file" id="fileInput" multiple accept=".pdf,.docx,.txt">
@@ -454,6 +460,6 @@
 <script src="/js/tasks/conversationTaskManager.1eb7e20b62.js"></script>
 <script src="/js/tasks/backgroundTaskUI.915a2a6d32.js"></script>
 <script src="/js/voiceInput.66463c87c2.js"></script>
-<script src="/js/app.bf89d80347.js"></script>
+<script src="/js/app.00c21093c8.js"></script>
 </body>
 </html>
