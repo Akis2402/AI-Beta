@@ -204,7 +204,12 @@ function parseSourceImages(body) {
  * system prompt từ các trường đã được kiểm duyệt bên dưới (xem promptBuilder.js).
  */
 // PHẦN F/N: tập giá trị hợp lệ cho provenance + vòng đời nguồn (khớp public/js/app.js).
-const ALLOWED_EXTRACTION_METHODS = ['text', 'vision', 'none', 'unknown'];
+// MỤC XXX (rework notebook) — 'asr' thêm ở đây để phân biệt transcript YouTube tự nhận dạng (Gemini
+// ASR fallback, xem youtubeSource.js) với phụ đề THẬT ('text') — cùng vai trò với 'vision' cho trang
+// PDF scan: không phải confidence số thực (source đã có field số cho retrieval ranking ở nơi khác),
+// mà là NHÃN PROVENANCE để citation/UI có thể cảnh báo đúng mức tin cậy, tái dùng CHÍNH allow-list
+// này thay vì tạo field song song (mục LXVI: không duplicate hệ thống đã có).
+const ALLOWED_EXTRACTION_METHODS = ['text', 'vision', 'asr', 'none', 'unknown'];
 const ALLOWED_EXTRACTION_STATUSES = ['ok', 'failed', 'pending', 'placeholder'];
 
 // ---------- BUG-001 (V6): locator theo LOẠI nguồn ----------

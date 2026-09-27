@@ -80,6 +80,7 @@ console.log('\n== parseGuideJson() — chịu được model lỡ bọc code fen
 test('7. JSON hợp lệ đầy đủ field -> parse đúng + clip theo LIMITS', () => {
   const longStr = 'x'.repeat(LIMITS.SUMMARY_CHARS + 500);
   const raw = JSON.stringify({
+    title: 'Dao động điều hòa',
     summary: longStr,
     faq: [{ question: 'Q1?', answer: 'A1.' }],
     deepQuestions: ['Vì sao...?'],
@@ -88,6 +89,7 @@ test('7. JSON hợp lệ đầy đủ field -> parse đúng + clip theo LIMITS',
   });
   const guide = parseGuideJson(raw);
   assert.ok(guide);
+  assert.strictEqual(guide.title, 'Dao động điều hòa');
   assert.strictEqual(guide.summary.length, LIMITS.SUMMARY_CHARS);
   assert.strictEqual(guide.faq.length, 1);
   assert.strictEqual(guide.faq[0].question, 'Q1?');
@@ -249,11 +251,23 @@ await testAsync('21. thiếu fingerprint/chunks/provider -> trả reason rõ rà
   assert.strictEqual(calls, 0);
 });
 
+await testAsync('22. đổi extractionVersion (nguồn được trích xuất lại) -> cache MISS, tự sinh lại (mục LXII#23)', async () => {
+  sourceContentCache._resetForTest();
+  let calls = 0;
+  const fakeCall = async () => { calls += 1; return { text: FAKE_GUIDE_JSON }; };
+  const deps = { callWithFailover: fakeCall };
+  const v1 = { ...fakeInput('fp-version-1'), extractionVersion: 'v1' };
+  const v2 = { ...fakeInput('fp-version-1'), extractionVersion: 'v2' };
+  await generateNotebookGuide(v1, [{ id: 'p1' }], deps);
+  await generateNotebookGuide(v2, [{ id: 'p1' }], deps);
+  assert.strictEqual(calls, 2, 'extractionVersion khác nhau (cùng fingerprint) phải KHÔNG dùng chung cache — nguồn đã đổi nội dung');
+});
+
 console.log('\n== Route /api/source/guide — kiểm tra TĨNH đã nối đúng module (cùng kiểu test route hiện có) ==');
 
 const routeSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'routes', 'sourceVision.js'), 'utf8');
 
-test('22. route file require notebookGuide.js', () => {
+test('23. route file require notebookGuide.js', () => {
   assert.ok(/require\(['"]\.\.\/utils\/source\/notebookGuide['"]\)/.test(routeSrc));
 });
 
@@ -261,7 +275,7 @@ test('22. route file require notebookGuide.js', () => {
 // giữa thân hàm — match lazy sẽ dừng ở đó thay vì ở `});` đóng router.post thật sự. /guide là route
 // CUỐI trong file (theo sau là module.exports, không còn `});` nào khác) nên greedy trong 1 cửa sổ
 // đủ lớn vẫn dừng đúng chỗ, không "ăn" sang route khác.
-test('23. POST /guide tồn tại, validate input + gọi generateNotebookGuide(), next(err) khi lỗi', () => {
+test('24. POST /guide tồn tại, validate input + gọi generateNotebookGuide(), next(err) khi lỗi', () => {
   const m = /router\.post\(['"]\/guide['"][\s\S]{0,1200}\}\);/.exec(routeSrc);
   assert.ok(m, 'không tìm thấy handler POST /guide');
   assert.ok(/validateNotebookGuideBody\(req\.body\)/.test(m[0]));
@@ -269,7 +283,7 @@ test('23. POST /guide tồn tại, validate input + gọi generateNotebookGuide(
   assert.ok(/catch \(err\) \{\s*next\(err\);/.test(m[0]));
 });
 
-test('24. POST /guide qua acquireBackgroundSlot (background priority — không cạnh tranh CPU với /api/chat)', () => {
+test('25. POST /guide qua acquireBackgroundSlot (background priority — không cạnh tranh CPU với /api/chat)', () => {
   const m = /router\.post\(['"]\/guide['"][\s\S]{0,1200}\}\);/.exec(routeSrc);
   assert.ok(/acquireBackgroundSlot\(/.test(m[0]));
 });

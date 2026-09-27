@@ -1208,8 +1208,14 @@ const GUIDE_REASON_MESSAGES = {
 function renderGuidePanelHtml(guide) {
   const section = (title, bodyHtml) => (bodyHtml ? `<h5>${escapeHtml(title)}</h5>${bodyHtml}` : '');
   const list = (items) => (items && items.length ? `<ul>${items.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '');
+  // MỤC LXI (rework notebook) — câu hỏi gợi ý PHẢI bấm được để hỏi luôn, không chỉ để đọc: mỗi câu
+  // hỏi trong FAQ/deepQuestions là 1 nút, click -> đổ vào #qInput (dùng lại đúng cơ chế insert đã có
+  // ở PHẦN transcript-vào-qInput, xem openNotebookGuide() bên dưới xử lý click qua delegation).
+  const askableList = (items) => (items && items.length
+    ? `<ul>${items.map((x) => `<li><button type="button" class="guide-ask-q" data-q="${escapeHtml(x)}">${escapeHtml(x)}</button></li>`).join('')}</ul>`
+    : '');
   const faqHtml = (guide.faq || []).length
-    ? `<ul>${guide.faq.map((f) => `<li><span class="guide-faq-q">${escapeHtml(f.question)}</span><br>${escapeHtml(f.answer)}</li>`).join('')}</ul>`
+    ? `<ul>${guide.faq.map((f) => `<li><button type="button" class="guide-ask-q guide-faq-q" data-q="${escapeHtml(f.question)}">${escapeHtml(f.question)}</button><br>${escapeHtml(f.answer)}</li>`).join('')}</ul>`
     : '';
   const briefHtml = GUIDE_BRIEF_SECTIONS.map(([key, label]) => section(label, list((guide.brief || {})[key]))).join('');
   const coverageNote = guide.sampled
@@ -1218,9 +1224,10 @@ function renderGuidePanelHtml(guide) {
   const hasAnything = guide.summary || faqHtml || (guide.deepQuestions || []).length || briefHtml || (guide.topics || []).length;
   if (!hasAnything) return `<p class="guide-error">Không tạo được Guide có nội dung — thử lại.</p><button type="button" class="guide-regen">↻ Thử lại</button>`;
   return [
+    guide.title ? `<h4 class="guide-title">${escapeHtml(guide.title)}</h4>` : '',
     guide.summary ? `<h5>Tóm tắt</h5><p>${escapeHtml(guide.summary)}</p>` : '',
     section('Câu hỏi thường gặp', faqHtml),
-    section('Câu hỏi đào sâu', list(guide.deepQuestions)),
+    section('Câu hỏi đào sâu', askableList(guide.deepQuestions)),
     briefHtml,
     section('Chủ đề liên quan', list(guide.topics)),
     coverageNote,
@@ -1246,8 +1253,93 @@ async function openNotebookGuide(panelEl, descriptor, { force = false } = {}) {
     panelEl.innerHTML = renderGuidePanelHtml(result);
     panelEl.dataset.loaded = '1';
   }
-  const regenBtn = panelEl.querySelector('.guide-regen');
-  if (regenBtn) regenBtn.onclick = (e) => { e.stopPropagation(); openNotebookGuide(panelEl, descriptor, { force: true }); };
+  // Delegation 1 lần cho cả .guide-regen lẫn .guide-ask-q — panel bị ghi đè innerHTML mỗi lần render
+  // lại nên bind trực tiếp từng nút (như trước) vẫn đúng, nhưng dùng chung 1 listener ở panelEl gọn
+  // hơn khi có nhiều nút .guide-ask-q (FAQ + deepQuestions) thay vì querySelectorAll từng loại.
+  panelEl.onclick = (e) => {
+    const regenBtn = e.target.closest('.guide-regen');
+    if (regenBtn) { e.stopPropagation(); openNotebookGuide(panelEl, descriptor, { force: true }); return; }
+    const askBtn = e.target.closest('.guide-ask-q');
+    if (askBtn && askBtn.dataset.q) {
+      e.stopPropagation();
+      const input = el('qInput');
+      if (input) {
+        input.value = askBtn.dataset.q;
+        input.dispatchEvent(new Event('input'));
+        input.focus();
+      }
+    }
+  };
+}
+
+/* ============================================================================================
+ * MỤC LX (rework notebook) — SOURCE SEARCH
+ * ============================================================================================
+ * Tìm CHỮ trong toàn bộ chunk đã index (PDF/OCR/transcript YouTube/web) — THUẦN client-side, không
+ * gọi AI/server (đúng yêu cầu mục LX: "không cần LLM chỉ để search"). Dùng lại normalizeForMatch()
+ * (đã có, chuẩn hoá dấu câu/chữ hoa) và highlightSnippet() (đã có, dùng để bôi vàng từ khớp trong
+ * citation) thay vì viết lại logic tương tự (mục LXVI).
+ */
+const SOURCE_SEARCH_MAX_RESULTS = 30;
+function searchAllSources(query) {
+  const q = normalizeForMatch(query);
+  if (q.length < 2) return [];
+  const results = [];
+  (state.docs || []).forEach((doc) => {
+    (doc.chunks || []).forEach((c) => {
+      if (c && c.text && !c.garbled && normalizeForMatch(c.text).includes(q)) {
+        results.push({ kind: 'doc', id: doc.id, name: doc.name, locator: c.locator || (c.chunkIndex ? `đoạn ${c.chunkIndex}` : ''), text: c.text });
+      }
+    });
+  });
+  (state.urlSources || []).forEach((s) => {
+    (s.chunks || []).forEach((c) => {
+      if (c && c.text && normalizeForMatch(c.text).includes(q)) {
+        results.push({ kind: 'url', id: s.id, name: s.title || s.url, locator: c.locator || '', text: c.text });
+      }
+    });
+  });
+  return results.slice(0, SOURCE_SEARCH_MAX_RESULTS);
+}
+
+function jumpToSourceCard(target) {
+  const selector = target.kind === 'doc'
+    ? `#sourceList li[data-doc-id="${CSS.escape(String(target.id))}"]`
+    : `#urlSourcesList li[data-url-source-id="${CSS.escape(String(target.id))}"]`;
+  const focusLi = () => {
+    const li = document.querySelector(selector);
+    if (!li) return;
+    li.classList.add('expanded');
+    li.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    li.classList.add('jump-flash');
+    setTimeout(() => li.classList.remove('jump-flash'), 1000);
+  };
+  if (target.kind === 'url') { openAddSourcePanel(); setTimeout(focusLi, 60); } else { focusLi(); }
+}
+
+function renderSourceSearchResults(query, results) {
+  const box = el('sourceSearchResults');
+  if (!box) return;
+  if (!query || normalizeForMatch(query).length < 2) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  if (!results.length) {
+    box.innerHTML = '<div class="src-search-empty">Không tìm thấy trong các nguồn hiện có.</div>';
+    return;
+  }
+  box.innerHTML = results.map((r, i) => `
+    <button type="button" class="src-result-item" data-idx="${i}">
+      <div class="src-result-src"><span>${escapeHtml(r.name)}</span>${r.locator ? `<span>${escapeHtml(r.locator)}</span>` : ''}</div>
+      <div class="src-result-snippet">${highlightSnippet(r.text, query)}</div>
+    </button>
+  `).join('');
+  box.querySelectorAll('.src-result-item').forEach((btn) => {
+    btn.onclick = () => {
+      const r = results[Number(btn.dataset.idx)];
+      box.hidden = true;
+      el('sourceSearchInput').value = '';
+      jumpToSourceCard(r);
+    };
+  });
 }
 
 function renderSources() {
@@ -1260,6 +1352,7 @@ function renderSources() {
   state.docs.forEach((doc) => {
     const li = document.createElement('li');
     li.className = 'source-card';
+    li.dataset.docId = String(doc.id); // MỤC LX (rework notebook) — Source Search cần jump-to-card
     const chars = doc.chunks.reduce((a, c) => a + c.text.length, 0);
     const firstChunk = doc.chunks[0];
     // PHẦN D: hiển thị coverage THẬT thay vì chỉ "X ký tự" — người dùng cần biết PDF đã đọc bao
@@ -1319,8 +1412,16 @@ function renderSources() {
  * nếu không nguồn gần đây sẽ KHÔNG sống sót qua reload (phá mục B8). */
 function persistDocs() {
   if (!window.docStore) return;
-  const activeTagged = state.docs.map((d) => ({ ...d, listStatus: 'active' }));
-  const recentTagged = (state.recentSources || []).map((d) => ({ ...d, listStatus: 'recent' }));
+  // MỤC XX (rework notebook) — doc.pdfBlob (nếu có, xem parsePDF() caller) CỐ Ý không lưu xuống
+  // IndexedDB: đây chỉ là tiện ích "mở đúng trang PDF" trong CÙNG phiên làm việc (dùng
+  // URL.createObjectURL + #page=N — trình duyệt tự render, không cần viết thêm PDF viewer). Lưu
+  // blob nhị phân của MỌI PDF vào IndexedDB mỗi lần persistDocs() chạy (rất thường xuyên — mỗi lần
+  // đổi tên, đổi trạng thái...) sẽ ghi lại toàn bộ dung lượng PDF liên tục, tốn hiệu năng/quota một
+  // cách không cần thiết cho một tính năng tiện lợi. Sau khi tải lại trang, doc.pdfBlob = undefined
+  // -> renderCitations() tự rơi về hành vi cũ ("· trang X", không clickable) — không lỗi, không giả.
+  const stripBlob = (d) => { const { pdfBlob, _pdfObjectUrl, ...rest } = d; return rest; };
+  const activeTagged = state.docs.map((d) => ({ ...stripBlob(d), listStatus: 'active' }));
+  const recentTagged = (state.recentSources || []).map((d) => ({ ...stripBlob(d), listStatus: 'recent' }));
   window.docStore.saveAll(activeTagged.concat(recentTagged));
 }
 
@@ -1701,6 +1802,10 @@ async function handleFiles(files) {
     if (state.docs.some((d) => d.fingerprint === fingerprint)) continue;
     const doc = {
       id: ++sourceCounter, name: file.name, ext, status: 'loading', fingerprint, updatedAt: Date.now(),
+      // MỤC XX (rework notebook) — giữ Blob gốc CHỈ trong bộ nhớ phiên này (KHÔNG persist, xem
+      // persistDocs()) để renderCitations() có thể mở đúng trang PDF bằng trình xem PDF có sẵn của
+      // trình duyệt (URL.createObjectURL(...)+'#page=N') — không cần viết PDF viewer riêng.
+      pdfBlob: ext === 'pdf' ? file : undefined,
       // Chunk báo trạng thái PHẢI có cờ placeholder — retrieveContext()/buildContexts() loại tuyệt
       // đối theo cờ này, không dựa vào việc "đoán nội dung" (TEST 13).
       chunks: [{ id: 1, text: '⏳ Đang đọc…', [SOURCE_PLACEHOLDER_FLAG]: true }]
@@ -2171,6 +2276,20 @@ function normalizeSourceFileList(fileList) {
 
 // --- Entry point 1: nút "+ Thêm nguồn" → mở panel (PHẦN B1, không đổi hành vi) ---
 el('addSourceBtn').onclick = (e) => openAddSourcePanel(e.currentTarget);
+
+// MỤC LX (rework notebook) — Source Search: gõ tới đâu lọc tới đó, Escape để đóng dropdown.
+if (el('sourceSearchInput')) {
+  el('sourceSearchInput').addEventListener('input', (e) => {
+    const q = e.target.value;
+    renderSourceSearchResults(q, searchAllSources(q));
+  });
+  el('sourceSearchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.target.value = ''; renderSourceSearchResults('', []); e.target.blur(); }
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.src-search-box')) { const box = el('sourceSearchResults'); if (box) box.hidden = true; }
+  });
+}
 
 // --- Entry point 2: click/drag&drop vùng "Thả tài liệu vào đây" ở sidebar ---
 el('dropHint').addEventListener('click', () => openSourceFilePicker('sidebar-click'));
@@ -2794,6 +2913,7 @@ function renderUrlSources() {
   (state.urlSources || []).forEach((s) => {
     const li = document.createElement('li');
     li.className = 'recent-src-item url-src-item';
+    li.dataset.urlSourceId = String(s.id); // MỤC LX (rework notebook) — Source Search jump-to-card
     const kindLabel = s.sourceType === 'YOUTUBE' ? 'YouTube' : 'Web';
     li.innerHTML = `
       <div class="recent-src-row">
@@ -2868,7 +2988,11 @@ function collectAvailableEvidence(query) {
         chunkIndex: ch.chunkIndex || null, totalChunks: ch.totalChunks || null,
         sourceId: urlSourceId(s),
         evidenceId: `${urlSourceId(s)}:c${ch.chunkIndex || (i + 1)}`,
-        extractionMethod: 'text',
+        // MỤC XXX (rework notebook): tôn trọng nhãn provenance THẬT của chunk (server đã stamp
+        // 'asr' cho nhánh Gemini transcribe trong youtubeSource.js) thay vì hardcode 'text' cho mọi
+        // chunk URL — trước đây dòng này luôn ép 'text' nên citation ASR và phụ đề thật hiển thị
+        // giống hệt nhau, người đọc không biết đoạn nào có thể sai do nhận dạng giọng nói tự động.
+        extractionMethod: ch.extractionMethod || 'text',
         extractionStatus: 'ok',
         // V6 — metadata locator theo LOẠI nguồn. `sourceUrl` đi qua sanitizeUrl() ngay tại cổng ra
         // để không bao giờ có javascript:/data: lọt vào payload rồi quay lại DOM ở lượt render sau
@@ -5270,12 +5394,29 @@ function renderCitations(container, contexts, query, answerText, webNote, citati
           const startS = Math.max(0, Math.floor(Number(c.timeStart) || 0));
           const jumpUrl = safeSrcUrl.includes('?') ? `${safeSrcUrl}&t=${startS}s` : `${safeSrcUrl}?t=${startS}s`;
           const mmss = `${Math.floor(startS / 60)}:${String(startS % 60).padStart(2, '0')}`;
-          meta = ` · <a href="${escapeHtml(jumpUrl)}" target="_blank" rel="noopener noreferrer">mốc ${mmss}</a>`;
+          // MỤC XXX: transcript nhánh ASR (Gemini nghe audio, không phải phụ đề có sẵn) độ tin cậy
+          // thấp hơn phụ đề thật — nêu rõ thay vì hiển thị y hệt để người đọc biết mức nên tin.
+          const asrNote = c.extractionMethod === 'asr' ? ' <i class="cite-asr-note">(phụ đề tự nhận dạng — có thể sai sót)</i>' : '';
+          meta = ` · <a href="${escapeHtml(jumpUrl)}" target="_blank" rel="noopener noreferrer">mốc ${mmss}</a>${asrNote}`;
         } else if (c.kind === 'web' && safeSrcUrl !== '#') {
           const anchor = c.sectionAnchor ? ` · đoạn “${escapeHtml(c.sectionAnchor)}”` : '';
           meta = ` · <a href="${escapeHtml(safeSrcUrl)}" target="_blank" rel="noopener noreferrer">mở trang</a>${anchor}`;
         } else if (pageLabel) {
-          meta = pageLabel; // đã có " · trang X" sẵn
+          // MỤC XX (rework notebook) — nếu PDF này vẫn còn Blob trong bộ nhớ phiên (doc.pdfBlob, xem
+          // persistDocs()) thì mở ĐÚNG TRANG bằng trình xem PDF có sẵn của trình duyệt qua tham số
+          // chuẩn '#page=N' (không cần viết PDF viewer riêng). Sau khi tải lại trang, pdfBlob không
+          // còn -> rơi về "· trang X" tĩnh như cũ, không lỗi.
+          const srcDoc = c.sourceId != null ? (state.docs || []).find((d) => d.id === c.sourceId) : null;
+          const jumpPage = c.page != null ? c.page : c.startPage;
+          if (srcDoc && srcDoc.pdfBlob && jumpPage != null) {
+            // Cache 1 object URL / doc (không tạo mới mỗi lần renderCitations() chạy lại — mỗi
+            // createObjectURL() giữ blob sống tới khi revoke, gọi lặp lại nhiều lần sẽ rò bộ nhớ).
+            if (!srcDoc._pdfObjectUrl) srcDoc._pdfObjectUrl = URL.createObjectURL(srcDoc.pdfBlob);
+            const objUrl = srcDoc._pdfObjectUrl + '#page=' + jumpPage;
+            meta = ` · <a href="${escapeHtml(objUrl)}" target="_blank" rel="noopener noreferrer">mở trang ${jumpPage}</a>`;
+          } else {
+            meta = pageLabel; // đã có " · trang X" sẵn
+          }
         }
         return `<div class="cite"><b>[${num}] ${escapeHtml(c.doc)}${meta} · đoạn ${escapeHtml(String(c.id))}</b><br>${body}</div>`;
       }).join('');

@@ -392,6 +392,29 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .source-card .guide-open-btn:hover{color:var(--primary);}
 .source-card .guide-panel{display:none;font-size:11.5px;color:var(--sidebar-text);}
 .source-card.expanded .guide-panel.open{display:block;margin-top:8px;padding-top:8px;border-top:1px solid var(--sidebar-rule);max-height:260px;overflow-y:auto;}
+/* MỤC LX (rework notebook) — Source Search: input + dropdown kết quả, tông sidebar tối. */
+.src-search-box{position:relative;margin:0 0 10px;}
+#sourceSearchInput{
+  width:100%;box-sizing:border-box;background:var(--sidebar-2);border:1px solid var(--sidebar-rule);border-radius:var(--r-md);
+  color:var(--sidebar-text);font-size:12.5px;padding:7px 10px;outline:none;
+}
+#sourceSearchInput:focus{border-color:var(--primary);}
+#sourceSearchInput::placeholder{color:var(--sidebar-muted);}
+.src-search-results{
+  position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:20;max-height:320px;overflow-y:auto;
+  background:var(--sidebar-2);border:1px solid var(--sidebar-rule);border-radius:var(--r-md);box-shadow:var(--shadow-sm);
+}
+.src-search-results[hidden]{display:none;}
+.src-search-empty{padding:10px;font-size:11.5px;color:var(--sidebar-muted);}
+.src-result-item{display:block;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid var(--sidebar-rule);
+  color:var(--sidebar-text);cursor:pointer;padding:8px 10px;font:inherit;font-size:11.5px;line-height:1.4;}
+.src-result-item:last-child{border-bottom:none;}
+.src-result-item:hover{background:var(--highlight);}
+.src-result-src{font-weight:600;font-size:10.5px;opacity:.75;margin-bottom:2px;display:flex;justify-content:space-between;gap:6px;}
+.src-result-snippet .hl{background:var(--highlight);color:var(--primary);border-radius:2px;padding:0 1px;}
+/* Nhấp nháy nhẹ để chỉ đúng source-card vừa jump tới từ kết quả tìm kiếm (mục LX). */
+@keyframes srcJumpFlash{0%,100%{box-shadow:none;}30%{box-shadow:0 0 0 2px var(--primary);}}
+.source-card.jump-flash,.recent-src-item.jump-flash{animation:srcJumpFlash 1s ease;}
 #dropHint{
   border:1.5px dashed var(--sidebar-rule);border-radius:var(--r-md);padding:18px 10px;text-align:center;font-size:12px;color:var(--sidebar-muted);
   cursor:pointer;transition:border-color .15s var(--ease),background-color .15s var(--ease),transform .15s var(--ease);line-height:1.5;
@@ -628,6 +651,9 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .citations .cite-note{font-size:12px;color:var(--muted);line-height:1.55;font-style:italic;}
 .citations .cite-title-web{margin-top:2px;}
 .citations .cite-web{color:var(--text);}
+/* MỤC XXX (rework notebook) — cảnh báo nhẹ khi citation đến từ transcript ASR (Gemini nghe audio),
+   không phải phụ đề có sẵn, xem collectAvailableEvidence()/renderCitations() trong app.js. */
+.citations .cite-asr-note{opacity:.65;font-style:italic;}
 
 /* ---------- Khung "Lỗi sai thường gặp" ---------- */
 .mistakes-box{margin:18px 0 8px;border:1px solid rgba(219,154,52,.35);background:var(--warn-tint);border-radius:var(--r-md);padding:13px 16px 15px;}
@@ -1192,10 +1218,14 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 /* Nội dung Guide dùng chung — theme-agnostic (kế thừa màu từ .guide-panel theo từng ngữ cảnh). */
 .guide-panel h5{margin:8px 0 4px;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;opacity:.65;}
 .guide-panel h5:first-child{margin-top:0;}
+.guide-panel .guide-title{margin:0 0 6px;font-size:12.5px;font-weight:700;}
 .guide-panel p{margin:0 0 6px;line-height:1.45;}
 .guide-panel ul{margin:0 0 6px;padding-left:16px;}
 .guide-panel li{margin-bottom:4px;line-height:1.4;}
 .guide-panel .guide-faq-q{font-weight:600;}
+/* MỤC LXI (rework notebook) — câu hỏi gợi ý bấm được (FAQ + đào sâu) -> đổ thẳng vào #qInput. */
+.guide-panel .guide-ask-q{background:none;border:none;color:inherit;cursor:pointer;font:inherit;padding:0;text-align:left;text-decoration:underline dotted;text-underline-offset:2px;}
+.guide-panel .guide-ask-q:hover{color:var(--primary);}
 .guide-panel .guide-loading{opacity:.65;font-style:italic;margin:0;}
 .guide-panel .guide-error{color:var(--danger);margin:0 0 6px;}
 .guide-panel .guide-coverage-note{font-size:10px;opacity:.65;margin:6px 0 0;}
