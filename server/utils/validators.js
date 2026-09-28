@@ -209,7 +209,9 @@ function parseSourceImages(body) {
 // PDF scan: không phải confidence số thực (source đã có field số cho retrieval ranking ở nơi khác),
 // mà là NHÃN PROVENANCE để citation/UI có thể cảnh báo đúng mức tin cậy, tái dùng CHÍNH allow-list
 // này thay vì tạo field song song (mục LXVI: không duplicate hệ thống đã có).
-const ALLOWED_EXTRACTION_METHODS = ['text', 'vision', 'asr', 'none', 'unknown'];
+// MỤC 2 (v6.22): 2 giá trị 'text-*' là phụ đề THẬT lấy qua thư viện ngoài (youtubei.js/youtube-transcript);
+// thiếu ở đây thì client gửi lại chunk sẽ bị ép thành 'unknown' và mất dấu nguồn gốc.
+const ALLOWED_EXTRACTION_METHODS = ['text', 'vision', 'asr', 'none', 'unknown', 'text-youtubeijs', 'text-youtube-transcript'];
 const ALLOWED_EXTRACTION_STATUSES = ['ok', 'failed', 'pending', 'placeholder'];
 
 // ---------- BUG-001 (V6): locator theo LOẠI nguồn ----------

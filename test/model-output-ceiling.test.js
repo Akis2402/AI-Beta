@@ -1,7 +1,7 @@
 'use strict';
 
 // ---------- A2 (test K): TRẦN REASONING THEO TỪNG MODEL, KHÔNG HARDCODE 1 SỐ CHO MỌI PROVIDER ----------
-// Rủi ro đã tự ghi nhận ở CHANGELOG-THINKING-VISUAL.md mục G.4: DEFAULT_MAX_REASONING (12000) áp
+// Rủi ro đã tự ghi nhận ở mục G.4 changelog thinking/visual (file không nằm trong bản export): DEFAULT_MAX_REASONING (12000) áp
 // dụng y hệt cho MỌI model, kể cả model có trần output thật chỉ 4096 -> xin một ngân sách mà model
 // vật lý không thể cấp.
 

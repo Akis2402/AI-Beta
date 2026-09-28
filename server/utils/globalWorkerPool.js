@@ -90,11 +90,17 @@ function createGlobalWorkerPool({ globalCapacity = 12, interactiveReserve = 4 } 
   /**
    * acquire() — xin 1 slot xử lý. Nếu còn chỗ, admit NGAY (đồng bộ về mặt logic, bọc Promise cho
    * API nhất quán). Nếu hết chỗ, xếp hàng theo `priority` tới khi có slot trống hoặc quá `timeoutMs`.
-   * @param {{priority?:string, timeoutMs?:number}} [opts]
+   * @param {{priority?:string, timeoutMs?:number, onQueued?:Function}} [opts] `onQueued(snapshot)`
+   *   (mục 1.1 backlog v6.22): gọi ĐỒNG BỘ, ngay tại thời điểm request PHẢI xếp hàng (tức KHÔNG
+   *   admit được ngay) — TRƯỚC KHI Promise trả về resolve. Cho phép nơi gọi (chat.js) bắn 1 sự kiện
+   *   cho client biết "đang chờ slot" ngay lập tức, thay vì client im lặng không biết gì cho tới khi
+   *   admit xong (đây chính là hành vi cũ, đúng lỗ hổng mục 1.1 mô tả). KHÔNG gọi nếu admit được
+   *   ngay (không có gì để "chờ" cả). Lỗi ném ra từ callback này KHÔNG được làm hỏng acquire() —
+   *   bọc try/catch, coi lỗi hiển thị UI là phụ, không phải lý do chặn cấp phát slot.
    * @returns {Promise<Function>} release() — PHẢI được gọi đúng 1 lần khi request xử lý xong (nên
    *   gọi qua res.on('finish')/res.on('close') để đảm bảo chạy kể cả khi lỗi/client ngắt kết nối).
    */
-  function acquire({ priority = PRIORITY.INTERACTIVE, timeoutMs = Infinity } = {}) {
+  function acquire({ priority = PRIORITY.INTERACTIVE, timeoutMs = Infinity, onQueued } = {}) {
     return new Promise((resolve, reject) => {
       if (canAdmit(priority)) {
         admit(priority);
@@ -103,6 +109,9 @@ function createGlobalWorkerPool({ globalCapacity = 12, interactiveReserve = 4 } 
       }
       const item = { priority, resolve, enqueuedAt: Date.now(), timer: null };
       waitQueue.push(item);
+      if (typeof onQueued === 'function') {
+        try { onQueued(snapshot()); } catch (e) { /* không được làm hỏng acquire() vì lỗi callback UI */ }
+      }
       if (Number.isFinite(timeoutMs)) {
         item.timer = setTimeout(() => {
           const idx = waitQueue.indexOf(item);

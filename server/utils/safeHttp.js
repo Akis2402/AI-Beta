@@ -24,6 +24,9 @@ const https = require('https');
 const dns = require('dns').promises;
 const net = require('net');
 
+// Miền đích DUY NHẤT được phép đi qua proxy (xem proxyAgent.js). Cố định, không cấu hình được.
+const PROXY_ALLOWED_HOST_RE = /(^|\.)(youtube\.com|googlevideo\.com|youtu\.be)$/i;
+
 /** @returns {boolean} địa chỉ này KHÔNG được phép kết nối tới (nội bộ/đặc biệt). */
 function isBlockedAddress(addr) {
   const ip = String(addr || '');
@@ -94,8 +97,19 @@ async function resolvePublicAddress(hostname) {
  */
 async function fetchPinned(url, opts) {
   const maxBytes = opts.maxBytes;
-  const resolved = await resolvePublicAddress(url.hostname);
-  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  // MỤC 2 (v6.22) — proxy TÙY CHỌN, chỉ cho miền YouTube. Có proxyUrl: KHÔNG tự resolve/ghim IP (proxy
+  // mới là bên resolve + connect thật) và đi qua agent. Không có proxyUrl (mặc định): giữ NGUYÊN 100%
+  // đường ghim IP cũ. Hostname ngoài miền YouTube bị TỪ CHỐI khi có proxy -> không bao giờ thành
+  // đường SSRF qua proxy dù caller nào vô tình truyền proxyUrl.
+  let agent = null;
+  let resolved = null;
+  if (opts.proxyUrl) {
+    if (!PROXY_ALLOWED_HOST_RE.test(String(url.hostname || ''))) return { ok: false, reason: 'proxy_host_not_allowed' };
+    try { agent = require('./proxyAgent').buildProxyAgent(opts.proxyUrl); } catch (e) { return { ok: false, reason: 'proxy_invalid' }; }
+  } else {
+    resolved = await resolvePublicAddress(url.hostname);
+    if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  }
 
   return new Promise((resolve) => {
     let settled = false;
@@ -110,14 +124,16 @@ async function fetchPinned(url, opts) {
       // Cho phép caller thêm header tùy chỉnh, không để caller ghi đè Accept-Encoding (identity là bắt buộc cho trần byte trên luồng).
       headers: { Accept: '*/*', ...(opts.headers || {}), 'Accept-Encoding': 'identity' },
       timeout: opts.timeoutMs,
-      lookup: (host, options, cb) => {
-        if (typeof options === 'function') { cb = options; options = {}; }
-        if (options && options.all) {
-          cb(null, [{ address: resolved.address, family: resolved.family }]);
-        } else {
-          cb(null, resolved.address, resolved.family);
+      ...(agent ? { agent } : {
+        lookup: (host, options, cb) => {
+          if (typeof options === 'function') { cb = options; options = {}; }
+          if (options && options.all) {
+            cb(null, [{ address: resolved.address, family: resolved.family }]);
+          } else {
+            cb(null, resolved.address, resolved.family);
+          }
         }
-      }
+      })
     }, (res) => {
       const status = res.statusCode || 0;
       const declared = Number(res.headers['content-length'] || 0);
@@ -147,4 +163,4 @@ async function fetchPinned(url, opts) {
   });
 }
 
-module.exports = { isBlockedAddress, isBlockedIPv4, resolvePublicAddress, fetchPinned };
+module.exports = { isBlockedAddress, isBlockedIPv4, resolvePublicAddress, fetchPinned, PROXY_ALLOWED_HOST_RE };
