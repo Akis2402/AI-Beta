@@ -310,3 +310,22 @@ Chi tiết đầy đủ, bảng kiểm chứng và giới hạn: xem **`HYBRID-V
 - **Auth Puter chỉ khi người dùng bấm nút trong Settings** (`public/js/ui/puterAuthUI.js` + `public/js/providers/puterAdapter.js`): không bao giờ tự popup lúc tải trang / SSE / retry / fallback provider. Lần đầu chưa Auth chỉ hiện *thông báo* (không phải popup Auth); "Không hiển thị lại hôm nay" tính theo **ngày lịch** của trình duyệt.
 - **Biến môi trường**: `PUTER_VISUAL_MODE` (mặc định `client_primary`), `PUTER_VISUAL_DEBUG=true` (log chẩn đoán phía server, không log token/đề bài). Phía client: `?puterDebug=1` hoặc `localStorage['tro-giai:puter-debug']='1'`.
 - **Test**: `npm test` (gồm `hybrid-svg-engine`, `puter-auth-flow`, `chat-route-harness`); E2E trình duyệt thật: `npm run e2e-hybrid` (cần `pip install playwright` + Chromium; SDK Puter được giả lập).
+
+## 12. Nguồn YouTube qua proxy + thư viện dự phòng (v6.22)
+
+- **Vì sao cần**: nếu deploy trên Vercel/cloud, dải IP datacenter có thể bị YouTube chặn hoặc giới hạn (lỗi kiểu *"Sign in to confirm you're not a bot"* hoặc 429). Khi đó mọi link YouTube — kể cả video có phụ đề thật — rơi về `INCOMPLETE`.
+- **Khai proxy**: đặt `YOUTUBE_PROXY_URL` trong `.env`, nhiều proxy cách nhau bằng dấu phẩy, ví dụ `http://user:pass@host1:8080,socks5://user:pass@host2:1080`. Proxy lỗi/bị chặn sẽ nghỉ 60 giây rồi hệ thống chuyển sang proxy kế tiếp. **Để trống = hành vi cũ 100%** (kết nối thẳng, ghim IP chống SSRF). Dự án không kèm proxy nào; nguồn proxy (dân cư trả phí hay datacenter) là chi phí vận hành bạn tự chọn.
+- **KHÔNG áp dụng cho nguồn Web** (`webSource.js`, URL do người dùng dán): proxy chỉ đi kèm hostname thuộc `youtube.com`/`googlevideo.com`/`youtu.be` (`safeHttp.fetchPinned` từ chối host khác khi có proxy), và `webSource.js` không import bất kỳ module proxy nào (có test khoá). Mở proxy cho URL tuỳ ý sẽ phá giá trị của DNS pinning chống SSRF.
+- **Thứ tự lấy phụ đề**: (1) Innertube tự viết (có/không proxy) → (2) `youtubei.js` → (3) `youtube-transcript` → (4) ASR Gemini (lưới an toàn cuối, không bị chặn theo IP của server). Tắt (2)+(3) bằng `YOUTUBE_FALLBACK_LIB_ENABLED=false`. Mỗi chunk ghi rõ nguồn qua `method` (`text`, `text-youtubeijs`, `text-youtube-transcript`, `asr`).
+- **Không dùng `@distube/ytdl-core`**: trang gói ghi rõ sẽ không còn được bảo trì; (2) và (3) đã phủ, không thêm nợ kỹ thuật có hạn dùng.
+- **Kiểm chứng thật**: `npm test` chỉ dùng proxy giả lập local + mock thư viện (không gọi YouTube thật). Với proxy thật hãy chạy `npm run live-source-check`.
+
+## 13. Trạng thái xếp hàng, chống gửi trùng, đo độ trễ (v6.22)
+
+- **`queued`**: khi Global Worker Pool đầy, server bắn ngay SSE `queued` (trước `worker_pool_admit`); giao diện hiện "đang xếp hàng chờ xử lý" thay vì im lặng.
+- **409 `duplicate_request_in_progress`**: client không báo lỗi cứng mà tự poll `GET /api/chat/jobs/:id` tới khi request đầu xong, rồi trả đúng kết quả.
+- **Reasoning theo độ khó**: `questionProfile.complexity` (TRIVIAL→EXPERT) nhân vào ngân sách reasoning, chỉnh qua `REASONING_SCALE_*`. Thiếu complexity = hệ số 1 (hành vi cũ).
+- **`latency_breakdown`**: mỗi request ghi 1 dòng log `queueWaitMs / preProviderMs / providerRunMs / postProcessMs / totalMs` (provider chạy song song được gộp khoảng, không cộng dồn).
+- **`output_redundancy`**: mỗi câu trả lời cuối ghi 1 dòng log `branchCount` (số "Cách N") và `repeatedEquationCount` (phương trình lặp). Tất định, 0 token, chỉ quan sát — không chặn/viết lại response.
+- **Audit `await` của `chat.js`**: xem `AWAIT-AUDIT-chat-js.md` (28 `await` đã phân loại; `test/await-audit.test.js` khoá số lượng). Đã bỏ 1 RTT thừa: `hydrate` + `reserveRotationSlot` giờ chạy song song.
+

@@ -21,7 +21,8 @@
 
 const { calculateAdaptiveBudget, HARD_CEILING } = require('../adaptiveBudget');
 const {
-  getReasoningBudgetPolicy, fitReasoningToModel, reasoningScaleForClass, MIN_ANSWER_TOKENS
+  getReasoningBudgetPolicy, fitReasoningToModel, reasoningScaleForClass, reasoningScaleForComplexity,
+  combinedReasoningScale, MIN_ANSWER_TOKENS
 } = require('./reasoningPolicy');
 
 // Tỷ lệ core/recovery giữ NGUYÊN 70/30 như tokenEconomy.allocateCoreReserve (không đổi hợp đồng cũ).
@@ -54,10 +55,12 @@ function resolveBudget(opts = {}) {
     hasImage = false, deepThinking = false, crossCheck = false, fast = false,
     remainingMs, throughputTokensPerSec, requiresVisual = false, deficitTokens,
     // A5: nhãn lớp bài (tokenEconomy.classifyProblem). Không truyền -> hành vi cũ y nguyên.
-    problemClass
+    problemClass,
+    // MỤC 1.3: questionProfile.complexity (TRIVIAL..EXPERT). Không truyền -> hành vi cũ.
+    questionComplexity
   } = opts;
 
-  const policy = getReasoningBudgetPolicy(provider, model, capabilities, { deepThinking, fast, stage, problemClass });
+  const policy = getReasoningBudgetPolicy(provider, model, capabilities, { deepThinking, fast, stage, problemClass, questionComplexity });
 
   // ---------- 1. Ngân sách ANSWER theo độ phức tạp (không đụng reasoning) ----------
   // QUAN TRỌNG: truyền deepThinking=false vào calculateAdaptiveBudget. Hệ số ×1.35 cũ ở đó là một
@@ -132,6 +135,8 @@ function resolveBudget(opts = {}) {
     complexity: base.complexity,
     problemClass: problemClass || null,
     reasoningClassScale: reasoningScaleForClass(problemClass),
+    questionComplexity: questionComplexity || null,
+    reasoningComplexityScale: reasoningScaleForComplexity(questionComplexity),
     timeBudget: base.timeBudget,
     reasoningMechanism: nativeReasoningEnabled ? policy.mechanism : (policy.native ? 'prompt' : policy.mechanism),
     nativeReasoningEnabled,
@@ -145,8 +150,8 @@ function resolveBudget(opts = {}) {
  * (chat.js giữ nguyên budgetPlanOf/coreBudget để không phá hợp đồng cũ, chỉ bổ sung field này).
  * @returns {number} 0 nếu provider/model không có native reasoning.
  */
-function reasoningBudgetFor({ provider, model, capabilities, deepThinking, fast, answerBudget, complexityLevel = 'medium', problemClass }) {
-  const policy = getReasoningBudgetPolicy(provider, model, capabilities, { deepThinking, fast, problemClass });
+function reasoningBudgetFor({ provider, model, capabilities, deepThinking, fast, answerBudget, complexityLevel = 'medium', problemClass, questionComplexity }) {
+  const policy = getReasoningBudgetPolicy(provider, model, capabilities, { deepThinking, fast, problemClass, questionComplexity });
   if (!policy.native) return 0;
   const want = Math.round((answerBudget || 1000) * policy.ratioFor(complexityLevel));
   const capped = Math.max(policy.minReasoningTokens, Math.min(want, policy.maxReasoningTokens));
@@ -170,12 +175,12 @@ module.exports = { resolveBudget, reasoningBudgetFor, CORE_RATIO, VISUAL_BUDGET_
  * @param {{answerBudget:number, complexityLevel?:string, deepThinking:boolean, phase?:string}} opts
  * @returns {number} 0 khi không bật deep thinking.
  */
-function genericReasoningBudget({ answerBudget, complexityLevel = 'medium', deepThinking, phase = 'initial', problemClass }) {
+function genericReasoningBudget({ answerBudget, complexityLevel = 'medium', deepThinking, phase = 'initial', problemClass, questionComplexity }) {
   if (!deepThinking) return 0;
   const { REASONING_RATIO, ANTHROPIC_MIN_THINKING, DEFAULT_MAX_REASONING } = require('./reasoningPolicy');
   // A5: lớp MICRO -> 0 (KHÔNG native reasoning). Call-site cũ không truyền problemClass giữ NGUYÊN
   // hành vi (scale = 1), nên mọi test/đường gọi legacy không đổi kết quả.
-  const classScale = reasoningScaleForClass(problemClass);
+  const classScale = combinedReasoningScale(problemClass, questionComplexity);
   if (classScale === 0) return 0;
   const ratio = (REASONING_RATIO[complexityLevel] || REASONING_RATIO.medium) * classScale;
   let want = Math.round((answerBudget || 1000) * ratio);

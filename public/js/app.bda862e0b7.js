@@ -219,12 +219,57 @@ function enforceRequestBudget(body) {
   return { body: result.body, dropped };
 }
 
-async function apiPost(path, body, { signal } = {}) {
+/* ---------- MỤC 1.2 (backlog v6.22): 409 duplicate_request_in_progress -> POLL job, không báo lỗi cứng ----------
+   Server (chat.js) trả 409 khi cùng clientRequestId đã có job RUNNING (double-click Send / client tự
+   retry). Request ĐẦU vẫn chạy bình thường và SẼ có kết quả, nên báo lỗi cho người dùng là sai. Tái dùng
+   ĐÚNG kênh đã có: GET /api/chat/jobs/:id (cùng endpoint recoverJob() dùng sau reload). job.result chính
+   là payload của sự kiện "done" nên trả thẳng cho nơi gọi, không cần map lại shape.
+   KHÔNG gọi recoverJob() ở đây: hàm đó ghi thẳng vào state.conversations (ngữ cảnh "mở lại tab sau
+   reload") — gọi giữa 1 sendMessage() đang chạy sẽ ghi state từ 2 nơi. */
+const DUPLICATE_POLL_INTERVAL_MS = 1500;
+// Client không biết GLOBAL_REQUEST_DEADLINE_MS thật của server (không export) -> chọn trần đủ rộng
+// (server mặc định 55s + thời gian job đã chạy trước khi poll) thay vì đoán số chính xác (A2.4).
+const DUPLICATE_POLL_MAX_MS = 150000;
+function isDuplicateInProgress(res, data) {
+  return !!(res && res.status === 409 && data && data.error === 'duplicate_request_in_progress');
+}
+async function pollDuplicateJob(requestId, { signal, onStatus, intervalMs = DUPLICATE_POLL_INTERVAL_MS, maxMs = DUPLICATE_POLL_MAX_MS } = {}) {
+  const startedAt = Date.now();
+  if (typeof onStatus === 'function') onStatus(t('chat.duplicateWaiting'), 'RECOVERING');
+  for (;;) {
+    if (signal && signal.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; e.cancelled = true; throw e; }
+    if (Date.now() - startedAt > maxMs) {
+      const e = new Error(t('error.duplicateTimeout'));
+      e.status = 409; e.code = 'DUPLICATE_TIMEOUT';
+      throw e;
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+    let res, data = null;
+    try {
+      res = await fetch('/api/chat/jobs/' + encodeURIComponent(requestId), { headers: apiHeaders(), signal });
+      try { data = await res.json(); } catch (e) { data = null; }
+    } catch (e) {
+      if (e && (e.name === 'AbortError' || (signal && signal.aborted))) throw e;
+      continue; // lỗi mạng thoáng qua khi poll -> thử vòng sau
+    }
+    if (!res || res.status === 404 || !data || !data.found) continue; // job chưa kịp hiện / đọc hụt nhịp
+    const job = data.job || {};
+    if (job.status === 'running') continue;
+    if (job.status === 'completed' && job.result) return job.result;
+    // job.error do server ghi = message/code của sự kiện SSE 'error' (đã qua normalizeError) -> an toàn để hiển thị.
+    const e = new Error((typeof job.error === 'string' && job.error) || t('error.generic'));
+    e.code = (typeof job.error === 'string' && job.error) || 'GENERATION_FAILED';
+    throw e;
+  }
+}
+
+async function apiPost(path, body, { signal, onStatus } = {}) {
   const prepared = enforceRequestBudget(body);
   body = prepared.body;
   const res = await fetch(path, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(withClientCaps(path, body)), signal });
   let data;
   try { data = await res.json(); } catch (e) { data = null; }
+  if (isDuplicateInProgress(res, data)) return pollDuplicateJob(data.requestId || (body && body.clientRequestId), { signal, onStatus });
   if (!res.ok) {
     // PHẦN AG: ưu tiên DỊCH theo `code` ổn định do backend trả về (errorNormalize.js) thay vì dùng
     // nguyên câu chữ tiếng Việt của server — nhờ đó thông báo lỗi đổi theo Settings > Language.
@@ -388,6 +433,14 @@ async function apiPostStream(path, body, { onDelta, onStatus, onVisualRequest, o
     // Server từ chối trước khi mở stream (lỗi validate, thiếu API key...) — đọc lỗi JSON thường.
     let data;
     try { data = await res.json(); } catch (e) { data = null; }
+    // MỤC 1.2: 409 duplicate -> chờ kết quả của request đầu qua GET /api/chat/jobs/:id, trả về đúng
+    // shape "done" như đường stream bình thường (text đến 1 lần vì không còn stream để bám theo).
+    if (isDuplicateInProgress(res, data)) {
+      const result = await pollDuplicateJob(data.requestId || (preparedStream.body && preparedStream.body.clientRequestId), { signal, onStatus });
+      if (result && result.text && typeof onDelta === 'function') onDelta(result.text);
+      if (result && result.visualJob) dispatchVisualJob(result.visualJob, signal, { onVisualRequest, onVisualReady, onVisualError, onStatus });
+      return result;
+    }
     let msg = (data && data.code && window.tError)
       ? window.tError(data.code, data && data.error)
       : ((data && data.error) || t('error.generic'));
@@ -431,6 +484,10 @@ async function apiPostStream(path, body, { onDelta, onStatus, onVisualRequest, o
       // được coi 1 lượt là hoàn tất khi nhận đúng sự kiện "done" (xử lý bên dưới) — không được suy ra
       // completion chỉ từ việc có status/delta.
       else if (currentEvent === 'status' && typeof onStatus === 'function') onStatus(payload.message || '', payload.state || 'GENERATING');
+      // MỤC 1.1: server đang xếp request vào hàng chờ Global Worker Pool — hiện trạng thái "đang chờ"
+      // qua CHÍNH onStatus (đã nối tới preview.setStatus + conversationTaskManager.setStatus) thay vì
+      // im lặng. state='QUEUED' chỉ để hiển thị; delta/status kế tiếp sẽ ghi đè khi request được admit.
+      else if (currentEvent === 'queued' && typeof onStatus === 'function') onStatus(payload.message || '', payload.state || 'QUEUED');
       // Server gửi "done" cho CẢ 2 trạng thái giao được: COMPLETED (đủ) và PARTIAL (chưa đủ nhưng
       // phần đã sinh vẫn dùng được — xem runtimeState.classifyFinalOutcome). PARTIAL vẫn được lưu và
       // hiển thị, kèm cảnh báo rõ ràng; TRƯỚC ĐÂY trường hợp này bị server trả về sự kiện "error" và

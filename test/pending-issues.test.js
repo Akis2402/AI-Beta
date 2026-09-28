@@ -239,7 +239,14 @@ test('3.6 applySnapshot không bao giờ XOÁ cooldown đang có tại local', (
 
 test('3.7 ensureProvidersReady() hydrate store trước khi chọn target', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'utils', 'aiProviders.js'), 'utf8');
-  assert.ok(/await rotationStore\.hydrate\(\)/.test(src), 'phải hydrate ở đầu vòng đời request');
+  // v6.22 mục 2.3: hydrate giờ chạy SONG SONG với reserveRotationSlot (Promise.all) nhưng vẫn được AWAIT
+  // TRƯỚC khi setGlobalRotationSlot/rotation quyết định — bảo đảm cần kiểm là thứ tự, không phải cú pháp.
+  const i = src.indexOf('async function ensureProvidersReady');
+  const body = src.slice(i, src.indexOf('\n}\n', i));
+  const awaited = /await rotationStore\.hydrate\(\)/.test(body)
+    || /await Promise\.all\(\[[\s\S]*?rotationStore\.hydrate\(\)/.test(body);
+  assert.ok(awaited, 'phải hydrate ở đầu vòng đời request');
+  assert.ok(body.indexOf('rotationStore.hydrate()') < body.indexOf('setGlobalRotationSlot(slot)'), 'hydrate phải xong trước khi đặt slot');
 });
 
 console.log('\n== VẤN ĐỀ #4 — Token counter tự hiệu chỉnh ==');

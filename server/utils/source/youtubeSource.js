@@ -20,12 +20,58 @@ const singleFlight = require('../singleFlight');
 // (yt-asr-gemini) chạy 1 lần. Không xoá cache cũ (backward-compatible với YT có phụ đề).
 const EXTRACTOR_VERSION = 'yt-transcript-v3-asr';
 const youtubeAsr = require('./youtubeAsrFallback');
+const youtubeFallbackLibs = require('./youtubeFallbackLibs');
+const proxyAgent = require('../proxyAgent');
 const TIMEOUT_MS = 8000;
 const MAX_BYTES = 4 * 1024 * 1024;
 const CHUNK_SECONDS = 90;
 const INNERTUBE_CLIENT_VERSION = '20.10.38';
 const INNERTUBE_USER_AGENT = `com.google.android.youtube/${INNERTUBE_CLIENT_VERSION} (Linux; U; Android 14)`;
 const INNERTUBE_PLAYER_URL = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false';
+
+
+// ---------- MỤC 2 (v6.22) — LỚP A: proxy YouTube (tuỳ chọn, mặc định TẮT) ----------
+// YOUTUBE_PROXY_URL trống => `proxyRotator.size === 0` => fetchYoutubeHttp() gọi safeHttp.fetchPinned
+// Y HỆT code cũ (cùng đối số, KHÔNG có field proxyUrl) — test/youtube-proxy.test.js khoá điều này.
+// Đọc env MỖI LẦN gọi (không chốt lúc nạp module) để đổi cấu hình/test không cần restart.
+let rotatorKey = null;
+let proxyRotator = proxyAgent.createProxyRotator([]);
+function getProxyRotator() {
+  const raw = process.env.YOUTUBE_PROXY_URL || '';
+  if (raw !== rotatorKey) { rotatorKey = raw; proxyRotator = proxyAgent.createProxyRotator(proxyAgent.parseProxyList(raw)); }
+  return proxyRotator;
+}
+// Lỗi ở tầng kết nối/proxy => đổi proxy khác. 407 = proxy từ chối auth; 429/403 = IP proxy này bị YouTube chặn.
+const PROXY_FAIL_REASONS = new Set(['request_failed', 'timeout', 'proxy_invalid', 'stream_error']);
+// 502/503/504: proxy không mở được đường tới YouTube (CONNECT thất bại được https-proxy-agent trả về
+// như 1 response thường, KHÔNG phải lỗi socket) — tìm ra bằng test/youtube-proxy.test.js b1.
+const PROXY_FAIL_STATUS = new Set([407, 429, 403, 502, 503, 504]);
+function isProxyFailure(r) {
+  if (!r) return true;
+  if (!r.ok) return PROXY_FAIL_REASONS.has(r.reason);
+  return PROXY_FAIL_STATUS.has(r.status);
+}
+/**
+ * Mọi lệnh gọi HTTP của nguồn YouTube đi qua ĐÂY. Còn proxy chưa thử thì thử tiếp (không rơi xuống
+ * ASR sớm); hết proxy mà vẫn lỗi => trả kết quả lỗi cuối (caller tự xuống các nhánh sau như cũ).
+ */
+async function fetchYoutubeHttp(url, opts) {
+  const rot = getProxyRotator();
+  if (!rot.size) return safeHttp.fetchPinned(url, opts);
+  let last = null;
+  const tried = new Set();
+  for (let i = 0; i < rot.size; i++) {
+    const proxyUrl = rot.next();
+    if (!proxyUrl || tried.has(proxyUrl)) break; // tất cả đang cooldown / đã thử hết
+    tried.add(proxyUrl);
+    let r;
+    try { r = await safeHttp.fetchPinned(url, { ...opts, proxyUrl }); } catch (e) { r = { ok: false, reason: 'request_failed' }; }
+    if (!isProxyFailure(r)) { rot.markOk(proxyUrl); return r; }
+    rot.markFailed(proxyUrl);
+    last = r;
+  }
+  return last || { ok: false, reason: 'no_proxy_available' };
+}
 
 /**
  * parseVideoId() — chấp nhận mọi dạng URL YouTube phổ biến, trả về id 11 ký tự chuẩn.
@@ -173,7 +219,7 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
 
     let playerRes;
     try {
-      playerRes = await safeHttp.fetchPinned(new URL(INNERTUBE_PLAYER_URL), {
+      playerRes = await fetchYoutubeHttp(new URL(INNERTUBE_PLAYER_URL), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -236,7 +282,7 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
       const trackUrl = String(track.baseUrl).replace('&fmt=srv3', '');
       let capRes;
       try {
-        capRes = await safeHttp.fetchPinned(new URL(trackUrl), {
+        capRes = await fetchYoutubeHttp(new URL(trackUrl), {
           headers: { 'User-Agent': INNERTUBE_USER_AGENT },
           maxBytes: opts.maxBytes || MAX_BYTES,
           timeoutMs: opts.timeoutMs || TIMEOUT_MS
@@ -271,7 +317,7 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
       const url = new URL(`https://www.youtube.com/api/timedtext?v=${encodeURIComponent(videoId)}&lang=${encodeURIComponent(lang)}`);
       let res;
       try {
-        res = await safeHttp.fetchPinned(url, { maxBytes: opts.maxBytes || MAX_BYTES, timeoutMs: opts.timeoutMs || TIMEOUT_MS });
+        res = await fetchYoutubeHttp(url, { maxBytes: opts.maxBytes || MAX_BYTES, timeoutMs: opts.timeoutMs || TIMEOUT_MS });
       } catch (e) {
         res = { ok: false, reason: 'fetch_failed' };
       }
@@ -294,6 +340,35 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
       };
       await contentCache.set(cacheParts, payload, {});
       return payload;
+    }
+
+    // MỤC 2 (v6.22) — LỚP B: thư viện ngoài (youtubei.js -> youtube-transcript), chèn NGAY TRƯỚC ASR.
+    // Chỉ chạy khi 2 nhánh caption tự viết ở trên đều không ra cue. Cues cùng schema -> tái dùng
+    // chunkTranscript(); `method` khắc tên thư viện (phụ đề THẬT, không phải ASR).
+    if (!opts.skipFallbackLibs && youtubeFallbackLibs.isEnabled()) {
+      const rot = getProxyRotator();
+      const proxyUrl = rot.size ? rot.next() : null;
+      const lib = await youtubeFallbackLibs.tryFallbackLibs(videoId, {
+        langs, proxyUrl, timeoutMs: opts.libTimeoutMs, ...(opts.fallbackLibOverrides || {})
+      });
+      if (lib && lib.cues.length) {
+        const chunks = chunkTranscript(lib.cues, { ...opts, method: lib.method });
+        const payload = {
+          ok: true,
+          status: 'READY',
+          videoId,
+          title: videoTitle || `YouTube: ${videoId}`,
+          author: videoAuthor || '',
+          url: canonicalUrl(videoId),
+          language: lib.language || langs[0] || 'vi',
+          transcriptAvailable: true,
+          fingerprint: contentFingerprint(lib.cues.map((c) => `${c.start}:${c.text}`).join('\u0000')),
+          extractorVersion: EXTRACTOR_VERSION,
+          chunks
+        };
+        await contentCache.set(cacheParts, payload, {});
+        return payload;
+      }
     }
 
     // V6 — ASR FALLBACK (Gemini native YouTube URL processing).
@@ -353,5 +428,7 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
 
 module.exports = {
   fetchYoutubeSource, parseVideoId, canonicalUrl, parseTranscriptXml,
-  chunkTranscript, formatTimestamp, EXTRACTOR_VERSION
+  chunkTranscript, formatTimestamp, EXTRACTOR_VERSION,
+  // test hooks (mục 2 v6.22)
+  fetchYoutubeHttp, getProxyRotator
 };

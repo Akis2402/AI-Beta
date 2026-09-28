@@ -1,6 +1,7 @@
 'use strict';
 
 const { recordAttemptFor } = require('./tokenTelemetry');
+const latencyBreakdown = require('./latencyBreakdown'); // mục 2.1 v6.22: gộp khoảng provider thành 1 dòng latency_breakdown
 
 // ---------- Điều phối AI Rotation: Provider → API Keys → Models → Execution Targets ----------
 // KHÔNG coi "AI = API Key" hay "AI = Model". Mỗi tổ hợp (API Key × Model) là 1 Execution Target độc
@@ -56,6 +57,9 @@ function logAttempt({ requestId, stage, target, latency, status, err, usage, ans
     latency,
     errorClass: err ? classifyErrorForLog(err) : undefined
   });
+  // MỤC 2.1 (v6.22): cùng điểm nghẽn duy nhất -> ghi khoảng provider cho latency_breakdown. No-op nếu
+  // request không đăng ký tracker (đường legacy/test).
+  latencyBreakdown.recordProviderSpan(requestId, latency);
   // PHẦN B mục 11: telemetry PER ATTEMPT. Không log API key/nội dung — recordAttemptFor() chỉ nhận
   // số đếm và nhãn. No-op nếu route chưa đăng ký recorder cho requestId này (đường gọi legacy/test).
   recordAttemptFor(requestId, {
@@ -250,10 +254,16 @@ function getActiveProviders() {
 async function ensureProvidersReady() {
   // Vấn đề #3: nạp trạng thái rotation/cooldown dùng chung (nếu ROTATION_STORE_* được cấu hình) —
   // best-effort, không bao giờ throw, không chặn request nếu store chậm/lỗi.
-  await rotationStore.hydrate().catch(() => false);
   // Vấn đề #1 (vòng 3): đặt trước "vé xoay" toàn cục bằng atomic INCR — đây là chỗ DUY NHẤT trong
   // vòng đời request còn là async trước khi rotation phải quyết định, nên là chỗ đúng để làm việc này.
-  const slot = await rotationStore.reserveRotationSlot().catch(() => null);
+  // MỤC 2.3 (audit await chat.js, v6.22): hydrate (GET snapshot) và reserveRotationSlot (INCR) là 2
+  // lệnh REST ĐỘC LẬP (INCR không đọc state mà hydrate ghi; xem rotationStore.js) — trước đây chạy TUẦN
+  // TỰ = cộng 2 RTT vào thời gian TRƯỚC byte đầu tiên khi bật ROTATION_STORE_*. Chạy song song, vẫn
+  // await CẢ HAI trước khi rotation quyết định -> bảo đảm thứ tự "đã hydrate + đã có slot" giữ nguyên.
+  const [, slot] = await Promise.all([
+    rotationStore.hydrate().catch(() => false),
+    rotationStore.reserveRotationSlot().catch(() => null)
+  ]);
   setGlobalRotationSlot(slot);
   const defs = listAutoDiscoveryDefs();
   if (!defs.length) return;

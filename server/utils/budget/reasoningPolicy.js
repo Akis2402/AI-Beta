@@ -42,7 +42,7 @@ const DEFAULT_MAX_REASONING = Number(process.env.MAX_REASONING_TOKENS) || 12000;
 // ============================================================================================
 // A2 — TRẦN REASONING PHẢI THEO ĐÚNG MODEL, KHÔNG DÙNG 1 HẰNG SỐ GLOBAL
 // ============================================================================================
-// RỦI RO ĐÃ TỰ GHI NHẬN trong CHANGELOG-THINKING-VISUAL.md mục G.4 nhưng chưa xử lý:
+// RỦI RO ĐÃ TỰ GHI NHẬN ở mục G.4 của changelog thinking/visual (file CHANGELOG-THINKING-VISUAL.md không nằm trong bản export hiện tại — chỉ còn dấu vết ở comment này) nhưng chưa xử lý:
 // DEFAULT_MAX_REASONING áp dụng y hệt cho MỌI model. Với 1 model nhỏ có trần output thật chỉ
 // 4096 token, việc xin 12000 token reasoning là vô nghĩa (providerMaxTokens = answer + reasoning
 // vượt xa max output của model -> hoặc bị API từ chối, hoặc bị cắt ngang giữa chừng).
@@ -109,6 +109,39 @@ function reasoningScaleForClass(problemClass) {
   if (!problemClass) return 1;
   const scale = PROBLEM_CLASS_REASONING_SCALE[String(problemClass).toUpperCase()];
   return Number.isFinite(scale) ? scale : 1;
+}
+
+// ============================================================================================
+// MỤC 1.3 (backlog v6.22) — reasoning PHẢI đọc `questionProfile.complexity` (5 mức TRIVIAL->EXPERT)
+// ============================================================================================
+// questionClassifier.js đã phân loại `complexity` nhưng bảng scale ở trên chỉ đọc `problemClass`
+// (tokenEconomy) — 2 trục khác nhau nên câu "Định nghĩa X là gì?" (TRIVIAL) và bài HSG (EXPERT)
+// có thể nhận cùng ngân sách reasoning. Scale này NHÂN thêm với classScale (không thay thế):
+// MICRO (=0) vẫn thắng vì 0 * bất kỳ = 0. Không truyền complexity => 1 (giữ NGUYÊN hành vi
+// cũ, A2.4). Chỉnh qua .env: REASONING_SCALE_TRIVIAL|SIMPLE|MODERATE|COMPLEX|EXPERT.
+// TRIVIAL/SIMPLE > 0 có chủ đích: để 0 sẽ tắt native reasoning hẳn — quyết định đó thuộc A5 (MICRO).
+const envScale = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v >= 0 ? v : dflt; };
+const COMPLEXITY_REASONING_SCALE = {
+  TRIVIAL: envScale('REASONING_SCALE_TRIVIAL', 0.5),
+  SIMPLE: envScale('REASONING_SCALE_SIMPLE', 0.75),
+  MODERATE: envScale('REASONING_SCALE_MODERATE', 1),
+  COMPLEX: envScale('REASONING_SCALE_COMPLEX', 1.15),
+  EXPERT: envScale('REASONING_SCALE_EXPERT', 1.3)
+};
+
+/**
+ * @param {string} [complexity] questionProfile.complexity. Không truyền/lạ => 1.
+ * @returns {number}
+ */
+function reasoningScaleForComplexity(complexity) {
+  if (!complexity) return 1;
+  const scale = COMPLEXITY_REASONING_SCALE[String(complexity).toUpperCase()];
+  return Number.isFinite(scale) ? scale : 1;
+}
+
+/** Scale tổng hợp 2 trục (problemClass x complexity) — nơi DUY NHẤT nhân chúng với nhau. */
+function combinedReasoningScale(problemClass, complexity) {
+  return reasoningScaleForClass(problemClass) * reasoningScaleForComplexity(complexity);
 }
 
 /** Sàn TUYỆT ĐỐI cho phần văn bản hiển thị khi model có trần output rất nhỏ. */
@@ -212,10 +245,10 @@ function fitReasoningToModel({
  * }}
  */
 function getReasoningBudgetPolicy(provider, model, capabilities, context = {}) {
-  const { deepThinking = false, fast = false, problemClass } = context;
+  const { deepThinking = false, fast = false, problemClass, questionComplexity } = context;
   const providerKey = String(provider || '').toLowerCase();
   const modelId = String(model || '').toLowerCase();
-  const classScale = reasoningScaleForClass(problemClass);
+  const classScale = combinedReasoningScale(problemClass, questionComplexity);
 
   const base = {
     mechanism: 'none',
@@ -325,6 +358,9 @@ module.exports = {
   maxReasoningForModel,
   fitReasoningToModel,
   reasoningScaleForClass,
+  reasoningScaleForComplexity,
+  combinedReasoningScale,
+  COMPLEXITY_REASONING_SCALE,
   PROBLEM_CLASS_REASONING_SCALE,
   MIN_VISIBLE_ANSWER_TOKENS,
   MODEL_REASONING_SHARE,

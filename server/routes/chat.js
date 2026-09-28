@@ -27,6 +27,8 @@ const { classifyQuestion } = require('../utils/questionClassifier');
 // PHẦN BG/21: lưu vòng đời + KẾT QUẢ CUỐI của 1 lượt giải, độc lập với kết nối SSE tạo ra nó.
 const aiJobStore = require('../utils/aiJobStore');
 const globalWorkerPool = require('../utils/globalWorkerPool');
+const latencyBreakdown = require('../utils/latencyBreakdown');
+const { measureOutputRedundancy } = require('../utils/outputRedundancy');
 
 /**
  * B10 — các field telemetry token MỚI, phẳng hoá để đi thẳng vào log (không lồng object).
@@ -454,7 +456,7 @@ async function runVisualsFor(opts) {
  * `mode` đến từ resumableStream (INITIAL/CONTINUATION/RESUME): lượt tiếp nối KHÔNG cần suy luận lại
  * từ đầu (ngữ cảnh tối thiểu đã chứa mọi kết quả trung gian) nên dùng phase='recovery'.
  */
-function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode, problemClass, completeness }) {
+function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode, problemClass, questionComplexity, completeness }) {
   const isRecovery = !!(mode && mode !== 'INITIAL' && mode !== 'initial');
   // MỤC 10: lượt tiếp nối chỉ thiếu ĐỊNH DẠNG (kết luận/tiêu đề/số trích dẫn) thì KHÔNG cấp reasoning
   // — không còn gì để suy luận, phần suy luận đã xong ở lượt trước. Thiếu NỘI DUNG (phép biến đổi,
@@ -464,7 +466,7 @@ function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode, probl
     if (!deficit.needsReasoning) return 0;
   }
   return genericReasoningBudget({
-    answerBudget, complexityLevel, deepThinking: !!deepThinking, problemClass,
+    answerBudget, complexityLevel, deepThinking: !!deepThinking, problemClass, questionComplexity,
     phase: isRecovery ? 'recovery' : 'initial'
   });
 }
@@ -473,6 +475,15 @@ function reasoningFor({ deepThinking, answerBudget, complexityLevel, mode, probl
 // Sự kiện phát ra cho client: "delta" (1 đoạn văn bản mới), "status" (thông báo tiến trình, vd
 // đang đối chiếu đa hướng ở chế độ Sâu — không có delta nào trong lúc này), "done" (kết thúc
 // thành công, kèm metadata provider/crossChecked), "error" (kết thúc do lỗi).
+// MỤC 2.2 (v6.22): đo độ dư thừa của câu trả lời CUỐI (đếm nhánh giải + phương trình lặp), chỉ LOG.
+// Không bao giờ ném lỗi/chặn response; mỗi response chỉ log 1 lần.
+function observeOutputRedundancy(res, text) {
+  try {
+    if (!res.__reqLogger || res.__redundancyLogged || typeof text !== 'string' || !text) return;
+    res.__redundancyLogged = true;
+    res.__reqLogger.log({ stage: 'output_redundancy', ...measureOutputRedundancy(text) });
+  } catch (e) { /* quan sát không được làm hỏng response */ }
+}
 function sseWrite(res, event, data) {
   // ---------- V6.21.25/.26/.48 (audit): TTFB THẬT, đo tại ĐÚNG 1 điểm nghẽn duy nhất ----------
   // Lý do hook ở ĐÂY (không phải sửa từng điểm gọi sseWrite rải rác trong handler): comment ngay
@@ -489,10 +500,17 @@ function sseWrite(res, event, data) {
   // đều đi qua đúng hàm này — ghi nhận job ở ĐÂY nên không thể sót nhánh return nào, và không phải
   // sửa rải rác trong handler. Ghi vào store là best-effort, không chặn luồng ghi SSE.
   if (res.__aiJob) { try { aiJobStore.observeSseEvent(res.__aiJob, event, data); } catch (e) { /* không được làm hỏng stream */ } }
+  if (event === 'done' && data) observeOutputRedundancy(res, data.text);
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 function sseHeaders(res) {
+  // MỤC 1.1 (v6.22): giờ có thể được gọi SỚM HƠN bình thường — ngay khi request phải xếp hàng chờ
+  // Global Worker Pool (xem onQueued ở router.post bên dưới), TRƯỚC nhánh cache-hit/direct/cross-
+  // check vốn cũng tự gọi lại hàm này. res.writeHead(200) KHÔNG được gọi 2 lần trên cùng 1 response
+  // (ném ERR_HTTP_HEADERS_SENT) — giữ hàm này idempotent để mọi điểm gọi cũ (không đổi) vẫn an toàn.
+  if (res.__sseHeadersSent) return;
+  res.__sseHeadersSent = true;
   // QUAN TRỌNG: phải dùng res.setHeader() cho TỪNG header rồi mới gọi res.writeHead(200) KHÔNG kèm
   // object headers — KHÔNG được gộp headers vào chung 1 lệnh res.writeHead(200, {...}) như trước.
   // NGUYÊN NHÂN GỐC của lỗi "AI streaming không xuất hiện" (hiệu ứng gõ chữ mất hẳn, câu trả lời
@@ -530,14 +548,14 @@ function sseHeaders(res) {
  *
  * @returns {Function} (target) => {maxTokens:number, reasoningBudget:number}
  */
-function makeTargetBudgetRecomputer({ answerBudget, deepThinking, fastModel, complexityLevel, problemClass }) {
+function makeTargetBudgetRecomputer({ answerBudget, deepThinking, fastModel, complexityLevel, problemClass, questionComplexity }) {
   return (target) => {
     if (!target) return undefined;
     const caps = target.capabilities;
     const reasoning = reasoningBudgetFor({
       provider: target.providerKey, model: target.modelId, capabilities: caps,
       deepThinking: !!deepThinking, fast: !!fastModel,
-      answerBudget, complexityLevel, problemClass
+      answerBudget, complexityLevel, problemClass, questionComplexity
     });
     const maxOut = caps && Number(caps.maxOutputTokens);
     // Kẹp phần answer theo trần output THẬT của target này. Không biết trần -> không kẹp (giữ
@@ -563,6 +581,17 @@ router.post('/', async (req, res, next) => {
   // 'finish' bắt MỌI đường kết thúc response (JSON thường lẫn SSE) mà không cần sửa từng nhánh
   // return rải rác trong handler — 1 dòng log 'request_end' duy nhất, luôn đúng latency thật.
   res.on('finish', () => reqLogger.end({ statusCode: res.statusCode }));
+
+  // ---------- MỤC 2.1 (backlog v6.22): 1 dòng `latency_breakdown` cuối mỗi request ----------
+  // queueWaitMs / preProviderMs / providerRunMs / postProcessMs / totalMs — xem latencyBreakdown.js.
+  // 'close' cũng gọi để không rò tracker khi client ngắt giữa chừng; finish() idempotent (lần 2 = null).
+  const latencyTracker = latencyBreakdown.begin(reqLogger.requestId);
+  const emitLatencyBreakdown = () => {
+    const summary = latencyBreakdown.finish(reqLogger.requestId);
+    if (summary) reqLogger.log({ stage: 'latency_breakdown', ...summary });
+  };
+  res.on('finish', emitLatencyBreakdown);
+  res.on('close', emitLatencyBreakdown);
 
   // ---------- V6.21.18/.19/.20: Global Worker Pool — giữ đúng 1 slot cho SUỐT vòng đời request ----------
   // `releasePoolSlot` được gán bên trong try{} (sau khi acquire() thành công) — khai báo ở đây (ngoài
@@ -665,14 +694,37 @@ router.post('/', async (req, res, next) => {
 
     // ---------- V6.21.18/.19/.20: xin 1 slot Global Worker Pool, priority=interactive ----------
     // '/api/chat' LÀ đường tương tác (người dùng đang chờ trực tiếp) — mọi request qua route này đều
-    // priority=interactive; việc nền (source/YouTube ingestion...) dùng priority=background ở module
-    // riêng (KHÔNG wiring trong lần audit này — xem V6.21-AUDIT-REPORT.md mục "chưa làm"). timeoutMs
-    // giới hạn bằng đúng deadline chung của request — không có lý do xếp hàng chờ slot LÂU HƠN thời
-    // gian mà request sẽ tự huỷ vì hết giờ; hết hạn -> lỗi 503 rõ ràng, trả qua next(err) như mọi lỗi
-    // khác (KHÔNG cần thêm nhánh xử lý lỗi riêng, xem catch(err) cuối handler).
+    // priority=interactive; việc nền (source/YouTube ingestion...) dùng priority=background, ĐÃ
+    // wiring ở server/routes/sourceVision.js (xác nhận qua code + test/background-priority-wiring
+    // .test.js — comment trước đây ghi "chưa wiring" đã LỖI THỜI, sửa lại theo mục 6.2 backlog v6.22).
+    // timeoutMs giới hạn bằng đúng deadline chung của request — không có lý do xếp hàng chờ slot LÂU
+    // HƠN thời gian mà request sẽ tự huỷ vì hết giờ; hết hạn -> lỗi 503 rõ ràng, trả qua next(err) như
+    // mọi lỗi khác (KHÔNG cần thêm nhánh xử lý lỗi riêng, xem catch(err) cuối handler).
+    //
+    // ---------- MỤC 1.1 (backlog v6.22): báo cho client biết NGAY khi phải xếp hàng ----------
+    // TRƯỚC ĐÂY: 'worker_pool_admit' chỉ log SAU KHI đã admit — nếu pool bão hoà, client im lặng
+    // hoàn toàn (không biết đang chờ hay đã treo) tới khi có slot. `onQueued` (globalWorkerPool.js)
+    // được gọi ĐỒNG BỘ ngay khi request bị đẩy vào waitQueue (TRƯỚC khi acquire() ở dưới resolve),
+    // nên sự kiện 'queued' luôn được bắn RA TRƯỚC log 'worker_pool_admit'. Với request không streaming
+    // (wantsStream=false), không có kênh SSE để bắn sự kiện — chỉ log lại, không làm gì thêm (client
+    // cũ/không-stream vẫn đợi bình thường như trước, không đổi hành vi).
+    latencyTracker.markQueueStart();
     releasePoolSlot = await globalWorkerPool.defaultPool.acquire({
-      priority: globalWorkerPool.PRIORITY.INTERACTIVE, timeoutMs: GLOBAL_REQUEST_DEADLINE_MS
+      priority: globalWorkerPool.PRIORITY.INTERACTIVE, timeoutMs: GLOBAL_REQUEST_DEADLINE_MS,
+      onQueued: (snap) => {
+        reqLogger.log({ stage: 'worker_pool_queued', priority: 'interactive', queueWaitMs: reqLogger.elapsed(), ...snap });
+        if (wantsStream) {
+          sseHeaders(res);
+          sseWrite(res, 'queued', {
+            state: 'QUEUED',
+            message: 'Hệ thống đang bận, yêu cầu của bạn đang xếp hàng chờ xử lý…',
+            queuedInteractive: snap.queuedInteractive,
+            ...snap
+          });
+        }
+      }
     });
+    latencyTracker.markAdmitted();
     reqLogger.log({
       stage: 'worker_pool_admit', priority: 'interactive', queueWaitMs: reqLogger.elapsed(),
       ...globalWorkerPool.defaultPool.snapshot()
@@ -1122,7 +1174,7 @@ router.post('/', async (req, res, next) => {
         capabilities: representativeCapabilities,
         stage, problemText, historyText, contextsText, approachText: input.approachText,
         hasImage: hasAnyImage, deepThinking: !!input.deepThinking, crossCheck: !!input.crossCheck,
-        problemClass: currentProblemClass,
+        problemClass: currentProblemClass, questionComplexity: input.questionProfile && input.questionProfile.complexity,
         remainingMs: globalDeadline.remaining(),
         // PHẦN J: throughput ĐO THẬT của các target đang khả dụng thay cho hằng số 60 tok/s — quyết
         // định "trong thời gian còn lại model kịp sinh bao nhiêu token" phải khác nhau giữa 1
@@ -1666,14 +1718,14 @@ router.post('/', async (req, res, next) => {
               reasoningBudget: reasoningFor({
                 deepThinking: input.deepThinking, answerBudget: maxTokens,
                 complexityLevel: budgetOf(reconcileStage).complexityLevel,
-                problemClass: currentProblemClass, mode, completeness: recoveryCompleteness
+                problemClass: currentProblemClass, questionComplexity: input.questionProfile && input.questionProfile.complexity, mode, completeness: recoveryCompleteness
               }),
               // MỤC 13: lượt tổng hợp cũng có thể failover sang target khác hãng — ngân sách phải
               // tính lại theo capability của chính target đó.
               recomputeForTarget: makeTargetBudgetRecomputer({
                 answerBudget: maxTokens, deepThinking: input.deepThinking, fastModel: false,
                 complexityLevel: budgetOf(reconcileStage).complexityLevel,
-                problemClass: currentProblemClass
+                problemClass: currentProblemClass, questionComplexity: input.questionProfile && input.questionProfile.complexity
               }),
               webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS,
               requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal
@@ -1803,12 +1855,12 @@ router.post('/', async (req, res, next) => {
             reasoningBudget: reasoningFor({
               deepThinking: input.deepThinking, answerBudget: maxTokens,
               complexityLevel: directBudget.complexityLevel,
-              problemClass: currentProblemClass, mode, completeness: recoveryCompleteness
+              problemClass: currentProblemClass, questionComplexity: input.questionProfile && input.questionProfile.complexity, mode, completeness: recoveryCompleteness
             }),
             // MỤC 13: mỗi target (kể cả target được failover tới) tự tính lại ngân sách của mình.
             recomputeForTarget: makeTargetBudgetRecomputer({
               answerBudget: maxTokens, deepThinking: input.deepThinking, fastModel: false,
-              complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass
+              complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass, questionComplexity: input.questionProfile && input.questionProfile.complexity
             }),
             deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal
           }),
@@ -1990,7 +2042,7 @@ router.post('/', async (req, res, next) => {
       const { text: finalText, completeness, continuations, provider: reconciler, partial: reconcilePartial } = await ensureCompleteNonStream(
         (msgs, recoveryCompleteness, grantedMaxTokens) => callWithFailover(
           activeProviders,
-          { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'reconcile_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: budgetOf(reconcileStage).complexityLevel, problemClass: currentProblemClass, mode: 'CONTINUATION', completeness: recoveryCompleteness }), webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
+          { system: reconcileSystem, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'reconcile_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: budgetOf(reconcileStage).complexityLevel, problemClass: currentProblemClass, questionComplexity: input.questionProfile && input.questionProfile.complexity, mode: 'CONTINUATION', completeness: recoveryCompleteness }), webSearch: hasWebSearch, timeoutMs: RECONCILE_TIMEOUT_MS, requestId: reqLogger.requestId, deepThinking: input.deepThinking, signal },
           { preferWebSearch: hasWebSearch, deadline: globalDeadline, requireVision: hasAnyImage }
         ),
         initial,
@@ -2035,6 +2087,7 @@ router.post('/', async (req, res, next) => {
       if (!reconcilePartial) tokenEconomy.recordOutcome({ problemClass: tePlan.classification.problemClass, stage: reconcileStage, provider: reconciler && reconciler.providerKey, model: reconciler && reconciler.modelId, ...outcomeSample(requestUsage, finalText), actualTokens: requestUsage.calls > 0 ? requestUsage.outputTokens : null });
       teTelemetry.record('outputTokens', finalText.length / 3.2);
       reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });
+      observeOutputRedundancy(res, jsonDonePayload && jsonDonePayload.text);
       return res.json(jsonDonePayload);
     }
 
@@ -2069,7 +2122,7 @@ router.post('/', async (req, res, next) => {
         recomputeForTarget: makeTargetBudgetRecomputer({
           answerBudget: directBudget.coreBudget, deepThinking: input.deepThinking,
           fastModel: useFastModel, complexityLevel: directBudget.complexityLevel,
-          problemClass: currentProblemClass
+          problemClass: currentProblemClass, questionComplexity: input.questionProfile && input.questionProfile.complexity
         }),
         fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal
       },
@@ -2088,7 +2141,7 @@ router.post('/', async (req, res, next) => {
     let { text, completeness, continuations, provider, partial: directJsonPartial } = await ensureCompleteNonStream(
       (msgs, recoveryCompleteness, grantedMaxTokens) => directCaller(
         activeProviders,
-        { system, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'direct_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass, mode: 'CONTINUATION', completeness: recoveryCompleteness }), recomputeForTarget: makeTargetBudgetRecomputer({ answerBudget: grantedMaxTokens, deepThinking: input.deepThinking, fastModel: useFastModel, complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass }), fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
+        { system, messages: msgs, maxTokens: grantedMaxTokens, telemetryStage: 'direct_recovery', telemetryRecovery: true, reasoningBudget: reasoningFor({ deepThinking: input.deepThinking, answerBudget: grantedMaxTokens, complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass, questionComplexity: input.questionProfile && input.questionProfile.complexity, mode: 'CONTINUATION', completeness: recoveryCompleteness }), recomputeForTarget: makeTargetBudgetRecomputer({ answerBudget: grantedMaxTokens, deepThinking: input.deepThinking, fastModel: useFastModel, complexityLevel: directBudget.complexityLevel, problemClass: currentProblemClass, questionComplexity: input.questionProfile && input.questionProfile.complexity }), fast: useFastModel, deepThinking: input.deepThinking, requestId: reqLogger.requestId, signal },
         { deadline: globalDeadline, requireVision: hasAnyImage }
       ),
       initialDirect,
@@ -2123,12 +2176,28 @@ router.post('/', async (req, res, next) => {
     teTelemetry.record('inputTokens', compressionTelemetry.compressedInputTokens);
     teTelemetry.record('outputTokens', text.length / 3.2);
     reqLogger.log({ stage: 'token_economy_telemetry', ...usageTelemetryFields(requestUsage), ...teTelemetry.snapshot(), ...attemptTelemetry.snapshot() });
+    observeOutputRedundancy(res, finalJsonPayload.text);
     res.json(finalJsonPayload);
   } catch (err) {
     // mục 4: lỗi (bao gồm err.cancelled từ abortLink.js khi bị hủy) xảy ra SAU KHI client đã ngắt
     // kết nối — không còn ai để nhận response, gọi next(err) chỉ tạo thêm 1 lượt ghi log lỗi 499
     // không cần thiết cho 1 lượt hủy chủ động, và tránh Express cố set header/ghi lên socket đã đóng.
     if (disconnected || (err && err.cancelled)) return;
+    // MỤC 1.1 (v6.22) — BUG TỰ TÌM RA khi thêm sự kiện 'queued': SSE headers giờ có thể đã gửi từ
+    // lúc còn xếp hàng chờ pool. Nếu acquire() sau đó timeout (WORKER_POOL_TIMEOUT 503), next(err)
+    // -> errorHandler gọi res.status().json() trên response đã writeHead(200) => ERR_HTTP_HEADERS_SENT
+    // và client treo. Khi headers đã đi, phải kết thúc bằng sự kiện SSE 'error' chuẩn + res.end().
+    if (res.headersSent) {
+      try {
+        const normalized = normalizeError(err);
+        reqLogger.log({ stage: 'error_after_sse_headers', code: normalized.code, status: normalized.status });
+        if (!res.writableEnded) {
+          sseWrite(res, 'error', { message: normalized.userMessage, code: normalized.code, retryable: normalized.retryable });
+          res.end();
+        }
+      } catch (e2) { try { res.end(); } catch (e3) { /* socket đã đóng */ } }
+      return;
+    }
     next(err);
   }
 });
