@@ -778,7 +778,10 @@ function closeSidebarOnMobile() {
     const nextIndex = TAB_ORDER.indexOf(tab.dataset.tab);
     const direction = nextIndex >= prevIndex ? 1 : -1;
 
-    document.querySelectorAll('.sbtab').forEach((t) => t.classList.toggle('active', t === tab));
+    document.querySelectorAll('.sbtab').forEach((t) => {
+      t.classList.toggle('active', t === tab);
+      t.setAttribute('aria-selected', t === tab ? 'true' : 'false'); // role=tab: trạng thái cho trình đọc màn hình
+    });
     positionTabIndicator(tab, true);
     animatePanelTransition(el('panel-' + tab.dataset.tab), direction);
   }
@@ -808,23 +811,113 @@ function closeSidebarOnMobile() {
   }
 })();
 
+/* ================= Dialog controller (P3/P4) =================
+ * MỘT helper dùng chung cho Settings/Practice/Note (overlay, class .show) và Recommend/Flashcard
+ * (drawer, class .open): Esc, click backdrop, chuyển focus vào khi mở, xoay vòng Tab (chỉ modal), trả
+ * focus về nút đã mở khi đóng. Hành vi lấy theo #addSourceOverlay (mẫu tham chiếu).
+ *
+ * Esc được gắn TRÊN CHÍNH root (không gắn document) nên không chồng chéo với handler Esc dừng ghi âm
+ * ở voiceInput; nếu đang ghi âm thì helper nhường (return) để handler đó thắng. root có tabindex=-1
+ * để click vào vùng không-focus-được bên trong modal vẫn giữ focus trong root (Esc còn tới được root).
+ *
+ * options: root, openClass, modal (bật trap Tab), backdrop (click nền để đóng), initialFocus() -> Element,
+ *          fallbackOpener() -> Element (nơi trả focus nếu drawer được mở tự động, không có nút mở),
+ *          onClose() (chạy MỌI đường đóng: nút ✕, Esc, backdrop, gọi trực tiếp). */
+const DIALOG_FOCUSABLE_SEL = 'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+function dialogFocusables(root) {
+  return Array.from(root.querySelectorAll(DIALOG_FOCUSABLE_SEL)).filter((n) => (
+    !n.closest('[hidden]') && n.getClientRects().length > 0 && getComputedStyle(n).visibility !== 'hidden'
+  ));
+}
+function isVoiceCapturing() {
+  try {
+    const st = window.voiceInput && window.voiceInput.getState && window.voiceInput.getState();
+    return st === 'recording' || st === 'processing';
+  } catch (e) { return false; }
+}
+function createDialog(opts) {
+  const { root, openClass, modal = false, backdrop = false, initialFocus, fallbackOpener, onClose } = opts;
+  let opener = null;
+  const isOpen = () => root.classList.contains(openClass);
+
+  function open(openerEl) {
+    const wasOpen = isOpen();
+    // Drawer mở TỰ ĐỘNG (không có nút mở, vd flashcard vừa sinh xong) thì KHÔNG cướp focus khỏi ô nhập.
+    const moveFocus = modal || !!openerEl;
+    if (!wasOpen) opener = openerEl || (modal ? document.activeElement : null);
+    root.classList.add(openClass);
+    if (!moveFocus || wasOpen) return;
+    const target = (initialFocus && initialFocus()) || dialogFocusables(root)[0] || root;
+    target.focus({ preventScroll: true });
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    root.classList.remove(openClass);
+    const hadFocusInside = root.contains(document.activeElement);
+    const back = (opener && opener.isConnected && opener) || (fallbackOpener && fallbackOpener());
+    opener = null;
+    if (onClose) onClose();
+    // Chỉ trả focus khi focus đang ở trong dialog (hoặc modal) — đóng do bấm chỗ khác thì đừng giật focus.
+    if (back && typeof back.focus === 'function' && (modal || hadFocusInside)) back.focus({ preventScroll: true });
+  }
+
+  root.setAttribute('tabindex', '-1');
+  root.setAttribute('data-dialog-root', '');
+  root.addEventListener('keydown', (e) => {
+    if (!isOpen()) return;
+    if (e.key === 'Escape') {
+      if (isVoiceCapturing()) return;
+      e.preventDefault();
+      close();
+      return;
+    }
+    if (e.key !== 'Tab' || !modal) return;
+    const items = dialogFocusables(root);
+    if (!items.length) { e.preventDefault(); root.focus({ preventScroll: true }); return; }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === root || !root.contains(active))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (active === last || !root.contains(active))) { e.preventDefault(); first.focus(); }
+  });
+  if (backdrop) root.addEventListener('click', (e) => { if (e.target === root) close(); });
+
+  // Drawer KHÔNG chặn nền (modal=false) có thể mở TỰ ĐỘNG mà không chuyển focus vào (flashcard vừa sinh xong),
+  // khi đó handler keydown trên root ở trên không bao giờ nhận Esc. Bổ sung ĐÚNG MỘT trường hợp: Esc khi không có
+  // gì đang được focus (body) thì đóng drawer. KHÔNG đóng khi đang gõ trong ô nhập/nút/modal khác, và nhường cho
+  // handler Esc dừng ghi âm (isVoiceCapturing) — nên không chồng chéo với nó.
+  if (!modal) {
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || !isOpen() || isVoiceCapturing()) return;
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement) return;
+      if (document.querySelector('[data-dialog-root].show')) return; // có modal đang mở -> ưu tiên modal
+      e.preventDefault();
+      close();
+    });
+  }
+
+  return { open, close, isOpen };
+}
+
 /* ================= Settings modal ================= */
-function openSettings() { el('settingsOverlay').classList.add('show'); }
-function closeSettings() { el('settingsOverlay').classList.remove('show'); }
+const settingsDialog = createDialog({ root: el('settingsOverlay'), openClass: 'show', modal: true, backdrop: true, fallbackOpener: () => el('settingsBtnTop') });
+function openSettings(e) { settingsDialog.open(e && e.currentTarget); }
+function closeSettings() { settingsDialog.close(); }
 el('settingsBtnSide').onclick = openSettings;
 el('settingsBtnTop').onclick = openSettings;
 el('settingsCloseBtn').onclick = closeSettings;
-el('settingsOverlay').addEventListener('click', (e) => { if (e.target.id === 'settingsOverlay') closeSettings(); });
 
 /* ================= Luyện tập (Practice Mode setup) =================
  * Không có endpoint riêng — panel chỉ thu thập Chủ đề/Độ khó/Số câu rồi DỰNG 1 câu hỏi có cấu trúc,
  * gửi qua đúng pipeline giải bài hiện có (sendMessage), để bài luyện vẫn có đủ Hướng giải/Lời giải
  * chi tiết/Learning actions như 1 bài giải bình thường. Không tạo bộ đếm/điểm số giả ở client.
  */
-function openPracticeSetup() { el('practiceOverlay').classList.add('show'); el('practiceTopicInput').focus(); }
-function closePracticeSetup() { el('practiceOverlay').classList.remove('show'); }
+const practiceDialog = createDialog({ root: el('practiceOverlay'), openClass: 'show', modal: true, backdrop: true, initialFocus: () => el('practiceTopicInput') });
+function openPracticeSetup() { practiceDialog.open(); }
+function closePracticeSetup() { practiceDialog.close(); }
 el('practiceCloseBtn').onclick = closePracticeSetup;
-el('practiceOverlay').addEventListener('click', (e) => { if (e.target.id === 'practiceOverlay') closePracticeSetup(); });
 document.querySelectorAll('#practiceDifficultyChips .chip').forEach((c) => {
   c.onclick = () => document.querySelectorAll('#practiceDifficultyChips .chip').forEach((x) => x.classList.toggle('active', x === c));
 });
@@ -3351,18 +3444,49 @@ function extractThinking(text) {
   }
   return { thinking: null, answer: text.trim(), truncated: false };
 }
+// P6: KaTeX (strict:'warn') phàn nàn với MỌI chữ Việt có dấu xếp chồng (ặ, ủ, ừ, ợ...) nằm trong \text{} hoặc
+// chế độ math vì bộ font KaTeX không có metrics cho chúng (mã lỗi unknownSymbol / unicodeTextInMathMode /
+// missingCharacterMetrics). Đây KHÔNG phải công thức hỏng: KaTeX vẫn dựng chữ bằng font dự phòng, chỉ
+// spam console. Nguồn: thư viện công thức (vd \text{hoặc}, V_{\text{chóp}}, W_đ) và câu trả lời của AI.
+// Chỉ bỏ qua đúng 3 mã lỗi đó VÀ chỉ khi ký tự vi phạm là chữ Latin có dấu dùng cho tiếng Việt (isKatexViChar); mọi cảnh báo
+// strict khác (lệnh LaTeX sai, ký tự Hy Lạp/Kirin/... lạ) vẫn được báo như cũ.
+const KATEX_VI_IGNORED_CODES = new Set(['unknownSymbol', 'unicodeTextInMathMode', 'missingCharacterMetrics']);
+// Các khối Unicode chứa chữ cái tiếng Việt: Latin-1 (À-ÿ), Latin Extended-A (Ă Đ Ĩ Ũ...), Ơ ơ Ư ư,
+// Latin Extended Additional dành cho tiếng Việt (Ạ-ỹ). KHÔNG gồm Hy Lạp (Ω), Kirin, CJK...
+function isKatexViChar(ch) {
+  const cp = ch ? ch.codePointAt(0) : 0;
+  return (cp >= 0x00C0 && cp <= 0x017F) || (cp >= 0x01A0 && cp <= 0x01B0) || (cp >= 0x1EA0 && cp <= 0x1EF9);
+}
+function katexStrict(errorCode, errorMsg) {
+  if (!KATEX_VI_IGNORED_CODES.has(errorCode)) return 'warn';
+  const m = /["']([^"'])["']/.exec(String(errorMsg || ''));
+  return m && isKatexViChar(m[1]) ? 'ignore' : 'warn';
+}
+// KaTeX 0.16.x còn gọi console.warn("No character metrics for 'ặ' in style ...") TRỰC TIẾP (không đi qua `strict`),
+// nên không tắt được bằng option. Lọc ĐỒNG BỘ và chỉ trong lúc renderMathInElement chạy (không rò sang async),
+// chỉ nuốt đúng thông điệp này cho chữ Việt; mọi console.warn khác đi qua nguyên vẹn và luôn được khôi phục.
+function withKatexViWarningsFiltered(fn) {
+  const orig = console.warn;
+  console.warn = function (...args) {
+    const m = typeof args[0] === 'string' && /^No character metrics for '([^'])' in style/.exec(args[0]);
+    if (m && isKatexViChar(m[1])) return;
+    return orig.apply(this, args);
+  };
+  try { return fn(); } finally { console.warn = orig; }
+}
 function renderMath(container) {
   if (window.renderMathInElement) {
     try {
-      renderMathInElement(container, {
+      withKatexViWarningsFiltered(() => renderMathInElement(container, {
         delimiters: [
           { left: '$$', right: '$$', display: true },
           { left: '\\[', right: '\\]', display: true },
           { left: '$', right: '$', display: false },
           { left: '\\(', right: '\\)', display: false }
         ],
-        throwOnError: false
-      });
+        throwOnError: false,
+        strict: katexStrict
+      }));
     } catch (e) { console.error(e); }
   }
 }
@@ -4236,21 +4360,22 @@ function refreshNoteUIInThread(msgId) {
 }
 
 let activeNoteCtx = null;
+// Esc/backdrop đóng qua dialog.close() KHÔNG đi qua closeNoteModal(), nên dọn activeNoteCtx bằng onClose — nếu
+// không ngữ cảnh ghi chú cũ còn treo và nút Lưu vẫn ghi vào tin nhắn của modal đã đóng.
+const noteDialog = createDialog({ root: el('noteOverlay'), openClass: 'show', modal: true, backdrop: true, initialFocus: () => el('noteModalInput'), onClose: () => { activeNoteCtx = null; } });
 function openNoteModal(msgObj, conv) {
   activeNoteCtx = { msgObj, conv };
   el('noteModalQ').textContent = msgObj.query || '(Bài tập có ảnh đính kèm)';
   el('noteModalInput').value = msgObj.userNote || '';
   el('noteModalDeleteBtn').classList.toggle('hide', !msgObj.userNote);
-  el('noteOverlay').classList.add('show');
-  setTimeout(() => el('noteModalInput').focus(), 60);
+  noteDialog.open();
 }
 function closeNoteModal() {
-  el('noteOverlay').classList.remove('show');
+  noteDialog.close();
   activeNoteCtx = null;
 }
 el('noteCloseBtn').onclick = closeNoteModal;
 el('noteModalCancelBtn').onclick = closeNoteModal;
-el('noteOverlay').addEventListener('click', (e) => { if (e.target.id === 'noteOverlay') closeNoteModal(); });
 el('noteModalSaveBtn').onclick = () => {
   if (!activeNoteCtx) return;
   const { msgObj, conv } = activeNoteCtx;
@@ -5527,7 +5652,7 @@ function renderCitations(container, contexts, query, answerText, webNote, citati
           const mmss = `${Math.floor(startS / 60)}:${String(startS % 60).padStart(2, '0')}`;
           // MỤC XXX: transcript nhánh ASR (Gemini nghe audio, không phải phụ đề có sẵn) độ tin cậy
           // thấp hơn phụ đề thật — nêu rõ thay vì hiển thị y hệt để người đọc biết mức nên tin.
-          const asrNote = c.extractionMethod === 'asr' ? ' <i class="cite-asr-note">(phụ đề tự nhận dạng — có thể sai sót)</i>' : '';
+          const asrNote = (c.extractionMethod === 'asr' || c.extractionMethod === 'asr-supadata') ? ' <i class="cite-asr-note">(phụ đề tự nhận dạng — có thể sai sót)</i>' : '';
           meta = ` · <a href="${escapeHtml(jumpUrl)}" target="_blank" rel="noopener noreferrer">mốc ${mmss}</a>${asrNote}`;
         } else if (c.kind === 'web' && safeSrcUrl !== '#') {
           const anchor = c.sectionAnchor ? ` · đoạn “${escapeHtml(c.sectionAnchor)}”` : '';
@@ -7656,8 +7781,10 @@ let recommendFetchedForQuery = null;
 // panel. Giờ luôn có mặt sẵn trong topbar và hoạt động theo kiểu "bật/tắt" (bấm lần nữa để đóng),
 // không cần đợi trạng thái đóng/mở như cơ chế reopen-btn cũ.
 // mở panel = coi như người dùng đã "xem" kết quả mới nhất -> xoá luôn dấu chấm báo (badge) nếu có.
+const recommendDialog = createDialog({ root: el('recommendPanel'), openClass: 'open', fallbackOpener: () => el('recommendTopBtn') });
 function openRecommendPanel() {
-  el('recommendPanel').classList.add('open');
+  // Nút mở duy nhất là #recommendTopBtn -> truyền làm opener để đóng xong trả focus đúng chỗ.
+  recommendDialog.open(el('recommendTopBtn'));
   el('recommendTopBtn').classList.remove('has-badge');
   // FIX PHẦN 9: đây là hành động BẤM NÚT chủ động của người dùng ("user bấm tính năng
   // recommendation") — lúc này mới thực sự gọi AI/web search, và chỉ khi chưa fetch cho đúng câu
@@ -7667,9 +7794,9 @@ function openRecommendPanel() {
     scheduleRecommend(lastQueryForRecommend);
   }
 }
-function closeRecommendPanel() { el('recommendPanel').classList.remove('open'); }
+function closeRecommendPanel() { recommendDialog.close(); }
 function toggleRecommendPanel() {
-  if (el('recommendPanel').classList.contains('open')) closeRecommendPanel(); else openRecommendPanel();
+  if (recommendDialog.isOpen()) closeRecommendPanel(); else openRecommendPanel();
 }
 el('recommendCloseBtn').onclick = closeRecommendPanel;
 el('recommendTopBtn').onclick = toggleRecommendPanel;
@@ -7681,11 +7808,14 @@ el('recommendTopBtn').onclick = toggleRecommendPanel;
 // giống cách khung "Đề xuất ôn tập" liệt kê các link đã tìm được — bấm vào 1 bộ để dùng lại bộ đó.
 // Đóng khung (nút ✕ hoặc bấm lại icon để tắt) sẽ tự LƯU bộ thẻ vừa tạo (nếu có, chưa lưu) vào danh
 // sách này, nên không cần thao tác lưu thủ công nào khác.
-function openFlashcardPanel() { el('flashcardPanel').classList.add('open'); }
-function closeFlashcardPanel() { commitActiveFlashcardSet(); el('flashcardPanel').classList.remove('open'); }
+// onClose = commitActiveFlashcardSet: Esc/nút ✕/bấm lại icon đều đi qua dialog.close() nên đều tự LƯU bộ thẻ
+// vừa tạo (trước đây chỉ closeFlashcardPanel() mới commit — thêm Esc mà không có onClose sẽ làm mất bộ thẻ).
+const flashcardDialog = createDialog({ root: el('flashcardPanel'), openClass: 'open', fallbackOpener: () => el('flashcardTopBtn'), onClose: () => commitActiveFlashcardSet() });
+function openFlashcardPanel(openerEl) { flashcardDialog.open(openerEl); }
+function closeFlashcardPanel() { flashcardDialog.close(); }
 function toggleFlashcardPanel() {
-  if (el('flashcardPanel').classList.contains('open')) { closeFlashcardPanel(); return; }
-  openFlashcardPanel();
+  if (flashcardDialog.isOpen()) { closeFlashcardPanel(); return; }
+  openFlashcardPanel(el('flashcardTopBtn'));
   renderFlashcardLibrary(true); // mở lại từ đầu -> luôn về trang 1
 }
 el('flashcardCloseBtn').onclick = closeFlashcardPanel;

@@ -548,33 +548,7 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .gen-error-retry:active{transform:scale(.98);}
 .gen-error-retry:disabled{opacity:.7;cursor:wait;}
 
-@media (max-width:760px){
-  /* Drawer trượt bằng transform (GPU-friendly) thay vì animate left — tránh layout thrashing khi mở/đóng. */
-  #sidebar{position:fixed;left:0;top:0;bottom:0;z-index:20;transform:translateX(-100%);transition:transform var(--motion-smooth) var(--ease-emphasized);box-shadow:var(--shadow-lg);width:88vw;max-width:320px;min-height:0;}
-  #sidebar.open{transform:translateX(0);}
-  #menuBtn{display:inline-flex !important;}
-  #closeSidebarBtn{display:block;}
-  #sidebarOverlay{display:block;position:fixed;inset:0;background:rgba(10,10,16,.5);z-index:19;opacity:0;visibility:hidden;pointer-events:none;transition:opacity var(--motion-normal) var(--ease-standard),visibility 0s linear var(--motion-normal);}
-  #sidebarOverlay.show{opacity:1;visibility:visible;pointer-events:auto;transition:opacity var(--motion-normal) var(--ease-standard);}
-  .msg-row{padding:0 14px;}
-  #topbar{padding:12px 14px;}
-  #topbar .title{font-size:14px;max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  #topbar .right{gap:4px;}
-  .grade-badge{display:none;}
-  #topbar .status{font-size:0;gap:0;margin-right:2px;}
-  .iconbtn{width:30px;height:30px;}
-  #composer{padding:10px 12px calc(14px + env(safe-area-inset-bottom));}
-  .study-actions{gap:6px;}
-  .study-btn{height:30px;padding:0 9px;font-size:11.5px;}
-  .study-btn span{display:none;}
-  .study-btn svg{width:15px;height:15px;}
-  .detail-btn{width:100%;justify-content:center;font-size:12.5px;padding:11px 14px;}
-  #thinkPopover{width:min(280px,80vw);}
-}
-@media (max-width:420px){
-  #settingsModal{max-height:92vh;border-radius:var(--r-lg) var(--r-lg) 0 0;position:fixed;bottom:0;left:0;right:0;max-width:100%;}
-  #settingsOverlay.show{align-items:flex-end;padding:0;}
-}
+/* (P1) Khối @media 760px/420px đã chuyển xuống cuối file — xem 'MOBILE / TOUCH OVERRIDES'. */
 
 /* ---------- Main ---------- */
 #main{
@@ -1016,33 +990,11 @@ body.mm-lock-scroll{overflow:hidden;}
      3. iOS Safari phóng to trang khi focus vào input có font-size < 16px — làm layout nhảy và
         người dùng phải tự thu nhỏ lại. Ép 16px cho textarea ở màn hình hẹp là cách duy nhất chặn.
 */
-@media (max-width:640px){
-  #chatBarTools{flex-wrap:wrap;gap:8px;row-gap:8px;}
-  /* Vùng chạm 44px nhưng viền vẫn 36px: dùng padding ảo qua ::after để không phình layout. */
-  .tool-btn{height:36px;}
-  .tool-btn.icon-only{width:36px;}
-  .tool-btn::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
-    width:44px;height:44px;border-radius:inherit;}
-  .tool-btn{position:relative;}
-  #sendBtn,#stopBtn{height:40px;padding:0 20px;font-size:13.5px;min-width:112px;}
-  /* Khi hàng công cụ đã xuống dòng, nút gửi chiếm trọn dòng cuối cho dễ bấm bằng ngón cái. */
-  #sendBtn{flex:1 1 auto;justify-content:center;}
-  /* iOS: < 16px là trang tự zoom khi focus. */
-  #qInput{font-size:16px;}
-  #hint{font-size:11.5px;line-height:1.5;}
-  #voiceStatus{font-size:12px;flex-wrap:wrap;}
-  /* Bỏ hiệu ứng nhấc lên khi hover: trên cảm ứng hover bị "dính" sau khi nhả tay. */
-  .tool-btn:hover{transform:none;}
-  #sendBtn:hover:not(:disabled),#stopBtn:hover{transform:none;}
-}
+/* (P1) Khối @media 640px của composer đã chuyển xuống cuối file. */
 
 /* Hình minh hoạ: SVG co theo bề ngang nên chữ trong hình nhỏ dần theo màn hình. Giới hạn chiều cao
    ảnh AI để một hình dọc không chiếm trọn màn hình, và cho phép chạm để mở lightbox như cũ. */
-@media (max-width:640px){
-  .visual-figure{margin-left:0;margin-right:0;}
-  .visual-card-image img{max-height:62vh;object-fit:contain;}
-  .visual-card-head{font-size:13.5px;line-height:1.4;}
-}
+/* (P1) Khối @media 640px của hình minh hoạ đã chuyển xuống cuối file. */
 
 /* ---------- PHẦN D/18: nút microphone (Voice Input) ---------- */
 /* Bốn trạng thái nhìn thấy được: idle (mặc định .tool-btn), recording, processing, error; cộng
@@ -1880,3 +1832,106 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 .visual-notice-text { text-align: left; opacity: 0.9; }
 .visual-auth-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 640px) { .visual-svg-wrap .visual-svg-img { max-height: 320px; } }
+
+/* =========================================================================
+   MOBILE / TOUCH OVERRIDES — đặt CUỐI FILE có chủ đích.
+   GỐC LỖI (P1): các khối @media này trước đây nằm TRƯỚC rule gốc cùng specificity (#topbar, .iconbtn,
+   #topbar .status, .msg-row, #composer, .study-*, .detail-btn, #thinkPopover, #settingsModal, #sendBtn/
+   #stopBtn, #hint, #voiceStatus, .visual-card-head). Cùng specificity thì rule khai SAU thắng, nên
+   override mobile bị vô hiệu. Quy ước: khối @media override luôn khai SAU rule gốc mà nó ghi đè.
+   ========================================================================= */
+@media (max-width:760px){
+  /* Drawer trượt bằng transform (GPU-friendly) thay vì animate left — tránh layout thrashing khi mở/đóng. */
+  #sidebar{position:fixed;left:0;top:0;bottom:0;z-index:20;transform:translateX(-100%);transition:transform var(--motion-smooth) var(--ease-emphasized);box-shadow:var(--shadow-lg);width:88vw;max-width:320px;min-height:0;}
+  #sidebar.open{transform:translateX(0);}
+  #menuBtn{display:inline-flex !important;}
+  #closeSidebarBtn{display:block;}
+  #sidebarOverlay{display:block;position:fixed;inset:0;background:rgba(10,10,16,.5);z-index:19;opacity:0;visibility:hidden;pointer-events:none;transition:opacity var(--motion-normal) var(--ease-standard),visibility 0s linear var(--motion-normal);}
+  #sidebarOverlay.show{opacity:1;visibility:visible;pointer-events:auto;transition:opacity var(--motion-normal) var(--ease-standard);}
+  .msg-row{padding:0 14px;}
+  #topbar{padding:12px 14px;}
+  #topbar .title{font-size:14px;max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  #topbar .left{min-width:0;flex:1 1 auto;}
+  #topbar .right{gap:4px;flex-shrink:0;}
+  .grade-badge{display:none;}
+  #topbar .status{font-size:0;gap:0;margin-right:2px;}
+  .iconbtn{width:30px;height:30px;}
+  #composer{padding:10px 12px calc(14px + env(safe-area-inset-bottom));}
+  .study-actions{gap:6px;}
+  .study-btn{height:30px;padding:0 9px;font-size:11.5px;}
+  .study-btn span{display:none;}
+  .study-btn svg{width:15px;height:15px;}
+  .detail-btn{width:100%;justify-content:center;font-size:12.5px;padding:11px 14px;}
+  #thinkPopover{width:min(280px,80vw);}
+}
+@media (max-width:420px){
+  #settingsModal{max-height:92vh;border-radius:var(--r-lg) var(--r-lg) 0 0;position:fixed;bottom:0;left:0;right:0;max-width:100%;}
+  #settingsOverlay.show{align-items:flex-end;padding:0;}
+}
+
+/* Composer / công cụ chat (từ khối max-width:640px cũ) */
+@media (max-width:640px){
+  #chatBarTools{flex-wrap:wrap;gap:8px;row-gap:8px;}
+  /* Vùng chạm 44px nhưng viền vẫn 36px: dùng padding ảo qua ::after để không phình layout. */
+  .tool-btn{height:36px;}
+  .tool-btn.icon-only{width:36px;}
+  .tool-btn::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    width:44px;height:44px;border-radius:inherit;}
+  .tool-btn{position:relative;}
+  #sendBtn,#stopBtn{height:40px;padding:0 20px;font-size:13.5px;min-width:112px;}
+  /* Khi hàng công cụ đã xuống dòng, nút gửi chiếm trọn dòng cuối cho dễ bấm bằng ngón cái. */
+  #sendBtn{flex:1 1 auto;justify-content:center;}
+  /* iOS: < 16px là trang tự zoom khi focus. */
+  #qInput{font-size:16px;}
+  #hint{font-size:11.5px;line-height:1.5;}
+  #voiceStatus{font-size:12px;flex-wrap:wrap;}
+  /* Bỏ hiệu ứng nhấc lên khi hover: trên cảm ứng hover bị "dính" sau khi nhả tay. */
+  .tool-btn:hover{transform:none;}
+  #sendBtn:hover:not(:disabled),#stopBtn:hover{transform:none;}
+}
+
+/* Hình minh hoạ: giới hạn chiều cao ảnh AI (từ khối max-width:640px cũ) */
+@media (max-width:640px){
+  .visual-figure{margin-left:0;margin-right:0;}
+  .visual-card-image img{max-height:62vh;object-fit:contain;}
+  .visual-card-head{font-size:13.5px;line-height:1.4;}
+}
+
+/* Các nút icon KHÔNG được co lại khi thiếu chỗ (flex-shrink mặc định 1 làm nút 34px bị bóp còn ~30.5px
+   và vẫn tràn) — chỗ hẹp thì nhường cho tiêu đề (ellipsis), không nhường cho nút. */
+#topbar .iconbtn{flex-shrink:0;}
+@media (max-width:479px){
+  #topbar{padding:10px 8px;}
+  #topbar .right{gap:2px;}
+}
+@media (max-width:339px){
+  #topbar .status{display:none;}
+}
+/* Màn hẹp: 6 nút 44px + tiêu đề không vừa 1 hàng (khi nút tác vụ nền hiện, tiêu đề chỉ còn ~22-45px).
+   Tách tiêu đề xuống hàng riêng bằng display:contents để menu / nhóm nút / tiêu đề thành 3 flex-item của #topbar.
+   <=359px: luôn tách. <=419px: chỉ tách khi #topbar có class .has-bgtask (backgroundTaskUI.js bật/tắt cùng lúc
+   với nút #bgTaskBtn) — dùng class thay vì :has() nên chạy mọi trình duyệt. */
+@media (max-width:359px){
+  #topbar{flex-wrap:wrap;row-gap:2px;}
+  #topbar .left{display:contents;}
+  #menuBtn{order:1;}
+  #topbar .right{order:2;margin-left:auto;}
+  #topbar .title-wrap{order:3;flex:1 1 100%;}
+  #topbar .title{max-width:100%;}
+}
+@media (max-width:419px){
+  #topbar.has-bgtask{flex-wrap:wrap;row-gap:2px;}
+  #topbar.has-bgtask .left{display:contents;}
+  #topbar.has-bgtask #menuBtn{order:1;}
+  #topbar.has-bgtask .right{order:2;margin-left:auto;}
+  #topbar.has-bgtask .title-wrap{order:3;flex:1 1 100%;}
+  #topbar.has-bgtask .title{max-width:100%;}
+}
+/* Cảm ứng (P5): vùng chạm thật 44×44 (WCAG 2.5.5 khuyến nghị); sàn 24×24 (WCAG 2.5.8) đã được đảm bảo bởi kích thước gốc (.iconbtn ≥30, .set-close 30, .rec-close 25). */
+@media (pointer:coarse){
+  .iconbtn,.set-close,.rec-close,.chip,.fsubj-tab,#urlSourceAddBtn{min-width:var(--tap);min-height:var(--tap);}
+  #urlSourceInput,#addSourceBtn,#sourceSearchInput,.hist-subject-filter,#ruleAddBtn,#clearHistoryBtn{min-height:var(--tap);}
+  /* Nút công cụ composer (tablet 641-1024px): giữ viền 32px nhưng mở vùng chạm 44px bằng ::after, như khối <=640px. */
+  .tool-btn{position:relative;}
+  .tool-btn::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:44px;height:44px;border-radius:inherit;}
+}

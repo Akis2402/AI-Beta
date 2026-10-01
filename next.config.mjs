@@ -54,7 +54,8 @@ const nextConfig = {
     'openai',
     'compression',
     'express',
-    'helmet'
+    'helmet',
+    'jsdom'
   ],
   async headers() {
     return [

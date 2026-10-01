@@ -47,13 +47,21 @@ test('2. method:\'asr\' -> mọi chunk là \'asr\' (Gemini nghe audio, không ph
   chunks.forEach((c) => assert.strictEqual(c.extractionMethod, 'asr'));
 });
 
-test('3. youtubeSource.js: nhánh ASR fallback thực sự truyền method:\'asr\' (không chỉ hàm hỗ trợ có khả năng)', () => {
+test('3. youtubeSource.js: nhánh Supadata generate thực sự stamp method:\'asr-supadata\' (hành vi chạy thật: test/source-supadata-readability.test.js)', () => {
   const src = read('server/utils/source/youtubeSource.js');
-  assert.ok(/chunkTranscript\(mergedCues,\s*\{\s*\.\.\.opts,\s*method:\s*'asr'\s*\}\)/.test(src),
-    'nhánh ASR (sau youtubeAsr.transcribeYouTubeWithGemini) phải gọi chunkTranscript với method:\'asr\'');
+  assert.ok(/method = 'asr-supadata';\s*\n\s*r = await requestTranscript\(client, url, \{ \.\.\.base, mode: 'generate' \}\)/.test(src),
+    'nhánh generate phải đặt method = asr-supadata NGAY TRƯỚC lệnh gọi mode:generate');
+  assert.ok(/chunkTranscript\(r\.cues,\s*\{[^}]*method\s*\}\)/.test(src), 'chunkTranscript phải nhận method đã stamp');
 });
 
 console.log('\n== validators.js — \'asr\' là extractionMethod hợp lệ, đi qua allow-list nguyên vẹn ==');
+
+test('4b. 4 giá trị v6.23 + giá trị cũ đều nằm trong allow-list', () => {
+  ['text-supadata', 'asr-supadata', 'text-readability', 'text-firecrawl', 'asr', 'text-youtubeijs', 'text-youtube-transcript'].forEach((m) => {
+    const out = validateChatBody({ query: 'test', contexts: [{ doc: 'D', id: 1, text: 'x', extractionMethod: m }] });
+    assert.strictEqual(out.contexts[0].extractionMethod, m);
+  });
+});
 
 test('4. context với extractionMethod:\'asr\' -> giữ nguyên (không bị rơi về \'unknown\')', () => {
   const out = validateChatBody({
@@ -90,6 +98,7 @@ test('7. renderCitations() cảnh báo rõ khi citation YouTube đến từ ASR'
   assert.ok(i > 0);
   const block = app.slice(i, i + 700);
   assert.ok(/extractionMethod === 'asr'/.test(block), 'renderCitations phải kiểm tra extractionMethod asr cho nhánh youtube');
+  assert.ok(/extractionMethod === 'asr-supadata'/.test(block), 'v6.23: phải cảnh báo cả transcript asr-supadata');
   assert.ok(/phụ đề tự nhận dạng/.test(block), 'phải có ghi chú tiếng Việt cảnh báo transcript tự nhận dạng');
 });
 

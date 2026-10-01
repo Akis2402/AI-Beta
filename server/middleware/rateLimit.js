@@ -17,6 +17,7 @@
 
 const rateLimit = require('express-rate-limit');
 const kv = require('../utils/kvStore');
+const { getClientIp } = require('../utils/clientIp');
 
 /** Khoá đếm: IP + tên nhóm + số hiệu cửa sổ. KHÔNG chứa nội dung câu hỏi hay bất kỳ dữ liệu nào khác. */
 function bucketKey(name, ip, windowMs) {
@@ -45,7 +46,7 @@ function createLimiter(opts) {
       res.setHeader('X-RateLimit-Scope', 'instance');
       return next();
     }
-    const ip = req.ip || (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || 'unknown';
+    const ip = getClientIp(req); // P7: không tin x-forwarded-for do client tự gửi (xem server/utils/clientIp.js)
     const count = await kv.incr(bucketKey(name, ip, windowMs), Math.ceil(windowMs / 1000));
     if (count == null) {
       // KV lỗi: fail-open ở tầng này (không chặn người dùng hợp lệ vì hạ tầng phụ), tầng cục bộ bên

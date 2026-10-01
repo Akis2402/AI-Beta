@@ -16,13 +16,29 @@
    cần reload trang (PHẦN AH).
    ===================================================================================== */
 
+function i18nHasOwn(dict, key) {
+  return !!dict && Object.prototype.hasOwnProperty.call(dict, key);
+}
+
+function i18nCurrentLang() {
+  return (window.languageStore && window.languageStore.getUILanguage()) || 'vi';
+}
+
+/** true nếu `key` có bản dịch (ngôn ngữ hiện tại HOẶC fallback tiếng Việt). Chuỗi rỗng "" là bản dịch
+ * HỢP LỆ (cố ý) — khác với "thiếu bản dịch", nên phải kiểm tra sự tồn tại của key chứ không phải độ "truthy". */
+function i18nHasTranslation(key) {
+  const all = window.TRANSLATIONS || {};
+  return i18nHasOwn(all[i18nCurrentLang()], key) || i18nHasOwn(all.vi, key);
+}
+
 function translateKey(key, vars) {
-  const lang = (window.languageStore && window.languageStore.getUILanguage()) || 'vi';
+  const lang = i18nCurrentLang();
   const dict = (window.TRANSLATIONS && window.TRANSLATIONS[lang]) || {};
   let str = dict[key];
   if (str == null) {
     // Fallback: tiếng Việt rồi tới chính key (không bao giờ hiển thị "undefined" cho người dùng).
-    str = (window.TRANSLATIONS && window.TRANSLATIONS.vi && window.TRANSLATIONS.vi[key]) || key;
+    const vi = window.TRANSLATIONS && window.TRANSLATIONS.vi;
+    str = i18nHasOwn(vi, key) && vi[key] != null ? vi[key] : key;
   }
   if (vars) {
     Object.keys(vars).forEach((k) => { str = str.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(vars[k])); });
@@ -30,16 +46,27 @@ function translateKey(key, vars) {
   return str;
 }
 
+/** Áp bản dịch cho mọi phần tử mang thuộc tính `attr`. THIẾU bản dịch (key không có ở ngôn ngữ hiện
+ * tại lẫn tiếng Việt) thì GIỮ NGUYÊN giá trị sẵn có trong HTML (chính là fallback tiếng Việt viết tay)
+ * thay vì ghi đè bằng chính chuỗi key thô (vd "sources.searchPlaceholder") ra giao diện. */
+function i18nApplyToAttr(scope, attr, apply) {
+  scope.querySelectorAll('[' + attr + ']').forEach((el) => {
+    const key = el.getAttribute(attr);
+    if (!i18nHasTranslation(key)) return;
+    apply(el, translateKey(key));
+  });
+}
+
 function applyStaticTranslations(root) {
   const scope = root || document;
-  scope.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = translateKey(el.getAttribute('data-i18n')); });
+  i18nApplyToAttr(scope, 'data-i18n', (el, s) => { el.textContent = s; });
   // data-i18n-html: DÙNG RẤT HẠN CHẾ, chỉ cho chuỗi có markup cố định do CHÍNH translations.js
   // định nghĩa (vd <strong> trong hướng dẫn) — KHÔNG bao giờ dùng cho nội dung người dùng/AI nhập
   // vào (đó là lỗ XSS); mọi chuỗi động vẫn phải qua data-i18n/textContent.
-  scope.querySelectorAll('[data-i18n-html]').forEach((el) => { el.innerHTML = translateKey(el.getAttribute('data-i18n-html')); });
-  scope.querySelectorAll('[data-i18n-placeholder]').forEach((el) => { el.placeholder = translateKey(el.getAttribute('data-i18n-placeholder')); });
-  scope.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = translateKey(el.getAttribute('data-i18n-title')); });
-  scope.querySelectorAll('[data-i18n-aria-label]').forEach((el) => { el.setAttribute('aria-label', translateKey(el.getAttribute('data-i18n-aria-label'))); });
+  i18nApplyToAttr(scope, 'data-i18n-html', (el, s) => { el.innerHTML = s; });
+  i18nApplyToAttr(scope, 'data-i18n-placeholder', (el, s) => { el.placeholder = s; });
+  i18nApplyToAttr(scope, 'data-i18n-title', (el, s) => { el.title = s; });
+  i18nApplyToAttr(scope, 'data-i18n-aria-label', (el, s) => { el.setAttribute('aria-label', s); });
 }
 
 /* ---------------------------------------------------------------------------------------

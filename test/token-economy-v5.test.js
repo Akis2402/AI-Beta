@@ -258,7 +258,8 @@ async function test(name, fn) {
   });
 
   await test('transcript -> chunk theo MỐC THỜI GIAN có locator (citation trỏ được tới phút)', () => {
-    const cues = yt.parseTranscriptXml('<t><text start="0" dur="4">một</text><text start="200" dur="4">hai</text></t>');
+    // v6.23: cue đến từ Supadata (offset/duration MILI-GIÂY) -> toCues() đổi sang GIÂY cho chunkTranscript().
+    const cues = yt.toCues([{ text: 'một', offset: 0, duration: 4000, lang: 'vi' }, { text: 'hai', offset: 200000, duration: 4000, lang: 'vi' }]);
     const chunks = yt.chunkTranscript(cues);
     assert.strictEqual(chunks.length, 2);
     assert.strictEqual(chunks[1].locator, '3:20–3:24');
@@ -272,10 +273,14 @@ async function test(name, fn) {
     assert.ok(/chưa đọc được/i.test(res.userMessage));
   });
 
-  await test('YouTube dùng cùng lớp SSRF với web (không có đường fetch riêng không kiểm soát)', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'utils', 'source', 'youtubeSource.js'), 'utf8');
-    assert.ok(/safeHttp\.fetchPinned/.test(src));
-    assert.ok(!/await fetch\(/.test(src), 'không được có fetch() trần bỏ qua kiểm địa chỉ nội bộ');
+  await test('YouTube (v6.23) không có đường HTTP tự viết: chỉ gọi Supadata SDK; Web vẫn qua safeHttp.fetchPinned', () => {
+    const ytSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'utils', 'source', 'youtubeSource.js'), 'utf8');
+    assert.ok(!/await fetch\(/.test(ytSrc), 'không được có fetch() trần');
+    assert.ok(!/require\(['"](https?|undici)['"]\)/.test(ytSrc), 'không được tự mở kết nối HTTP');
+    assert.ok(/require\(['"]@supadata\/js['"]\)/.test(ytSrc), 'phải gọi qua SDK Supadata');
+    const webSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'utils', 'source', 'webSource.js'), 'utf8');
+    assert.ok(/safeHttp\.fetchPinned/.test(webSrc));
+    assert.ok(!/await fetch\(/.test(webSrc), 'không được có fetch() trần bỏ qua kiểm địa chỉ nội bộ');
   });
 
   await test('URL lặp lại trong cùng câu hỏi chỉ tính là MỘT nguồn (PHẦN BH)', () => {
