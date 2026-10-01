@@ -18,7 +18,12 @@ const sourceVisionRoutes = require('./routes/sourceVision');
 const app = express();
 
 app.disable('x-powered-by');
-app.set('trust proxy', 1); // cần thiết khi deploy sau reverse proxy / load balancer (Render, Vercel, Nginx...)
+// Số proxy tin cậy đứng trước app (mặc định 1 = đúng như cũ). Đọc từ env THAY VÌ literal `app.set('trust proxy', 1)`
+// vì Turbopack phân tích tĩnh `express().set(<literal>)` rồi báo TP1103 (đã tái hiện bằng Next 16.3.8). KHÔNG thể
+// tắt cảnh báo bằng `turbopackIgnore` ở require: file tracing sẽ bỏ sót server/ + express khỏi bundle Vercel và
+// route sẽ chết khi chạy thật. Giá trị không hợp lệ (âm, không phải số nguyên) -> quay về 1.
+const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS ?? '1', 10);
+app.set('trust proxy', Number.isInteger(trustProxyHops) && trustProxyHops >= 0 ? trustProxyHops : 1); // cần thiết khi deploy sau reverse proxy / load balancer (Render, Vercel, Nginx...)
 
 // ---------- Lớp bảo mật áp dụng toàn cục ----------
 app.use(helmetConfig);

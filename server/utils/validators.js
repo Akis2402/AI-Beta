@@ -204,14 +204,17 @@ function parseSourceImages(body) {
  * system prompt từ các trường đã được kiểm duyệt bên dưới (xem promptBuilder.js).
  */
 // PHẦN F/N: tập giá trị hợp lệ cho provenance + vòng đời nguồn (khớp public/js/app.js).
-// MỤC XXX (rework notebook) — 'asr' thêm ở đây để phân biệt transcript YouTube tự nhận dạng (Gemini
-// ASR fallback, xem youtubeSource.js) với phụ đề THẬT ('text') — cùng vai trò với 'vision' cho trang
-// PDF scan: không phải confidence số thực (source đã có field số cho retrieval ranking ở nơi khác),
-// mà là NHÃN PROVENANCE để citation/UI có thể cảnh báo đúng mức tin cậy, tái dùng CHÍNH allow-list
-// này thay vì tạo field song song (mục LXVI: không duplicate hệ thống đã có).
-// MỤC 2 (v6.22): 2 giá trị 'text-*' là phụ đề THẬT lấy qua thư viện ngoài (youtubei.js/youtube-transcript);
-// thiếu ở đây thì client gửi lại chunk sẽ bị ép thành 'unknown' và mất dấu nguồn gốc.
-const ALLOWED_EXTRACTION_METHODS = ['text', 'vision', 'asr', 'none', 'unknown', 'text-youtubeijs', 'text-youtube-transcript'];
+// MỤC XXX (rework notebook) — 'asr' thêm ở đây để phân biệt transcript YouTube tự nhận dạng với phụ đề
+// THẬT ('text') — cùng vai trò với 'vision' cho trang PDF scan: không phải confidence số thực (source
+// đã có field số cho retrieval ranking ở nơi khác), mà là NHÃN PROVENANCE để citation/UI có thể cảnh
+// báo đúng mức tin cậy, tái dùng CHÍNH allow-list này thay vì tạo field song song (mục LXVI).
+// v6.23: 4 giá trị mới của cơ chế Supadata/Readability/Firecrawl — 'text-supadata' (phụ đề gốc),
+// 'asr-supadata' (Supadata AI nhận dạng, có thể sai), 'text-readability', 'text-firecrawl' (web).
+// GIỮ NGUYÊN giá trị cũ ('asr', 'text-youtubeijs', 'text-youtube-transcript'): nguồn URL người dùng
+// đã thêm TRƯỚC nâng cấp còn nằm trong localStorage với method cũ; xoá khỏi đây thì /api/chat ép chúng
+// thành 'unknown' khi client gửi lại và mất dấu provenance.
+const ALLOWED_EXTRACTION_METHODS = ['text', 'vision', 'asr', 'none', 'unknown', 'text-youtubeijs', 'text-youtube-transcript',
+  'text-supadata', 'asr-supadata', 'text-readability', 'text-firecrawl'];
 const ALLOWED_EXTRACTION_STATUSES = ['ok', 'failed', 'pending', 'placeholder'];
 
 // ---------- BUG-001 (V6): locator theo LOẠI nguồn ----------

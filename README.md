@@ -311,14 +311,15 @@ Chi tiết đầy đủ, bảng kiểm chứng và giới hạn: xem **`HYBRID-V
 - **Biến môi trường**: `PUTER_VISUAL_MODE` (mặc định `client_primary`), `PUTER_VISUAL_DEBUG=true` (log chẩn đoán phía server, không log token/đề bài). Phía client: `?puterDebug=1` hoặc `localStorage['tro-giai:puter-debug']='1'`.
 - **Test**: `npm test` (gồm `hybrid-svg-engine`, `puter-auth-flow`, `chat-route-harness`); E2E trình duyệt thật: `npm run e2e-hybrid` (cần `pip install playwright` + Chromium; SDK Puter được giả lập).
 
-## 12. Nguồn YouTube qua proxy + thư viện dự phòng (v6.22)
+## 12. Nguồn YouTube + Web (v6.23: Supadata, Readability + Firecrawl)
 
-- **Vì sao cần**: nếu deploy trên Vercel/cloud, dải IP datacenter có thể bị YouTube chặn hoặc giới hạn (lỗi kiểu *"Sign in to confirm you're not a bot"* hoặc 429). Khi đó mọi link YouTube — kể cả video có phụ đề thật — rơi về `INCOMPLETE`.
-- **Khai proxy**: đặt `YOUTUBE_PROXY_URL` trong `.env`, nhiều proxy cách nhau bằng dấu phẩy, ví dụ `http://user:pass@host1:8080,socks5://user:pass@host2:1080`. Proxy lỗi/bị chặn sẽ nghỉ 60 giây rồi hệ thống chuyển sang proxy kế tiếp. **Để trống = hành vi cũ 100%** (kết nối thẳng, ghim IP chống SSRF). Dự án không kèm proxy nào; nguồn proxy (dân cư trả phí hay datacenter) là chi phí vận hành bạn tự chọn.
-- **KHÔNG áp dụng cho nguồn Web** (`webSource.js`, URL do người dùng dán): proxy chỉ đi kèm hostname thuộc `youtube.com`/`googlevideo.com`/`youtu.be` (`safeHttp.fetchPinned` từ chối host khác khi có proxy), và `webSource.js` không import bất kỳ module proxy nào (có test khoá). Mở proxy cho URL tuỳ ý sẽ phá giá trị của DNS pinning chống SSRF.
-- **Thứ tự lấy phụ đề**: (1) Innertube tự viết (có/không proxy) → (2) `youtubei.js` → (3) `youtube-transcript` → (4) ASR Gemini (lưới an toàn cuối, không bị chặn theo IP của server). Tắt (2)+(3) bằng `YOUTUBE_FALLBACK_LIB_ENABLED=false`. Mỗi chunk ghi rõ nguồn qua `method` (`text`, `text-youtubeijs`, `text-youtube-transcript`, `asr`).
-- **Không dùng `@distube/ytdl-core`**: trang gói ghi rõ sẽ không còn được bảo trì; (2) và (3) đã phủ, không thêm nợ kỹ thuật có hạn dùng.
-- **Kiểm chứng thật**: `npm test` chỉ dùng proxy giả lập local + mock thư viện (không gọi YouTube thật). Với proxy thật hãy chạy `npm run live-source-check`.
+- **YouTube — một tầng duy nhất: Supadata** (`SUPADATA_API_KEY`). Server gọi `mode:'native'` (phụ đề gốc) trước; chỉ khi video THẬT SỰ không có phụ đề mới gọi `mode:'generate'` (AI nhận dạng lời nói, 2 credit/phút) đúng một lần. Nhờ vậy chunk được stamp đúng `text-supadata` (phụ đề gốc) hoặc `asr-supadata` (có thể sai — giao diện hiện cảnh báo). Video dài trả `jobId` sẽ được poll tới `SUPADATA_TIMEOUT_MS` (mặc định 45 giây, PHẢI ngắn hơn `maxDuration = 60` của `app/api/source/youtube/route.ts` ít nhất 10 giây). Hết quota/key sai/timeout → `INCOMPLETE` trung thực, không gọi generate thêm, không bao giờ suy diễn từ tiêu đề.
+- **Đã gỡ hoàn toàn**: Innertube tự viết, proxy (`YOUTUBE_PROXY_URL`), `youtubei.js`, `youtube-transcript`, ASR Gemini tự chế. Gốc bệnh (IP datacenter Vercel bị YouTube chặn) nay nằm ở phía Supadata. Xoá các biến `YOUTUBE_*` cũ trên Vercel Dashboard nếu còn.
+- **Web — Readability + jsdom là chính**: HTML vẫn tải qua `safeHttp.fetchPinned` (DNS-pin chống SSRF, trần byte, redirect thủ công), sau đó `@mozilla/readability` lọc rác; heading `h1–h4` vẫn thành `sectionAnchor` như cũ. Lưu ý Readability tự đổi `<h1>` trong bài thành `<h2>`, nên `sectionLevel` của tiêu đề chính là 2.
+- **Firecrawl — dự phòng, tuỳ chọn** (`FIRECRAWL_API_KEY`, để trống = tắt, không phải lỗi): chỉ chạy khi Readability không bóc được chữ (trang SPA) hoặc trang trả 403/429/503 (chặn bot) — và CHỈ sau khi URL đã qua lớp chặn SSRF (URL bị chặn nội bộ không bao giờ được gửi cho bên thứ ba). Không có key hoặc Firecrawl lỗi → `INCOMPLETE`/`no_readable_text`.
+- **`extractionMethod` mỗi chunk**: YouTube `text-supadata` | `asr-supadata`; Web `text-readability` | `text-firecrawl`. Giá trị cũ (`asr`, `text-youtubeijs`, `text-youtube-transcript`) vẫn được `validators.js` chấp nhận để nguồn đã lưu trong `localStorage` không mất dấu provenance.
+- **Cache**: `EXTRACTOR_VERSION` đã bump (`yt-transcript-v4-supadata`, `web-extract-v3-readability`) nên cache cũ tự miss.
+- **Kiểm chứng**: `npm test` dùng client giả (không gọi mạng thật) — xem `test/source-supadata-readability.test.js`. Kiểm chứng thật cần key: `npm run live-source-check` hoặc dán thử URL trên giao diện.
 
 ## 13. Trạng thái xếp hàng, chống gửi trùng, đo độ trễ (v6.22)
 

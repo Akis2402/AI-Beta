@@ -4,15 +4,13 @@ import { EventEmitter } from 'events';
 import { createRequire } from 'node:module';
 
 // ============================================================================================
-// V5.2 fix — tắt Turbopack static analysis của `server/app.js`
+// V5.2 — ghi chú về `createRequire` (ĐÃ SỬA NỘI DUNG SAI: bản cũ nói nó "tắt Turbopack static analysis")
 // ============================================================================================
-// Trước đây dùng `require('../../server/app')` — Turbopack thấy CommonJS require với đường dẫn
-// tĩnh nên trảng hải toàn bộ cây import của server/app.js vào graph, rồi báo TP1103 vì pattern
-// `const app = express(); app.set(...)` không thể truy vết tĩnh (helmet/compression/express
-// có side-effect setter không thể tĩnh hóa). Dùng `createRequire` từ node:module để tạo một
-// Node CommonJS require ở runtime: Turbopack coi call này là opaque (không biết URL nào sẽ
-// được tải), bỏ qua static analysis → không còn warning. Runtime vẫn resolve bình thường vì
-// Node ESM hỗ trợ createRequire chuẩn từ v14.
+// Đo thực tế (Next 16.3.8, dự án tối thiểu cùng mẫu `createRequire(import.meta.url)` + `nodeRequire('../server/app')`):
+// Turbopack VẪN nhận ra đây là require tĩnh, vẫn đưa server/app.js vào graph và vẫn phân tích nó. Cảnh báo
+// TP1103 chỉ biến mất khi server/app.js KHÔNG viết `app.set('trust proxy', <literal>)` (xem server/app.js).
+// Đừng "sửa" bằng `/* turbopackIgnore: true */` tại require này: đã thử, cảnh báo mất nhưng file tracing KHÔNG còn
+// đưa express/compression/server/** vào bundle -> production sẽ "Cannot find module" khi deploy Vercel.
 // ============================================================================================
 
 const nodeRequire = createRequire(import.meta.url);

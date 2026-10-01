@@ -32,7 +32,7 @@
      'self' — không cần SRI (không còn nguy cơ MITM ở CDN thứ 3), không còn timeout/DNS/content-
      blocker/Safari-cache-bug nào có thể chặn được nữa. Version pin y hệt trước (KaTeX 0.16.9). -->
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/css/styles.22279d2ee4.css">
+<link rel="stylesheet" href="/css/styles.eefa8e4a0d.css">
 </head>
 <body>
 <div id="app">
@@ -46,17 +46,17 @@
 
     <button id="newChatBtn" data-i18n="chat.newChat">＋ Buổi học mới</button>
 
-    <div id="sidebarTabs">
+    <div id="sidebarTabs" role="tablist" data-i18n-aria-label="tab.listLabel" aria-label="Mục thanh bên">
       <span class="tab-indicator" id="sbTabIndicator" aria-hidden="true"></span>
-      <button class="sbtab active" data-tab="sources" data-i18n-title="tab.sourcesTitle" title="Nguồn tài liệu"><span class="sbtab-ic" id="icSources"></span><span data-i18n="tab.sources">Nguồn</span></button>
-      <button class="sbtab" data-tab="history" data-i18n-title="tab.historyTitle" title="Lịch sử học"><span class="sbtab-ic" id="icHistory"></span><span data-i18n="tab.history">Lịch sử</span></button>
-      <button class="sbtab" data-tab="notes" data-i18n-title="tab.notesTitle" title="Ghi chú"><span class="sbtab-ic" id="icNotes"></span><span data-i18n="tab.notes">Ghi chú</span></button>
-      <button class="sbtab" data-tab="formulas" data-i18n-title="tab.formulasTitle" title="Danh mục công thức"><span class="sbtab-ic" id="icFormulas"></span><span data-i18n="tab.formulas">Công thức</span></button>
+      <button class="sbtab active" role="tab" id="tab-sources" aria-selected="true" aria-controls="panel-sources" data-tab="sources" data-i18n-title="tab.sourcesTitle" title="Nguồn tài liệu"><span class="sbtab-ic" id="icSources"></span><span data-i18n="tab.sources">Nguồn</span></button>
+      <button class="sbtab" role="tab" id="tab-history" aria-selected="false" aria-controls="panel-history" data-tab="history" data-i18n-title="tab.historyTitle" title="Lịch sử học"><span class="sbtab-ic" id="icHistory"></span><span data-i18n="tab.history">Lịch sử</span></button>
+      <button class="sbtab" role="tab" id="tab-notes" aria-selected="false" aria-controls="panel-notes" data-tab="notes" data-i18n-title="tab.notesTitle" title="Ghi chú"><span class="sbtab-ic" id="icNotes"></span><span data-i18n="tab.notes">Ghi chú</span></button>
+      <button class="sbtab" role="tab" id="tab-formulas" aria-selected="false" aria-controls="panel-formulas" data-tab="formulas" data-i18n-title="tab.formulasTitle" title="Danh mục công thức"><span class="sbtab-ic" id="icFormulas"></span><span data-i18n="tab.formulas">Công thức</span></button>
     </div>
 
     <div id="sidebarPanels">
 
-      <div class="sbpanel active" id="panel-sources">
+      <div class="sbpanel active" id="panel-sources" role="tabpanel" aria-labelledby="tab-sources">
         <div id="sourcesPanel">
           <div class="sp-head">
             <h2><span data-i18n="sources.title">Tài liệu học tập</span><span class="sp-count" id="sourceCount"></span></h2>
@@ -69,22 +69,22 @@
             <div id="sourceSearchResults" class="src-search-results" hidden></div>
           </div>
           <div id="dropHint"><span class="drop-ic" id="icDrop"></span><br><b data-i18n="sources.dropTitle">Thả tài liệu vào đây</b><br><span class="drop-sub" data-i18n="sources.dropSub">PDF, DOCX hoặc TXT — hoặc bấm "Thêm nguồn"</span></div>
-          <input type="file" id="fileInput" multiple accept=".pdf,.docx,.txt">
+          <input type="file" id="fileInput" data-i18n-aria-label="sources.fileInputLabel" aria-label="Chọn tài liệu PDF, DOCX hoặc TXT" multiple accept=".pdf,.docx,.txt">
           <div id="emptySources" data-i18n="sources.empty">Chưa có nguồn nào. Thêm tài liệu để AI dùng làm căn cứ trả lời và trích dẫn chính xác.</div>
           <ul id="sourceList"></ul>
         </div>
       </div>
 
-      <div class="sbpanel" id="panel-history">
+      <div class="sbpanel" id="panel-history" role="tabpanel" aria-labelledby="tab-history">
         <div class="panel-head">
           <h2 data-i18n="history.title">Lịch sử học</h2>
         </div>
-        <select id="historySubjectFilter" class="hist-subject-filter"></select>
+        <select id="historySubjectFilter" class="hist-subject-filter" data-i18n-aria-label="history.filterSubject" aria-label="Lọc theo môn học"></select>
         <ul id="historyList" class="side-list"></ul>
         <div id="historyEmpty" class="panel-empty" data-i18n="history.empty">Chưa có cuộc trò chuyện nào được lưu. Mọi cuộc trò chuyện của bạn sẽ tự động xuất hiện ở đây.</div>
       </div>
 
-      <div class="sbpanel" id="panel-notes">
+      <div class="sbpanel" id="panel-notes" role="tabpanel" aria-labelledby="tab-notes">
         <div class="panel-head">
           <h2 data-i18n="notes.title">Ghi chú đã lưu</h2>
         </div>
@@ -92,7 +92,7 @@
         <div id="notesEmpty" class="panel-empty" data-i18n-html="notes.empty">Chưa có ghi chú nào. Sau khi AI trả lời, bấm nút <strong>📝 Lưu ghi chú</strong> dưới câu trả lời, viết lại những gì bạn hiểu rồi lưu — ghi chú sẽ xuất hiện ở đây, bấm vào để xem lại đúng câu trả lời đó.</div>
       </div>
 
-      <div class="sbpanel" id="panel-formulas">
+      <div class="sbpanel" id="panel-formulas" role="tabpanel" aria-labelledby="tab-formulas">
         <div class="panel-head">
           <h2 data-i18n="formulas.title">Công thức cốt lõi</h2>
           <span class="panel-sub" id="formulaGradeHint" data-i18n="formulas.gradeHint">Theo khối lớp trong Cài đặt</span>
@@ -141,7 +141,7 @@
         <div id="chatBar">
           <textarea id="qInput" rows="1" data-i18n-placeholder="input.placeholder" placeholder="Nhập câu hỏi, dán đề bài, dán ảnh (Ctrl+V), kéo-thả ảnh hoặc tải ảnh từ máy…"></textarea>
           <div id="chatBarTools">
-            <input type="file" id="imageInput" accept="image/*" multiple style="display:none;">
+            <input type="file" id="imageInput" data-i18n-aria-label="chat.imageInputLabel" aria-label="Đính kèm ảnh" accept="image/*" multiple style="display:none;">
             <button id="attachBtn" type="button" class="tool-btn icon-only" data-i18n-title="upload.imageBtnTitle" data-i18n-aria-label="upload.imageBtn" title="Tải ảnh đề bài từ máy (hoặc kéo-thả / dán ảnh bằng Ctrl+V)" aria-label="Tải ảnh đề bài"></button>
             <button id="micBtn" type="button" class="tool-btn icon-only" data-i18n-title="voice.micTitle" data-i18n-aria-label="voice.micAria" title="Nhập câu hỏi bằng giọng nói" aria-label="Nhập câu hỏi bằng giọng nói" aria-pressed="false"></button>
             <div id="subjectBtnWrap">
@@ -175,10 +175,10 @@
 </div>
 
 <div id="settingsOverlay">
-  <div id="settingsModal">
+  <div id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
     <div class="set-head">
-      <h2><span class="modal-ic" id="icSettingsModal"></span><span data-i18n="settings.title">Cài đặt học tập</span></h2>
-      <button class="set-close" id="settingsCloseBtn">✕</button>
+      <h2 id="settingsTitle"><span class="modal-ic" id="icSettingsModal"></span><span data-i18n="settings.title">Cài đặt học tập</span></h2>
+      <button class="set-close" id="settingsCloseBtn" type="button" data-i18n-aria-label="a11y.closeDialog" aria-label="Đóng hộp thoại">✕</button>
     </div>
     <p class="set-subtitle" data-i18n="settings.subtitle">Cá nhân hóa cách Trợ Giải hỗ trợ bạn</p>
 
@@ -303,10 +303,10 @@
 </div>
 
 <div id="noteOverlay">
-  <div id="noteModal">
+  <div id="noteModal" role="dialog" aria-modal="true" aria-labelledby="noteTitle">
     <div class="set-head">
-      <h2><span class="modal-ic" id="icNoteModal"></span><span data-i18n="note.title">Ghi chú của bạn</span></h2>
-      <button class="set-close" id="noteCloseBtn">✕</button>
+      <h2 id="noteTitle"><span class="modal-ic" id="icNoteModal"></span><span data-i18n="note.title">Ghi chú của bạn</span></h2>
+      <button class="set-close" id="noteCloseBtn" type="button" data-i18n-aria-label="a11y.closeDialog" aria-label="Đóng hộp thoại">✕</button>
     </div>
     <div class="note-modal-body">
       <div class="note-modal-q-label" data-i18n="note.question">Câu hỏi</div>
@@ -325,10 +325,10 @@
 </div>
 
 <div id="practiceOverlay">
-  <div id="practiceModal">
+  <div id="practiceModal" role="dialog" aria-modal="true" aria-labelledby="practiceTitle">
     <div class="set-head">
-      <h2><span class="modal-ic" id="icPracticeModal"></span><span data-i18n="practice.title">Luyện tập</span></h2>
-      <button class="set-close" id="practiceCloseBtn">✕</button>
+      <h2 id="practiceTitle"><span class="modal-ic" id="icPracticeModal"></span><span data-i18n="practice.title">Luyện tập</span></h2>
+      <button class="set-close" id="practiceCloseBtn" type="button" data-i18n-aria-label="a11y.closeDialog" aria-label="Đóng hộp thoại">✕</button>
     </div>
     <div class="set-section">
       <div class="set-row">
@@ -356,9 +356,9 @@
   </div>
 </div>
 
-<aside id="recommendPanel">
+<aside id="recommendPanel" role="dialog" aria-modal="false" aria-labelledby="recommendTitle">
   <div class="rec-head">
-    <span class="rec-head-title"><span class="modal-ic" id="icRecommend"></span><span data-i18n="recommend.title">Đề xuất ôn tập</span></span>
+    <span class="rec-head-title" id="recommendTitle"><span class="modal-ic" id="icRecommend"></span><span data-i18n="recommend.title">Đề xuất ôn tập</span></span>
     <button id="recommendCloseBtn" class="rec-close" data-i18n-title="action.close" title="Đóng">✕</button>
   </div>
   <div id="recommendTopic" class="rec-topic"></div>
@@ -370,9 +370,9 @@
 <!-- Khung "Flashcard ôn tập" — popup dạng khung nổi bên phải, dùng CHUNG cơ chế mở/đóng
      với #recommendPanel ở trên (xem handleFlashcards() trong app.js): mỗi lần tạo flashcard mới,
      khung này tự mở và hiển thị bộ thẻ vừa tạo, thay vì nhúng thẻ ngay dưới câu trả lời như trước. -->
-<aside id="flashcardPanel">
+<aside id="flashcardPanel" role="dialog" aria-modal="false" aria-labelledby="flashcardTitle">
   <div class="rec-head">
-    <span class="rec-head-title"><span class="modal-ic" id="icFlashcardPanel"></span><span data-i18n="flashcard.title">Flashcard ôn tập</span></span>
+    <span class="rec-head-title" id="flashcardTitle"><span class="modal-ic" id="icFlashcardPanel"></span><span data-i18n="flashcard.title">Flashcard ôn tập</span></span>
     <button id="flashcardCloseBtn" class="rec-close" data-i18n-title="action.close" title="Đóng">✕</button>
   </div>
   <div id="flashcardTopic" class="rec-topic"></div>
@@ -441,9 +441,9 @@
      nội dung khác nhau -> an toàn cache "immutable" vĩnh viễn (xem vercel.json). File nguồn ở đây
      CỐ Ý giữ tên KHÔNG hash (đây là template — build step ghi đè bản có hash vào output deploy,
      KHÔNG commit ngược lại repo). -->
-<script src="/js/i18n/translations.78a5b5bb56.js"></script>
+<script src="/js/i18n/translations.a320c7c654.js"></script>
 <script src="/js/i18n/languageStore.763a541496.js"></script>
-<script src="/js/i18n/i18n.20d12a2b84.js"></script>
+<script src="/js/i18n/i18n.b5e9554990.js"></script>
 <script src="/js/payloadBudget.c9bd656bea.js"></script>
 <script src="/js/storage.1d27028cd0.js"></script>
 <script src="/js/imageStorage.7f0da94f2b.js"></script>
@@ -458,8 +458,8 @@
 <script src="/js/visual/puterVisualManager.6162700d9b.js"></script>
 <script src="/js/ui/puterAuthUI.5384d8ecb0.js"></script>
 <script src="/js/tasks/conversationTaskManager.1eb7e20b62.js"></script>
-<script src="/js/tasks/backgroundTaskUI.915a2a6d32.js"></script>
+<script src="/js/tasks/backgroundTaskUI.066f8e94c2.js"></script>
 <script src="/js/voiceInput.66463c87c2.js"></script>
-<script src="/js/app.0d38bf67fa.js"></script>
+<script src="/js/app.a4ffb119a4.js"></script>
 </body>
 </html>

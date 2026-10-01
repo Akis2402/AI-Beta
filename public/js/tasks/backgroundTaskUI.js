@@ -99,6 +99,9 @@
     btnEl.classList.toggle('has-running', running > 0);
     btnEl.classList.toggle('has-unseen', unseen > 0);
     btnEl.style.display = (total > 0 || panelOpen) ? '' : 'none';
+    // CSS (<=419px) cho tiêu đề topbar xuống hàng riêng khi nút này hiện — dùng class thay vì :has() để chạy cả trình duyệt cũ.
+    const topbarEl = btnEl.closest('#topbar');
+    if (topbarEl) topbarEl.classList.toggle('has-bgtask', total > 0 || panelOpen);
     if (badgeEl) {
       badgeEl.textContent = total ? String(total) : '';
       badgeEl.style.display = total ? '' : 'none';

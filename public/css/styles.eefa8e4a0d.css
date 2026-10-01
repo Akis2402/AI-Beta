@@ -65,6 +65,19 @@
   --motion-emphasis:480ms;
   --ease-standard:var(--ease);
   --ease-emphasized:cubic-bezier(.22,1,.36,1);
+
+  /* ---------- v2 (đại tu UI/animation) ----------
+     3 bổ sung có chủ đích, KHÔNG thay thế 6 token motion/ease ở trên:
+       --motion-instant  phản hồi vi mô NHANH HƠN cả --motion-fast — dành cho press-state tức thời
+                         (nút bấm, tick chọn) nơi 130ms đã bắt đầu cảm thấy "có độ trễ".
+       --ease-bounce     easing kiểu lò xo (overshoot nhẹ) — CHỈ dùng cho khoảnh khắc ăn mừng/thành
+                         công có chủ đích (hoàn thành bộ flashcard, badge...), không dùng cho thao
+                         tác thường ngày (xem mục "Sự thú vị đúng lúc" của brief nâng cấp UI).
+       --stagger-step    nhịp so le tường minh — trước đây hardcode "18ms" rải rác ở nhiều keyframe
+                         animation-delay; gom về đây để chỉnh nhịp so le toàn site ở 1 chỗ. */
+  --motion-instant:80ms;
+  --ease-bounce:cubic-bezier(.34,1.56,.64,1);
+  --stagger-step:18ms;
 }
 *{box-sizing:border-box;}
 /* Accessibility: focus-visible rõ ràng cho toàn hệ thống, không phá layout hiện có */
@@ -286,7 +299,7 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
      Vào khung hình nhẹ nhàng, so le theo thứ tự (biến --i do JS gán) — 1 nhịp duy nhất lúc danh
      sách dựng lại, không lặp lại khi hover. */
   animation:hist-card-in .32s var(--ease) both;
-  animation-delay:calc(var(--i, 0) * 18ms);
+  animation-delay:calc(var(--i, 0) * var(--stagger-step));
 }
 @keyframes hist-card-in{from{opacity:0;transform:translateY(4px) scale(.98);}to{opacity:1;transform:translateY(0) scale(1);}}
 .hist-card:hover{background:var(--sidebar-2);transform:translateX(1px);}
@@ -311,6 +324,17 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .hist-del:active{transform:scale(.92);}
 /* Xoá 1 thẻ: co gọn mượt thay vì biến mất đột ngột (JS thêm .hist-card--leaving trước khi remove) */
 .hist-card.hist-card--leaving{animation:none;transition:opacity .18s var(--ease),transform .18s var(--ease),max-height .22s var(--ease) .05s,margin .22s var(--ease) .05s,padding .22s var(--ease) .05s;opacity:0;transform:translateX(-6px) scale(.97);max-height:0;margin:0;padding-top:0;padding-bottom:0;}
+/* MỤC 5.3 (đại tu UI/animation): nhân rộng đúng pattern trên cho MỌI item danh sách có thể xoá
+   trong toàn app — ghi chú (.note-card), nguồn (.source-card), bộ flashcard đã lưu (.flash-set-card)
+   — trước đây chỉ lịch sử hội thoại có, 3 loại còn lại biến mất tức thì khi bấm xoá. Class riêng
+   ".card--leaving" (khác tên ".hist-card--leaving" để không đụng CSS đặc thù của lịch sử) nhưng
+   CÙNG giá trị hoạt ảnh hệt như trên — giữ đúng nguyên tắc "1 chữ ký chuyển động nhất quán", không
+   tự sáng tác biến thể khác cho từng loại thẻ. */
+.note-card.card--leaving,.source-card.card--leaving,.flash-set-card.card--leaving{
+  animation:none;pointer-events:none;
+  transition:opacity .18s var(--ease),transform .18s var(--ease),max-height .22s var(--ease) .05s,margin .22s var(--ease) .05s,padding .22s var(--ease) .05s;
+  opacity:0;transform:translateX(-6px) scale(.97);max-height:0;margin:0;padding-top:0;padding-bottom:0;
+}
 
 /* ---------- Ghi chú ---------- */
 /* Ghi chú = trang vở kỹ thuật số: viền trái nổi bật khi hover + nâng nhẹ như giở 1 trang note */
@@ -320,15 +344,19 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 /* So le nhẹ khi danh sách dựng lại — 10 item đầu mỗi lần render, item sau đó vào cùng lúc (tránh
    chờ lâu với list dài). Áp dụng chung cho note-card/source-card/formula-card. */
 .note-card:nth-child(1),.source-card:nth-child(1),.formula-card:nth-child(1){animation-delay:0ms}
-.note-card:nth-child(2),.source-card:nth-child(2),.formula-card:nth-child(2){animation-delay:16ms}
-.note-card:nth-child(3),.source-card:nth-child(3),.formula-card:nth-child(3){animation-delay:32ms}
-.note-card:nth-child(4),.source-card:nth-child(4),.formula-card:nth-child(4){animation-delay:48ms}
-.note-card:nth-child(5),.source-card:nth-child(5),.formula-card:nth-child(5){animation-delay:64ms}
-.note-card:nth-child(6),.source-card:nth-child(6),.formula-card:nth-child(6){animation-delay:80ms}
-.note-card:nth-child(7),.source-card:nth-child(7),.formula-card:nth-child(7){animation-delay:96ms}
-.note-card:nth-child(8),.source-card:nth-child(8),.formula-card:nth-child(8){animation-delay:112ms}
-.note-card:nth-child(9),.source-card:nth-child(9),.formula-card:nth-child(9){animation-delay:128ms}
-.note-card:nth-child(n+10){animation-delay:144ms}
+.note-card:nth-child(2),.source-card:nth-child(2),.formula-card:nth-child(2){animation-delay:calc(var(--stagger-step) * 1)}
+.note-card:nth-child(3),.source-card:nth-child(3),.formula-card:nth-child(3){animation-delay:calc(var(--stagger-step) * 2)}
+.note-card:nth-child(4),.source-card:nth-child(4),.formula-card:nth-child(4){animation-delay:calc(var(--stagger-step) * 3)}
+.note-card:nth-child(5),.source-card:nth-child(5),.formula-card:nth-child(5){animation-delay:calc(var(--stagger-step) * 4)}
+.note-card:nth-child(6),.source-card:nth-child(6),.formula-card:nth-child(6){animation-delay:calc(var(--stagger-step) * 5)}
+.note-card:nth-child(7),.source-card:nth-child(7),.formula-card:nth-child(7){animation-delay:calc(var(--stagger-step) * 6)}
+.note-card:nth-child(8),.source-card:nth-child(8),.formula-card:nth-child(8){animation-delay:calc(var(--stagger-step) * 7)}
+.note-card:nth-child(9),.source-card:nth-child(9),.formula-card:nth-child(9){animation-delay:calc(var(--stagger-step) * 8)}
+/* FIX nhất quán (mục 8 brief nâng cấp UI — "nhất quán hơn là mới lạ"): trước đây CHỈ .note-card có
+   catch-all cho item thứ 10 trở đi (144ms cố định) — .source-card/.formula-card không có, nên item
+   10+ ở 2 danh sách đó rơi về animation-delay mặc định 0ms, vào cùng lúc thay vì tiếp nối đúng nhịp
+   so le như phần đầu danh sách. Bổ sung để cả 3 danh sách hành xử giống nhau. */
+.note-card:nth-child(n+10),.source-card:nth-child(n+10),.formula-card:nth-child(n+10){animation-delay:calc(var(--stagger-step) * 8)}
 .note-q{font-size:12.5px;font-weight:600;color:var(--sidebar-text);margin-bottom:4px;line-height:1.4;}
 .note-a{font-size:11.5px;color:var(--sidebar-muted);line-height:1.55;white-space:pre-wrap;}
 .note-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--sidebar-rule);}
@@ -443,9 +471,10 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
   position:fixed;top:76px;right:16px;width:302px;max-height:calc(100vh - 96px);
   background:var(--paper-3);border:1px solid var(--rule);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
   display:flex;flex-direction:column;overflow:hidden;z-index:35;
-  transform:translateX(calc(100% + 32px));opacity:0;pointer-events:none;transition:transform .22s ease,opacity .22s ease;
+  transform:translateX(calc(100% + 32px)) scale(.97);opacity:0;pointer-events:none;
+  transition:transform var(--motion-smooth) var(--ease-emphasized),opacity var(--motion-smooth) var(--ease-emphasized);
 }
-#recommendPanel.open{transform:translateX(0);opacity:1;pointer-events:auto;}
+#recommendPanel.open{transform:translateX(0) scale(1);opacity:1;pointer-events:auto;}
 .rec-head{display:flex;align-items:center;justify-content:space-between;padding:13px 15px;border-bottom:1px solid var(--rule);flex-shrink:0;}
 .rec-head-title{font-family:var(--font-display);font-size:13.5px;font-weight:600;color:var(--text);}
 .rec-close{background:var(--paper-2);border:1px solid var(--rule);border-radius:var(--r-sm);width:25px;height:25px;cursor:pointer;font-size:11px;color:var(--text);flex-shrink:0;}
@@ -470,9 +499,10 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
   position:fixed;top:76px;left:16px;width:302px;max-height:calc(100vh - 96px);
   background:var(--paper-3);border:1px solid var(--rule);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
   display:flex;flex-direction:column;overflow:hidden;z-index:35;
-  transform:translateX(calc(-100% - 32px));opacity:0;pointer-events:none;transition:transform .22s ease,opacity .22s ease;
+  transform:translateX(calc(-100% - 32px)) scale(.97);opacity:0;pointer-events:none;
+  transition:transform var(--motion-smooth) var(--ease-emphasized),opacity var(--motion-smooth) var(--ease-emphasized);
 }
-#flashcardPanel.open{transform:translateX(0);opacity:1;pointer-events:auto;}
+#flashcardPanel.open{transform:translateX(0) scale(1);opacity:1;pointer-events:auto;}
 @media (max-width:760px){
   #flashcardPanel{top:auto;bottom:0;left:0;right:0;width:auto;max-height:62vh;border-radius:var(--r-lg) var(--r-lg) 0 0;
     transform:translateY(calc(100% + 20px));}
@@ -518,33 +548,7 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .gen-error-retry:active{transform:scale(.98);}
 .gen-error-retry:disabled{opacity:.7;cursor:wait;}
 
-@media (max-width:760px){
-  /* Drawer trượt bằng transform (GPU-friendly) thay vì animate left — tránh layout thrashing khi mở/đóng. */
-  #sidebar{position:fixed;left:0;top:0;bottom:0;z-index:20;transform:translateX(-100%);transition:transform var(--motion-smooth) var(--ease-emphasized);box-shadow:var(--shadow-lg);width:88vw;max-width:320px;min-height:0;}
-  #sidebar.open{transform:translateX(0);}
-  #menuBtn{display:inline-flex !important;}
-  #closeSidebarBtn{display:block;}
-  #sidebarOverlay{display:block;position:fixed;inset:0;background:rgba(10,10,16,.5);z-index:19;opacity:0;visibility:hidden;pointer-events:none;transition:opacity var(--motion-normal) var(--ease-standard),visibility 0s linear var(--motion-normal);}
-  #sidebarOverlay.show{opacity:1;visibility:visible;pointer-events:auto;transition:opacity var(--motion-normal) var(--ease-standard);}
-  .msg-row{padding:0 14px;}
-  #topbar{padding:12px 14px;}
-  #topbar .title{font-size:14px;max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  #topbar .right{gap:4px;}
-  .grade-badge{display:none;}
-  #topbar .status{font-size:0;gap:0;margin-right:2px;}
-  .iconbtn{width:30px;height:30px;}
-  #composer{padding:10px 12px calc(14px + env(safe-area-inset-bottom));}
-  .study-actions{gap:6px;}
-  .study-btn{height:30px;padding:0 9px;font-size:11.5px;}
-  .study-btn span{display:none;}
-  .study-btn svg{width:15px;height:15px;}
-  .detail-btn{width:100%;justify-content:center;font-size:12.5px;padding:11px 14px;}
-  #thinkPopover{width:min(280px,80vw);}
-}
-@media (max-width:420px){
-  #settingsModal{max-height:92vh;border-radius:var(--r-lg) var(--r-lg) 0 0;position:fixed;bottom:0;left:0;right:0;max-width:100%;}
-  #settingsOverlay.show{align-items:flex-end;padding:0;}
-}
+/* (P1) Khối @media 760px/420px đã chuyển xuống cuối file — xem 'MOBILE / TOUCH OVERRIDES'. */
 
 /* ---------- Main ---------- */
 #main{
@@ -681,6 +685,48 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .stream-text.typing-cursor::after{content:'▍';display:inline-block;margin-left:1px;color:var(--primary);animation:blink 1s step-start infinite;}
 @keyframes blink{50%{opacity:0;}}
 
+/* ---------- 5.2 (đại tu UI/animation): mỗi đoạn (delta) SSE mới hiện dần thay vì "nhảy chữ" ----------
+   append(delta) trong app.js giờ bọc MỖI đoạn mới vào 1 <span class="stream-chunk"> thay vì ghi đè
+   textContent (xem startStreamingPreview()) — animation chỉ chạy 1 lần lúc đoạn đó xuất hiện, các
+   đoạn đã hiện trước đó không animate lại (chỉ đúng đoạn mới, giữ đúng "chuyển động có mục đích").
+   display:inline-block để transform áp dụng được (transform trên inline thuần không đáng tin cậy ở
+   mọi engine) nhưng vẫn xuống dòng tự nhiên vì mỗi span chỉ chứa 1 đoạn ngắn, không phá pre-wrap. */
+.stream-chunk{display:inline-block;animation:chunk-in var(--motion-fast) var(--ease-standard) both;}
+@keyframes chunk-in{from{opacity:0;transform:translateY(3px);}to{opacity:1;transform:translateY(0);}}
+
+/* ---------- Skeleton phản ánh đúng nội dung sắp tới (mục 5.2) ----------
+   Trước đây "đang tạo hình minh hoạ" chỉ là 1 dòng chữ trần (.visual-note.visual-loading) — không
+   truyền tải được HÌNH DẠNG nội dung sắp xuất hiện. .visual-skel là 1 PHẦN TỬ ANH EM ĐỘC LẬP được
+   chèn NGAY TRƯỚC .visual-note.visual-loading trong renderVisuals() (app.js) — KHÔNG lồng vào bên
+   trong nó — vì test/visual-upgrade.test.js đã neo cứng .visual-note.visual-loading phải giữ
+   nguyên dạng "1 dòng text phẳng" y hệt code gốc (note.textContent === 'visual.status.ai', DOM giả
+   dùng trong test không parse innerHTML nên không thể lồng cấu trúc con vào bên trong nó được).
+   Cùng tỉ lệ khung với thẻ ảnh thật (.visual-card-image) nên khi ảnh thật thay thế vào, không giật
+   layout (CLS). Shimmer dùng background-position (rẻ, GPU-friendly hơn animate background-color). */
+.visual-skel{
+  aspect-ratio:4/3;max-height:320px;margin-bottom:8px;position:relative;overflow:hidden;
+  border:1px solid var(--rule);border-radius:var(--r-md);
+  background-color:var(--paper-2);
+  background-image:linear-gradient(100deg,var(--paper-2) 30%,var(--paper-3) 45%,var(--paper-2) 60%);
+  background-size:250% 100%;
+  display:flex;align-items:center;justify-content:center;
+  animation:skel-shimmer 1.6s ease-in-out infinite,fadeInUp var(--motion-smooth) var(--ease-standard) both;
+}
+.visual-skel-icon{opacity:.35;line-height:0;}
+.visual-skel-icon svg{width:34px;height:34px;color:var(--muted);}
+/* Giai đoạn "đang tạo" (job đã dispatch, có visualId) khác "đang xếp hàng" (chưa có job) — chỉ khác
+   MÀU chấm góc (không đổi chữ, vì chữ caption dùng chung .visual-note.visual-loading bên dưới, giữ
+   nguyên đúng key canonical mà test đã neo) — KHÔNG bịa thêm trạng thái nào ngoài 2 cái app.js đã
+   thực sự phân biệt được (xem onVisualPending vs onVisualRequest trong app.js). */
+.visual-skel::after{content:'';position:absolute;top:9px;right:9px;width:7px;height:7px;border-radius:50%;background:var(--primary);animation:hist-pulse 1.2s ease-in-out infinite;}
+.visual-skel.is-generating::after{background:var(--amber);}
+@keyframes skel-shimmer{0%{background-position:200% 0;}100%{background-position:-50% 0;}}
+
+@media (prefers-reduced-motion:reduce){
+  .visual-skel{animation:none;background-image:none;}
+  .visual-skel::after{animation:none;}
+}
+
 /* Khung cho khối vẽ nhúng trong câu trả lời. Sau đợt chuyển sang AI image-first, khối này CHỈ còn
    phục vụ: (a) scene 3D tương tác Three.js (.draw-wrap-3d), (b) ghi chú cho khối ```plot/```shape
    kiểu cũ (.draw-wrap-legacy). Hình minh hoạ 2D tĩnh nay là ảnh AI, nằm trong .visual-card. */
@@ -801,14 +847,42 @@ body,.msg-ai .content,#settingsModal,#noteModal{color:var(--text);}
 .flash-pager button{background:var(--paper-2);border:1px solid var(--rule);color:var(--text);border-radius:var(--r-sm);width:27px;height:27px;cursor:pointer;font-size:13px;}
 .flash-pager button:hover:not(:disabled){border-color:var(--primary);}
 .flash-pager button:disabled{opacity:.35;cursor:default;}
-.flash-card{
-  border:1px solid var(--rule);border-radius:var(--r-md);background:var(--paper-2);min-height:124px;padding:22px;
-  display:flex;align-items:center;justify-content:center;text-align:center;cursor:pointer;position:relative;transition:background-color .15s;
+/* ---------- MỤC 5.5 (đại tu UI/animation): Flashcard lật 3D thật ----------
+   .flash-card = khung ngoài (perspective). .flash-card-inner là khối THẬT SỰ xoay (preserve-3d).
+   2 mặt xếp CHỒNG lên nhau bằng kỹ thuật "CSS Grid stack" (cả 2 cùng grid-area:1/1, đặt trong 1
+   grid có 1 ô duy nhất) — cách này khiến ô lưới (và cả .flash-card-inner) TỰ cao bằng mặt CAO NHẤT
+   trong 2 mặt, không cần position:absolute (vốn sẽ làm mất khả năng tự co giãn theo nội dung, gây
+   cắt chữ với câu hỏi/đáp án dài) và không cần JS đo scrollHeight thủ công. Mặt sau xoay sẵn 180deg
+   + backface-visibility:hidden nên khi cả khối xoay đủ 180deg, đúng mặt sau lộ ra đúng chiều. */
+.flash-card{min-height:124px;cursor:pointer;perspective:1200px;}
+.flash-card-inner{
+  display:grid;transform-style:preserve-3d;
+  transition:transform var(--motion-emphasis) var(--ease-emphasized);
 }
-.flash-card .qlabel{position:absolute;top:11px;left:15px;font-family:var(--font-mono);font-size:10px;color:var(--muted);}
-.flash-card .txt{font-size:14.5px;line-height:1.6;color:var(--text);max-width:90%;}
-.flash-card.showing-a{background:var(--highlight);}
-.flash-card.showing-a .txt{color:var(--primary-dark);font-weight:600;}
+.flash-card.flipped .flash-card-inner{transform:rotateY(180deg);}
+.flash-face{
+  grid-area:1/1;min-height:124px;border:1px solid var(--rule);border-radius:var(--r-md);background:var(--paper-2);padding:22px;
+  display:flex;align-items:center;justify-content:center;text-align:center;position:relative;backface-visibility:hidden;
+}
+.flash-face-q .qlabel,.flash-face-a .qlabel{position:absolute;top:11px;left:15px;font-family:var(--font-mono);font-size:10px;color:var(--muted);}
+.flash-face .txt{font-size:14.5px;line-height:1.6;color:var(--text);max-width:90%;}
+.flash-face-a{transform:rotateY(180deg);background:var(--highlight);}
+.flash-face-a .txt{color:var(--primary-dark);font-weight:600;}
+/* Khoảnh khắc "hoàn thành bộ thẻ" (mục 5.5 — sự thú vị đúng lúc, dùng --ease-bounce, CHỈ 1 lần khi
+   lật xem đáp án của thẻ cuối, xem setFlipped() trong app.js) — glow xanh lá (--success-tint, cùng
+   token đã dùng cho badge "có câu trả lời mới"/trạng thái sẵn sàng — ngôn ngữ màu "hoàn tất" nhất
+   quán toàn app) + phồng nhẹ rồi trở lại bình thường, không phải hiệu ứng tồn tại vĩnh viễn. */
+.flash-card.flash-complete .flash-card-inner{animation:flash-complete-pulse .55s var(--ease-bounce);}
+@keyframes flash-complete-pulse{
+  0%{box-shadow:0 0 0 0 transparent;}
+  35%{box-shadow:0 0 0 10px var(--success-tint);transform:rotateY(180deg) scale(1.035);}
+  100%{box-shadow:0 0 0 0 transparent;transform:rotateY(180deg) scale(1);}
+}
+@media (prefers-reduced-motion:reduce){
+  .flash-face-a{transform:none;display:none;}
+  .flash-card.flipped .flash-face-q{display:none;}
+  .flash-card.flipped .flash-face-a{display:flex;}
+}
 .flash-progress{text-align:center;font-size:11.5px;color:var(--muted);margin-top:9px;}
 
 /* ---------- Mindmap trực quan ---------- */
@@ -916,33 +990,11 @@ body.mm-lock-scroll{overflow:hidden;}
      3. iOS Safari phóng to trang khi focus vào input có font-size < 16px — làm layout nhảy và
         người dùng phải tự thu nhỏ lại. Ép 16px cho textarea ở màn hình hẹp là cách duy nhất chặn.
 */
-@media (max-width:640px){
-  #chatBarTools{flex-wrap:wrap;gap:8px;row-gap:8px;}
-  /* Vùng chạm 44px nhưng viền vẫn 36px: dùng padding ảo qua ::after để không phình layout. */
-  .tool-btn{height:36px;}
-  .tool-btn.icon-only{width:36px;}
-  .tool-btn::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
-    width:44px;height:44px;border-radius:inherit;}
-  .tool-btn{position:relative;}
-  #sendBtn,#stopBtn{height:40px;padding:0 20px;font-size:13.5px;min-width:112px;}
-  /* Khi hàng công cụ đã xuống dòng, nút gửi chiếm trọn dòng cuối cho dễ bấm bằng ngón cái. */
-  #sendBtn{flex:1 1 auto;justify-content:center;}
-  /* iOS: < 16px là trang tự zoom khi focus. */
-  #qInput{font-size:16px;}
-  #hint{font-size:11.5px;line-height:1.5;}
-  #voiceStatus{font-size:12px;flex-wrap:wrap;}
-  /* Bỏ hiệu ứng nhấc lên khi hover: trên cảm ứng hover bị "dính" sau khi nhả tay. */
-  .tool-btn:hover{transform:none;}
-  #sendBtn:hover:not(:disabled),#stopBtn:hover{transform:none;}
-}
+/* (P1) Khối @media 640px của composer đã chuyển xuống cuối file. */
 
 /* Hình minh hoạ: SVG co theo bề ngang nên chữ trong hình nhỏ dần theo màn hình. Giới hạn chiều cao
    ảnh AI để một hình dọc không chiếm trọn màn hình, và cho phép chạm để mở lightbox như cũ. */
-@media (max-width:640px){
-  .visual-figure{margin-left:0;margin-right:0;}
-  .visual-card-image img{max-height:62vh;object-fit:contain;}
-  .visual-card-head{font-size:13.5px;line-height:1.4;}
-}
+/* (P1) Khối @media 640px của hình minh hoạ đã chuyển xuống cuối file. */
 
 /* ---------- PHẦN D/18: nút microphone (Voice Input) ---------- */
 /* Bốn trạng thái nhìn thấy được: idle (mặc định .tool-btn), recording, processing, error; cộng
@@ -1046,6 +1098,15 @@ body[data-theme="dark"]{
 #sendBtn:hover:not(:disabled){background:var(--primary-dark);transform:translateY(-1px);box-shadow:var(--shadow-md);}
 #sendBtn:active:not(:disabled){transform:translateY(0) scale(.98);}
 #sendBtn:disabled{opacity:.5;cursor:not-allowed;box-shadow:none;}
+/* MỤC 5.4 (đại tu UI/animation): hiệu ứng xác nhận "đã gửi" ngắn — nút Gửi lúc này ĐANG disabled
+   (sendMessage() set disabled=true trước khi gọi setChatStreaming), nên rule dưới đây đặt SAU
+   "#sendBtn:disabled" trong cùng file để thắng theo thứ tự cascade (2 rule specificity bằng nhau:
+   ID + 1 pseudo-class/class), không cần !important. Tick "✓" là ký tự thường, không phải icon SVG
+   mới, giữ đúng cách app đang dùng ký tự Unicode trực tiếp (✕ ‹ › ✨ 📘...) thay vì thêm phụ thuộc. */
+#sendBtn.send-confirm{opacity:1;animation:send-confirm-pop var(--motion-fast) var(--ease-bounce) both;}
+#sendBtn.send-confirm::after{content:'✓';margin-left:6px;display:inline-block;animation:send-confirm-tick var(--motion-normal) var(--ease-standard) both;}
+@keyframes send-confirm-pop{0%{transform:scale(1);}45%{transform:scale(1.08);}100%{transform:scale(1);}}
+@keyframes send-confirm-tick{from{opacity:0;transform:translateX(-4px);}to{opacity:1;transform:translateX(0);}}
 #stopBtn{
   margin-left:auto;background:#c0392b;color:#fff;border:none;border-radius:var(--r-sm);
   padding:0 17px;height:32px;font-weight:600;font-size:12.5px;cursor:pointer;box-shadow:var(--shadow-sm);
@@ -1624,10 +1685,10 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
   position:fixed;top:76px;right:16px;width:330px;max-height:calc(100vh - 96px);
   background:var(--paper-3);border:1px solid var(--rule);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
   display:flex;flex-direction:column;overflow:hidden;z-index:40;
-  transform:translateX(calc(100% + 32px));opacity:0;pointer-events:none;
-  transition:transform .22s var(--ease),opacity .22s var(--ease);
+  transform:translateX(calc(100% + 32px)) scale(.97);opacity:0;pointer-events:none;
+  transition:transform var(--motion-smooth) var(--ease-emphasized),opacity var(--motion-smooth) var(--ease-emphasized);
 }
-#bgTaskPanel.open{transform:translateX(0);opacity:1;pointer-events:auto;}
+#bgTaskPanel.open{transform:translateX(0) scale(1);opacity:1;pointer-events:auto;}
 .bgtask-note{padding:8px 15px 0;font-size:11px;color:var(--muted);line-height:1.5;flex-shrink:0;}
 .bgtask-list{list-style:none;margin:0;padding:11px 13px 4px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;}
 .bgtask-item{
@@ -1771,3 +1832,106 @@ textarea#ruleInput:focus{outline:none;border-color:var(--primary);}
 .visual-notice-text { text-align: left; opacity: 0.9; }
 .visual-auth-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 640px) { .visual-svg-wrap .visual-svg-img { max-height: 320px; } }
+
+/* =========================================================================
+   MOBILE / TOUCH OVERRIDES — đặt CUỐI FILE có chủ đích.
+   GỐC LỖI (P1): các khối @media này trước đây nằm TRƯỚC rule gốc cùng specificity (#topbar, .iconbtn,
+   #topbar .status, .msg-row, #composer, .study-*, .detail-btn, #thinkPopover, #settingsModal, #sendBtn/
+   #stopBtn, #hint, #voiceStatus, .visual-card-head). Cùng specificity thì rule khai SAU thắng, nên
+   override mobile bị vô hiệu. Quy ước: khối @media override luôn khai SAU rule gốc mà nó ghi đè.
+   ========================================================================= */
+@media (max-width:760px){
+  /* Drawer trượt bằng transform (GPU-friendly) thay vì animate left — tránh layout thrashing khi mở/đóng. */
+  #sidebar{position:fixed;left:0;top:0;bottom:0;z-index:20;transform:translateX(-100%);transition:transform var(--motion-smooth) var(--ease-emphasized);box-shadow:var(--shadow-lg);width:88vw;max-width:320px;min-height:0;}
+  #sidebar.open{transform:translateX(0);}
+  #menuBtn{display:inline-flex !important;}
+  #closeSidebarBtn{display:block;}
+  #sidebarOverlay{display:block;position:fixed;inset:0;background:rgba(10,10,16,.5);z-index:19;opacity:0;visibility:hidden;pointer-events:none;transition:opacity var(--motion-normal) var(--ease-standard),visibility 0s linear var(--motion-normal);}
+  #sidebarOverlay.show{opacity:1;visibility:visible;pointer-events:auto;transition:opacity var(--motion-normal) var(--ease-standard);}
+  .msg-row{padding:0 14px;}
+  #topbar{padding:12px 14px;}
+  #topbar .title{font-size:14px;max-width:44vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  #topbar .left{min-width:0;flex:1 1 auto;}
+  #topbar .right{gap:4px;flex-shrink:0;}
+  .grade-badge{display:none;}
+  #topbar .status{font-size:0;gap:0;margin-right:2px;}
+  .iconbtn{width:30px;height:30px;}
+  #composer{padding:10px 12px calc(14px + env(safe-area-inset-bottom));}
+  .study-actions{gap:6px;}
+  .study-btn{height:30px;padding:0 9px;font-size:11.5px;}
+  .study-btn span{display:none;}
+  .study-btn svg{width:15px;height:15px;}
+  .detail-btn{width:100%;justify-content:center;font-size:12.5px;padding:11px 14px;}
+  #thinkPopover{width:min(280px,80vw);}
+}
+@media (max-width:420px){
+  #settingsModal{max-height:92vh;border-radius:var(--r-lg) var(--r-lg) 0 0;position:fixed;bottom:0;left:0;right:0;max-width:100%;}
+  #settingsOverlay.show{align-items:flex-end;padding:0;}
+}
+
+/* Composer / công cụ chat (từ khối max-width:640px cũ) */
+@media (max-width:640px){
+  #chatBarTools{flex-wrap:wrap;gap:8px;row-gap:8px;}
+  /* Vùng chạm 44px nhưng viền vẫn 36px: dùng padding ảo qua ::after để không phình layout. */
+  .tool-btn{height:36px;}
+  .tool-btn.icon-only{width:36px;}
+  .tool-btn::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    width:44px;height:44px;border-radius:inherit;}
+  .tool-btn{position:relative;}
+  #sendBtn,#stopBtn{height:40px;padding:0 20px;font-size:13.5px;min-width:112px;}
+  /* Khi hàng công cụ đã xuống dòng, nút gửi chiếm trọn dòng cuối cho dễ bấm bằng ngón cái. */
+  #sendBtn{flex:1 1 auto;justify-content:center;}
+  /* iOS: < 16px là trang tự zoom khi focus. */
+  #qInput{font-size:16px;}
+  #hint{font-size:11.5px;line-height:1.5;}
+  #voiceStatus{font-size:12px;flex-wrap:wrap;}
+  /* Bỏ hiệu ứng nhấc lên khi hover: trên cảm ứng hover bị "dính" sau khi nhả tay. */
+  .tool-btn:hover{transform:none;}
+  #sendBtn:hover:not(:disabled),#stopBtn:hover{transform:none;}
+}
+
+/* Hình minh hoạ: giới hạn chiều cao ảnh AI (từ khối max-width:640px cũ) */
+@media (max-width:640px){
+  .visual-figure{margin-left:0;margin-right:0;}
+  .visual-card-image img{max-height:62vh;object-fit:contain;}
+  .visual-card-head{font-size:13.5px;line-height:1.4;}
+}
+
+/* Các nút icon KHÔNG được co lại khi thiếu chỗ (flex-shrink mặc định 1 làm nút 34px bị bóp còn ~30.5px
+   và vẫn tràn) — chỗ hẹp thì nhường cho tiêu đề (ellipsis), không nhường cho nút. */
+#topbar .iconbtn{flex-shrink:0;}
+@media (max-width:479px){
+  #topbar{padding:10px 8px;}
+  #topbar .right{gap:2px;}
+}
+@media (max-width:339px){
+  #topbar .status{display:none;}
+}
+/* Màn hẹp: 6 nút 44px + tiêu đề không vừa 1 hàng (khi nút tác vụ nền hiện, tiêu đề chỉ còn ~22-45px).
+   Tách tiêu đề xuống hàng riêng bằng display:contents để menu / nhóm nút / tiêu đề thành 3 flex-item của #topbar.
+   <=359px: luôn tách. <=419px: chỉ tách khi #topbar có class .has-bgtask (backgroundTaskUI.js bật/tắt cùng lúc
+   với nút #bgTaskBtn) — dùng class thay vì :has() nên chạy mọi trình duyệt. */
+@media (max-width:359px){
+  #topbar{flex-wrap:wrap;row-gap:2px;}
+  #topbar .left{display:contents;}
+  #menuBtn{order:1;}
+  #topbar .right{order:2;margin-left:auto;}
+  #topbar .title-wrap{order:3;flex:1 1 100%;}
+  #topbar .title{max-width:100%;}
+}
+@media (max-width:419px){
+  #topbar.has-bgtask{flex-wrap:wrap;row-gap:2px;}
+  #topbar.has-bgtask .left{display:contents;}
+  #topbar.has-bgtask #menuBtn{order:1;}
+  #topbar.has-bgtask .right{order:2;margin-left:auto;}
+  #topbar.has-bgtask .title-wrap{order:3;flex:1 1 100%;}
+  #topbar.has-bgtask .title{max-width:100%;}
+}
+/* Cảm ứng (P5): vùng chạm thật 44×44 (WCAG 2.5.5 khuyến nghị); sàn 24×24 (WCAG 2.5.8) đã được đảm bảo bởi kích thước gốc (.iconbtn ≥30, .set-close 30, .rec-close 25). */
+@media (pointer:coarse){
+  .iconbtn,.set-close,.rec-close,.chip,.fsubj-tab,#urlSourceAddBtn{min-width:var(--tap);min-height:var(--tap);}
+  #urlSourceInput,#addSourceBtn,#sourceSearchInput,.hist-subject-filter,#ruleAddBtn,#clearHistoryBtn{min-height:var(--tap);}
+  /* Nút công cụ composer (tablet 641-1024px): giữ viền 32px nhưng mở vùng chạm 44px bằng ::after, như khối <=640px. */
+  .tool-btn{position:relative;}
+  .tool-btn::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:44px;height:44px;border-radius:inherit;}
+}

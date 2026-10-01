@@ -178,6 +178,7 @@ window.TRANSLATIONS = {
     'sources.dropTitle': 'Thả tài liệu vào đây',
     'sources.dropSub': 'PDF, DOCX hoặc TXT — hoặc bấm "Thêm nguồn"',
     'sources.empty': 'Chưa có nguồn nào. Thêm tài liệu để AI dùng làm căn cứ trả lời và trích dẫn chính xác.',
+    'sources.searchPlaceholder': 'Tìm trong tài liệu…',
     // PHẦN B11: text panel "Thêm nguồn"/"Nguồn gần đây" — không hard-code, đi qua t().
     'recentSources.title': 'Nguồn gần đây',
     'recentSources.use': 'Dùng lại',
@@ -359,6 +360,10 @@ window.TRANSLATIONS = {
     'a11y.sendButton': 'Nút gửi câu hỏi',
     'a11y.closeDialog': 'Đóng hộp thoại',
     'a11y.chatList': 'Danh sách cuộc trò chuyện',
+    'tab.listLabel': 'Mục thanh bên',
+    'history.filterSubject': 'Lọc theo môn học',
+    'sources.fileInputLabel': 'Chọn tài liệu PDF, DOCX hoặc TXT',
+    'chat.imageInputLabel': 'Đính kèm ảnh',
 
     // ---- provider / puter (PHẦN A-C) ----
     'provider.puterFallback': 'Đang dùng nhà cung cấp dự phòng (Puter) do máy chủ chính bận.',
@@ -526,6 +531,7 @@ window.TRANSLATIONS = {
     'sources.dropTitle': 'Drop documents here',
     'sources.dropSub': 'PDF, DOCX or TXT — or click "Add source"',
     'sources.empty': 'No sources yet. Add documents so the AI can ground its answers and cite them accurately.',
+    'sources.searchPlaceholder': 'Search in documents…',
     'recentSources.title': 'Recent sources',
     'recentSources.use': 'Use again',
     'recentSources.empty': 'No sources used before.',
@@ -693,6 +699,10 @@ window.TRANSLATIONS = {
     'a11y.sendButton': 'Send question button',
     'a11y.closeDialog': 'Close dialog',
     'a11y.chatList': 'Conversation list',
+    'tab.listLabel': 'Sidebar sections',
+    'history.filterSubject': 'Filter by subject',
+    'sources.fileInputLabel': 'Choose a PDF, DOCX or TXT document',
+    'chat.imageInputLabel': 'Attach images',
 
     'provider.puterFallback': 'Using fallback provider (Puter) because the primary server is busy.',
     'provider.puterLoginRequired': 'Puter sign-in is required to use this fallback provider.',

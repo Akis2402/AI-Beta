@@ -1,77 +1,36 @@
 'use strict';
 
 // ============================================================================================
-// PHẦN AO + AP + AQ + CO + FC-11 — NGUỒN YOUTUBE
+// PHẦN AO + AP + AQ + CO + FC-11 — NGUỒN YOUTUBE (v6.23: Supadata, MỘT tầng duy nhất)
 // ============================================================================================
 // Ranh giới quan trọng nhất ở đây KHÔNG phải token mà là TRUNG THỰC: nếu không lấy được transcript
 // thì hệ thống PHẢI nói "chưa đọc được nội dung video", tuyệt đối không dùng tiêu đề/mô tả để suy ra
 // nội dung rồi trình bày như thể đã xem (PHẦN FA). Một câu trả lời bịa nghe rất trôi chảy vẫn là
 // câu trả lời sai.
 //
+// v6.23: bỏ Innertube tự viết + proxy + thư viện ngoài + ASR Gemini tự chế (4 tầng, gốc bệnh là IP
+// datacenter bị YouTube chặn). Nay gọi Supadata: `native` (phụ đề gốc) trước; không có mới gọi
+// `generate` (AI nhận dạng) đúng MỘT lần để còn stamp được 'asr-supadata' cho UI cảnh báo.
+//
 // Về token: transcript 1 giờ ≈ 60–90k ký tự. Gửi nguyên là vô nghĩa khi câu hỏi chỉ cần 2 phút —
 // nên transcript được cắt theo MỐC THỜI GIAN, và retrieval chọn đúng mốc liên quan.
 
-const safeHttp = require('../safeHttp');
 const { contentFingerprint } = require('../queryFingerprint');
 const contentCache = require('./sourceContentCache');
 const singleFlight = require('../singleFlight');
 
-// V6: bump version -> cache miss cho tất cả video từng bị INCOMPLETE, tạo cơ hội cho ASR fallback
-// (yt-asr-gemini) chạy 1 lần. Không xoá cache cũ (backward-compatible với YT có phụ đề).
-const EXTRACTOR_VERSION = 'yt-transcript-v3-asr';
-const youtubeAsr = require('./youtubeAsrFallback');
-const youtubeFallbackLibs = require('./youtubeFallbackLibs');
-const proxyAgent = require('../proxyAgent');
-const TIMEOUT_MS = 8000;
-const MAX_BYTES = 4 * 1024 * 1024;
+// v6.23: bump -> cache cũ (kể cả INCOMPLETE do IP bị chặn) tự miss, không cần xoá tay.
+const EXTRACTOR_VERSION = 'yt-transcript-v4-supadata';
 const CHUNK_SECONDS = 90;
-const INNERTUBE_CLIENT_VERSION = '20.10.38';
-const INNERTUBE_USER_AGENT = `com.google.android.youtube/${INNERTUBE_CLIENT_VERSION} (Linux; U; Android 14)`;
-const INNERTUBE_PLAYER_URL = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false';
+// Trần cứng cho cả 2 lệnh gọi + polling. PHẢI ngắn hơn maxDuration (60s) của route ít nhất 10s.
+const DEFAULT_TIMEOUT_MS = 45000;
+const POLL_INTERVAL_MS = 1500;
+const METADATA_TIMEOUT_MS = 6000;
 
-
-// ---------- MỤC 2 (v6.22) — LỚP A: proxy YouTube (tuỳ chọn, mặc định TẮT) ----------
-// YOUTUBE_PROXY_URL trống => `proxyRotator.size === 0` => fetchYoutubeHttp() gọi safeHttp.fetchPinned
-// Y HỆT code cũ (cùng đối số, KHÔNG có field proxyUrl) — test/youtube-proxy.test.js khoá điều này.
-// Đọc env MỖI LẦN gọi (không chốt lúc nạp module) để đổi cấu hình/test không cần restart.
-let rotatorKey = null;
-let proxyRotator = proxyAgent.createProxyRotator([]);
-function getProxyRotator() {
-  const raw = process.env.YOUTUBE_PROXY_URL || '';
-  if (raw !== rotatorKey) { rotatorKey = raw; proxyRotator = proxyAgent.createProxyRotator(proxyAgent.parseProxyList(raw)); }
-  return proxyRotator;
-}
-// Lỗi ở tầng kết nối/proxy => đổi proxy khác. 407 = proxy từ chối auth; 429/403 = IP proxy này bị YouTube chặn.
-const PROXY_FAIL_REASONS = new Set(['request_failed', 'timeout', 'proxy_invalid', 'stream_error']);
-// 502/503/504: proxy không mở được đường tới YouTube (CONNECT thất bại được https-proxy-agent trả về
-// như 1 response thường, KHÔNG phải lỗi socket) — tìm ra bằng test/youtube-proxy.test.js b1.
-const PROXY_FAIL_STATUS = new Set([407, 429, 403, 502, 503, 504]);
-function isProxyFailure(r) {
-  if (!r) return true;
-  if (!r.ok) return PROXY_FAIL_REASONS.has(r.reason);
-  return PROXY_FAIL_STATUS.has(r.status);
-}
-/**
- * Mọi lệnh gọi HTTP của nguồn YouTube đi qua ĐÂY. Còn proxy chưa thử thì thử tiếp (không rơi xuống
- * ASR sớm); hết proxy mà vẫn lỗi => trả kết quả lỗi cuối (caller tự xuống các nhánh sau như cũ).
- */
-async function fetchYoutubeHttp(url, opts) {
-  const rot = getProxyRotator();
-  if (!rot.size) return safeHttp.fetchPinned(url, opts);
-  let last = null;
-  const tried = new Set();
-  for (let i = 0; i < rot.size; i++) {
-    const proxyUrl = rot.next();
-    if (!proxyUrl || tried.has(proxyUrl)) break; // tất cả đang cooldown / đã thử hết
-    tried.add(proxyUrl);
-    let r;
-    try { r = await safeHttp.fetchPinned(url, { ...opts, proxyUrl }); } catch (e) { r = { ok: false, reason: 'request_failed' }; }
-    if (!isProxyFailure(r)) { rot.markOk(proxyUrl); return r; }
-    rot.markFailed(proxyUrl);
-    last = r;
-  }
-  return last || { ok: false, reason: 'no_proxy_available' };
-}
+const MSG_UNAVAILABLE = 'Video này không có phụ đề/bản ghi lời nên hệ thống chưa đọc được nội dung. Hãy cung cấp bản ghi hoặc nguồn khác.';
+const MSG_GENERATE_FAILED = 'Video này không có phụ đề, và cơ chế nhận dạng lời nói tự động cũng không trích được nội dung (video quá dài, không có lời thoại, hoặc dịch vụ đang giới hạn). Vui lòng cung cấp bản ghi hoặc nguồn khác.';
+const MSG_SERVICE_FAILED = 'Dịch vụ đọc phụ đề YouTube đang lỗi hoặc đã hết hạn mức nên chưa đọc được nội dung video. Hãy thử lại sau, hoặc cung cấp bản ghi/nguồn khác.';
+const MSG_NOT_CONFIGURED = 'Hệ thống chưa được cấu hình dịch vụ đọc phụ đề YouTube nên chưa đọc được nội dung video. Hãy cung cấp bản ghi hoặc nguồn khác.';
 
 /**
  * parseVideoId() — chấp nhận mọi dạng URL YouTube phổ biến, trả về id 11 ký tự chuẩn.
@@ -94,43 +53,6 @@ function parseVideoId(raw) {
 
 function canonicalUrl(videoId) { return `https://youtube.com/watch?v=${videoId}`; }
 
-function decodeXmlEntities(text) {
-  return String(text || '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#(\d+);/g, (x, n) => String.fromCodePoint(Number(n)))
-    .replace(/<[^>]+>/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/** Transcript XML của YouTube -> các đoạn có mốc thời gian. Deterministic, không AI. */
-function parseTranscriptXml(xml) {
-  const out = [];
-  const s = String(xml || '');
-  // Format 1 (chuẩn): <text start="1.36" dur="1.68">...</text>
-  const reText = /<text start="([\d.]+)"(?:\s+dur="([\d.]+)")?[^>]*>([\s\S]*?)<\/text>/g;
-  let m;
-  while ((m = reText.exec(s))) {
-    const text = decodeXmlEntities(m[3]);
-    if (!text) continue;
-    out.push({ start: Number(m[1]) || 0, duration: Number(m[2]) || 0, text });
-  }
-  if (out.length > 0) return out;
-
-  // Format 3 (srv3): <p t="1360" d="1680">...</p> (tính bằng mili-giây)
-  const reP = /<p\s+[^>]*?t="(\d+)"(?:\s+d="(\d+)")?[^>]*>([\s\S]*?)<\/p>/g;
-  while ((m = reP.exec(s))) {
-    const text = decodeXmlEntities(m[3]);
-    if (!text) continue;
-    out.push({ start: (Number(m[1]) || 0) / 1000, duration: (Number(m[2]) || 0) / 1000, text });
-  }
-  return out;
-}
-
 function formatTimestamp(seconds) {
   const s = Math.max(0, Math.floor(seconds || 0));
   const h = Math.floor(s / 3600);
@@ -143,10 +65,8 @@ function formatTimestamp(seconds) {
 /**
  * PHẦN AQ: gom cue thành chunk ~CHUNK_SECONDS giây — đơn vị retrieval là "một mốc thời gian", nên
  * citation của YouTube trỏ được tới đúng phút thay vì tới cả video.
- * MỤC XXX (rework notebook): `method` stamp lên MỌI chunk trả về — 'text' cho phụ đề THẬT (2 nhánh
- * captionTrack/timedtext), 'asr' cho nhánh Gemini transcribe (audio, có thể sai) — client/citation
- * dựa vào field NÀY để không còn coi 2 nguồn tin cậy khác nhau là một (trước đây field asrGenerated
- * ở payload cấp video tồn tại nhưng không chunk nào mang nó xuống evidence, xem PHẦN cuối file).
+ * `method` stamp lên MỌI chunk: 'text-supadata' = phụ đề gốc của video, 'asr-supadata' = Supadata
+ * tự nhận dạng lời nói bằng AI (có thể sai) — client/citation dựa vào field NÀY để cảnh báo đúng mức.
  */
 function chunkTranscript(cues, { chunkSeconds = CHUNK_SECONDS, method = 'text' } = {}) {
   const chunks = [];
@@ -172,8 +92,100 @@ function chunkTranscript(cues, { chunkSeconds = CHUNK_SECONDS, method = 'text' }
   }));
 }
 
+
+// ---------- Supadata ----------
+
+let cachedClient = null;
+let cachedKey = null;
+/** Đọc env MỖI LẦN gọi (đổi key/test không cần restart). Không có key -> null. */
+function getSupadataClient() {
+  const key = String(process.env.SUPADATA_API_KEY || '').trim();
+  if (!key) return null;
+  if (!cachedClient || cachedKey !== key) {
+    const { Supadata } = require('@supadata/js'); // nạp lười: route khác không trả phí nạp SDK
+    cachedClient = new Supadata({ apiKey: key });
+    cachedKey = key;
+  }
+  return cachedClient;
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error(`${label}_timeout`), { code: 'timeout' })), Math.max(1, ms)); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Supadata trả 206 `transcript-unavailable` như một response "ok" (SDK không throw) hoặc như SupadataError. */
+function unavailableCode(x) {
+  return !!x && (x.error === 'transcript-unavailable' || (x.error && x.error.error === 'transcript-unavailable'));
+}
+
+/**
+ * Supadata `content:[{text,offset,duration}]` (MILI-GIÂY) -> cues `{start,duration,text}` (GIÂY),
+ * cùng schema chunkTranscript() đã dùng. Chỉ nhận mảng — chuỗi phẳng không có mốc thời gian.
+ */
+function toCues(content) {
+  if (!Array.isArray(content)) return [];
+  const out = [];
+  for (const c of content) {
+    const text = String((c && c.text) || '').replace(/\s+/g, ' ').trim();
+    const offset = Number(c && c.offset);
+    if (!text || !Number.isFinite(offset) || offset < 0) continue;
+    const dur = Number(c.duration);
+    out.push({ start: offset / 1000, duration: Number.isFinite(dur) && dur > 0 ? dur / 1000 : 0, text });
+  }
+  return out;
+}
+
+/**
+ * Một lệnh gọi Supadata (kể cả poll job 202) dưới `deadline` tuyệt đối.
+ * @returns {Promise<{state:'ok', cues:Array, lang:string}|{state:'unavailable'}|{state:'not_found'}|{state:'failed', code:string}>}
+ */
+async function requestTranscript(client, url, { lang, mode, deadline, pollIntervalMs }) {
+  const remaining = () => deadline - Date.now();
+  let res;
+  try {
+    res = await withTimeout(client.transcript({ url, lang, text: false, mode }), remaining(), 'supadata');
+    // Job dài: poll tới completed/failed hoặc hết deadline.
+    if (res && res.jobId) {
+      const jobId = res.jobId;
+      for (;;) {
+        if (remaining() <= 0) return { state: 'failed', code: 'timeout' };
+        await sleep(Math.min(pollIntervalMs, Math.max(1, remaining())));
+        const job = await withTimeout(client.transcript.getJobStatus(jobId), remaining(), 'supadata_job');
+        if (job && job.status === 'completed') { res = job.result || {}; break; }
+        if (job && job.status === 'failed') return unavailableCode(job.error) ? { state: 'unavailable' } : { state: 'failed', code: (job.error && job.error.error) || 'job_failed' };
+      }
+    }
+  } catch (e) {
+    const code = (e && (e.error || e.code)) || 'request_failed';
+    if (code === 'transcript-unavailable') return { state: 'unavailable' };
+    if (code === 'not-found') return { state: 'not_found' };
+    return { state: 'failed', code: String(code) };
+  }
+  if (unavailableCode(res)) return { state: 'unavailable' };
+  const cues = toCues(res && res.content);
+  if (!cues.length) return { state: 'unavailable' };
+  return { state: 'ok', cues, lang: String(res.lang || lang || '') };
+}
+
+/** Tiêu đề/kênh: best-effort, KHÔNG bao giờ làm hỏng transcript. */
+async function fetchMeta(client, url) {
+  try {
+    const m = await withTimeout(client.metadata({ url }), METADATA_TIMEOUT_MS, 'supadata_meta');
+    return {
+      title: m && m.title ? String(m.title).trim() : null,
+      author: m && m.author && m.author.displayName ? String(m.author.displayName).trim() : null
+    };
+  } catch (e) {
+    return { title: null, author: null };
+  }
+}
+
 /**
  * fetchYoutubeSource() — lấy transcript nếu có.
+ * opts (chủ yếu cho test): languages, noCache, chunkSeconds, timeoutMs, pollIntervalMs, supadataClient.
  * @returns {Promise<{ok:boolean, status:'READY'|'INCOMPLETE'|'ERROR', videoId?:string, url?:string,
  *   fingerprint?:string, chunks?:Array, extractorVersion?:string, reason?:string, transcriptAvailable:boolean}>}
  */
@@ -182,253 +194,79 @@ async function fetchYoutubeSource(rawUrl, opts = {}) {
   if (!videoId) return { ok: false, status: 'ERROR', reason: 'invalid_youtube_url', transcriptAvailable: false };
 
   return singleFlight.run(`youtube::${videoId}`, async () => {
-    // Nếu caller truyền languages rỗng (như trong test INV11 kiểm tra nhánh không có transcript)
-    if (Array.isArray(opts.languages) && opts.languages.length === 0) {
-      return {
-        ok: false,
-        status: 'INCOMPLETE',
-        videoId,
-        url: canonicalUrl(videoId),
-        transcriptAvailable: false,
-        reason: 'transcript_unavailable',
-        userMessage: 'Video này không có phụ đề/bản ghi lời nên hệ thống chưa đọc được nội dung. Hãy cung cấp bản ghi hoặc nguồn khác.'
-      };
-    }
-
-    const langs = opts.languages || ['vi', 'en'];
-    // ---------- MỤC 27: CACHE TRANSCRIPT ----------
-    const cacheParts = {
-      url: `yt:${videoId}:${langs.join(',')}`,
-      extractorVersion: EXTRACTOR_VERSION
-    };
-    const cached = opts.noCache ? null : await contentCache.get(cacheParts);
-    if (cached && cached.value) return { ...cached.value, fromCache: true };
-
-    // 1. Gọi Innertube Android Player API để lấy metadata video & danh sách captionTracks có chữ ký
-    const postData = JSON.stringify({
-      context: {
-        client: {
-          clientName: 'ANDROID',
-          clientVersion: INNERTUBE_CLIENT_VERSION,
-          hl: langs[0] || 'vi',
-          gl: 'VN'
-        }
-      },
-      videoId
-    });
-
-    let playerRes;
-    try {
-      playerRes = await fetchYoutubeHttp(new URL(INNERTUBE_PLAYER_URL), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': String(Buffer.byteLength(postData)),
-          'User-Agent': INNERTUBE_USER_AGENT
-        },
-        body: postData,
-        maxBytes: opts.maxBytes || MAX_BYTES,
-        timeoutMs: opts.timeoutMs || TIMEOUT_MS
-      });
-    } catch (e) {
-      playerRes = { ok: false, reason: 'fetch_failed' };
-    }
-
-    let videoTitle = null;
-    let videoAuthor = null;
-    let captionTracks = [];
-
-    if (playerRes.ok && playerRes.status === 200 && playerRes.body && playerRes.body.length) {
-      try {
-        const data = JSON.parse(playerRes.body.toString('utf8'));
-        if (data.playabilityStatus && data.playabilityStatus.status === 'ERROR') {
-          return {
-            ok: false,
-            status: 'ERROR',
-            videoId,
-            url: canonicalUrl(videoId),
-            transcriptAvailable: false,
-            reason: 'video_unavailable',
-            userMessage: data.playabilityStatus.reason || 'Video YouTube này không tồn tại hoặc ở chế độ riêng tư.'
-          };
-        }
-        videoTitle = data.videoDetails && data.videoDetails.title ? String(data.videoDetails.title).trim() : null;
-        videoAuthor = data.videoDetails && data.videoDetails.author ? String(data.videoDetails.author).trim() : null;
-        captionTracks = Array.isArray(data.captions?.playerCaptionsTracklistRenderer?.captionTracks)
-          ? data.captions.playerCaptionsTracklistRenderer.captionTracks
-          : [];
-      } catch (e) {
-        // Parse JSON lỗi -> tiếp tục fallback
-      }
-    }
-
-    // Sắp xếp các track ưu tiên theo ngôn ngữ người dùng yêu cầu
-    const orderedTracks = [];
-    if (captionTracks.length) {
-      for (const lang of langs) {
-        const match = captionTracks.filter((t) => t.languageCode === lang || String(t.languageCode || '').startsWith(lang + '-'));
-        orderedTracks.push(...match);
-      }
-      for (const t of captionTracks) {
-        if (!orderedTracks.includes(t)) {
-          orderedTracks.push(t);
-        }
-      }
-    }
-
-    // Thử tải phụ đề từ các captionTrack đã ký
-    for (const track of orderedTracks) {
-      if (!track.baseUrl) continue;
-      const trackUrl = String(track.baseUrl).replace('&fmt=srv3', '');
-      let capRes;
-      try {
-        capRes = await fetchYoutubeHttp(new URL(trackUrl), {
-          headers: { 'User-Agent': INNERTUBE_USER_AGENT },
-          maxBytes: opts.maxBytes || MAX_BYTES,
-          timeoutMs: opts.timeoutMs || TIMEOUT_MS
-        });
-      } catch (e) {
-        capRes = { ok: false, reason: 'fetch_failed' };
-      }
-      if (!capRes.ok || capRes.status !== 200 || !capRes.body || !capRes.body.length) continue;
-      const cues = parseTranscriptXml(capRes.body.toString('utf8'));
-      if (!cues.length) continue;
-
-      const chunks = chunkTranscript(cues, opts);
-      const payload = {
-        ok: true,
-        status: 'READY',
-        videoId,
-        title: videoTitle || `YouTube: ${videoId}`,
-        author: videoAuthor || '',
-        url: canonicalUrl(videoId),
-        language: track.languageCode || langs[0] || 'vi',
-        transcriptAvailable: true,
-        fingerprint: contentFingerprint(cues.map((c) => `${c.start}:${c.text}`).join('\u0000')),
-        extractorVersion: EXTRACTOR_VERSION,
-        chunks
-      };
-      await contentCache.set(cacheParts, payload, {});
-      return payload;
-    }
-
-    // Fallback: nếu không có captionTracks hoặc tải qua Android thất bại, thử endpoint timedtext truyền thống
-    for (const lang of langs) {
-      const url = new URL(`https://www.youtube.com/api/timedtext?v=${encodeURIComponent(videoId)}&lang=${encodeURIComponent(lang)}`);
-      let res;
-      try {
-        res = await fetchYoutubeHttp(url, { maxBytes: opts.maxBytes || MAX_BYTES, timeoutMs: opts.timeoutMs || TIMEOUT_MS });
-      } catch (e) {
-        res = { ok: false, reason: 'fetch_failed' };
-      }
-      if (!res.ok || res.location || res.status !== 200 || !res.body || !res.body.length) continue;
-      const cues = parseTranscriptXml(res.body.toString('utf8'));
-      if (!cues.length) continue;
-      const chunks = chunkTranscript(cues, opts);
-      const payload = {
-        ok: true,
-        status: 'READY',
-        videoId,
-        title: videoTitle || `YouTube: ${videoId}`,
-        author: videoAuthor || '',
-        url: canonicalUrl(videoId),
-        language: lang,
-        transcriptAvailable: true,
-        fingerprint: contentFingerprint(cues.map((c) => `${c.start}:${c.text}`).join('\u0000')),
-        extractorVersion: EXTRACTOR_VERSION,
-        chunks
-      };
-      await contentCache.set(cacheParts, payload, {});
-      return payload;
-    }
-
-    // MỤC 2 (v6.22) — LỚP B: thư viện ngoài (youtubei.js -> youtube-transcript), chèn NGAY TRƯỚC ASR.
-    // Chỉ chạy khi 2 nhánh caption tự viết ở trên đều không ra cue. Cues cùng schema -> tái dùng
-    // chunkTranscript(); `method` khắc tên thư viện (phụ đề THẬT, không phải ASR).
-    if (!opts.skipFallbackLibs && youtubeFallbackLibs.isEnabled()) {
-      const rot = getProxyRotator();
-      const proxyUrl = rot.size ? rot.next() : null;
-      const lib = await youtubeFallbackLibs.tryFallbackLibs(videoId, {
-        langs, proxyUrl, timeoutMs: opts.libTimeoutMs, ...(opts.fallbackLibOverrides || {})
-      });
-      if (lib && lib.cues.length) {
-        const chunks = chunkTranscript(lib.cues, { ...opts, method: lib.method });
-        const payload = {
-          ok: true,
-          status: 'READY',
-          videoId,
-          title: videoTitle || `YouTube: ${videoId}`,
-          author: videoAuthor || '',
-          url: canonicalUrl(videoId),
-          language: lib.language || langs[0] || 'vi',
-          transcriptAvailable: true,
-          fingerprint: contentFingerprint(lib.cues.map((c) => `${c.start}:${c.text}`).join('\u0000')),
-          extractorVersion: EXTRACTOR_VERSION,
-          chunks
-        };
-        await contentCache.set(cacheParts, payload, {});
-        return payload;
-      }
-    }
-
-    // V6 — ASR FALLBACK (Gemini native YouTube URL processing).
-    // Root cause fix cho "không có phụ đề = không dùng được": khi 2 nhánh caption ở trên đều fail,
-    // ta thử một lần Gemini transcribe trực tiếp URL video. Gemini xử lý cả audio (nếu là video có
-    // lời) và OCR khung hình (nếu là slide/screenshare không lời) — trả JSON [{start,end,text}] mà
-    // ta chuyển thành `cues` cùng schema với parseTranscriptXml(), rồi reuse chunkTranscript() để
-    // ra chunks IDENTICAL với nhánh phụ đề thật. Client/model không phân biệt được nguồn transcript
-    // đến từ đâu — chỉ nhìn thấy `asrGenerated:true` (dùng cho phần "trích nguồn" ở promptBuilder).
-    if (!opts.skipAsrFallback && youtubeAsr.isEnabled()) {
-      const asr = await youtubeAsr.transcribeYouTubeWithGemini(canonicalUrl(videoId), {
-        languages: langs,
-        timeoutMs: opts.asrTimeoutMs
-      });
-      if (asr && Array.isArray(asr.cues) && asr.cues.length) {
-        // V6.1 token-opt: gộp cue sát nhau trước khi chunk → giảm số timestamp label ở locator.
-        const mergedCues = youtubeAsr.mergeCues(asr.cues);
-        const chunks = chunkTranscript(mergedCues, { ...opts, method: 'asr' });
-        const payload = {
-          ok: true,
-          status: 'READY',
-          videoId,
-          title: videoTitle || `YouTube: ${videoId}`,
-          author: videoAuthor || '',
-          url: canonicalUrl(videoId),
-          language: asr.language || langs[0] || 'vi',
-          transcriptAvailable: true,
-          asrGenerated: true,
-          asrExtractor: youtubeAsr.ASR_EXTRACTOR_VERSION,
-          fingerprint: contentFingerprint(asr.cues.map((c) => `${c.start}:${c.text}`).join('\u0000')),
-          extractorVersion: EXTRACTOR_VERSION,
-          chunks
-        };
-        await contentCache.set(cacheParts, payload, {});
-        return payload;
-      }
-    }
-
-    // PHẦN AP/DM/FC-11 (V6): thật sự không có nội dung nào truy hồi được. Trả INCOMPLETE với thông
-    // điệp cập nhật cho biết cả ASR fallback cũng đã thử. Không lặp lại lời hứa "sẽ thử lại" — nếu
-    // Gemini không set key hoặc quota hết, operator phải xử lý ở phía cấu hình.
-    return {
+    const url = canonicalUrl(videoId);
+    const incomplete = (userMessage, extra = {}) => ({
       ok: false,
       status: 'INCOMPLETE',
       videoId,
-      title: videoTitle || `YouTube: ${videoId}`,
-      url: canonicalUrl(videoId),
+      title: `YouTube: ${videoId}`,
+      url,
       transcriptAvailable: false,
       reason: 'transcript_unavailable',
-      asrAttempted: !opts.skipAsrFallback && youtubeAsr.isEnabled(),
-      userMessage: (!opts.skipAsrFallback && youtubeAsr.isEnabled())
-        ? 'Video này không có phụ đề, và cơ chế nhận dạng lời nói tự động cũng không trích được nội dung (video quá dài, không có lời thoại, hoặc dịch vụ đang giới hạn). Vui lòng cung cấp bản ghi hoặc nguồn khác.'
-        : 'Video này không có phụ đề/bản ghi lời nên hệ thống chưa đọc được nội dung. Hãy cung cấp bản ghi hoặc nguồn khác.'
+      userMessage,
+      ...extra
+    });
+
+    // Caller truyền languages rỗng (test INV11: nhánh không có transcript) -> không gọi mạng.
+    if (Array.isArray(opts.languages) && opts.languages.length === 0) return incomplete(MSG_UNAVAILABLE);
+
+    const langs = opts.languages || ['vi', 'en'];
+    // ---------- MỤC 27: CACHE TRANSCRIPT ----------
+    const cacheParts = { url: `yt:${videoId}:${langs.join(',')}`, extractorVersion: EXTRACTOR_VERSION };
+    const cached = opts.noCache ? null : await contentCache.get(cacheParts);
+    if (cached && cached.value) return { ...cached.value, fromCache: true };
+
+    const client = opts.supadataClient || getSupadataClient();
+    if (!client) {
+      console.warn('[youtubeSource] SUPADATA_API_KEY chưa đặt — không thể đọc transcript YouTube.');
+      return incomplete(MSG_NOT_CONFIGURED);
+    }
+
+    const deadline = Date.now() + (Number(opts.timeoutMs) || Number(process.env.SUPADATA_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS);
+    const base = { lang: langs[0], deadline, pollIntervalMs: Number(opts.pollIntervalMs) || POLL_INTERVAL_MS };
+
+    // Metadata chạy SONG SONG với lệnh native (không cộng thêm độ trễ).
+    const metaP = fetchMeta(client, url);
+    let method = 'text-supadata';
+    let r = await requestTranscript(client, url, { ...base, mode: 'native' });
+    // Chỉ khi video THẬT SỰ không có phụ đề mới gọi AI generate — đúng 1 lần. Lỗi khác (quota, key sai,
+    // timeout, not-found) gọi generate cũng vô ích và tốn tiền.
+    if (r.state === 'unavailable') {
+      method = 'asr-supadata';
+      r = await requestTranscript(client, url, { ...base, mode: 'generate' });
+    }
+
+    if (r.state === 'not_found') {
+      return { ok: false, status: 'ERROR', videoId, url, transcriptAvailable: false, reason: 'video_unavailable',
+        userMessage: 'Video YouTube này không tồn tại hoặc ở chế độ riêng tư.' };
+    }
+    if (r.state !== 'ok') {
+      // PHẦN AP/DM/FC-11: không có nội dung truy hồi được -> INCOMPLETE trung thực, không bịa từ tiêu đề.
+      if (method === 'asr-supadata') return incomplete(MSG_GENERATE_FAILED);
+      return incomplete(r.state === 'failed' ? MSG_SERVICE_FAILED : MSG_UNAVAILABLE);
+    }
+
+    const meta = await metaP;
+    const payload = {
+      ok: true,
+      status: 'READY',
+      videoId,
+      title: meta.title || `YouTube: ${videoId}`,
+      author: meta.author || '',
+      url,
+      language: r.lang || langs[0] || 'vi',
+      transcriptAvailable: true,
+      ...(method === 'asr-supadata' ? { asrGenerated: true } : {}),
+      fingerprint: contentFingerprint(r.cues.map((c) => `${c.start}:${c.text}`).join('\u0000')),
+      extractorVersion: EXTRACTOR_VERSION,
+      chunks: chunkTranscript(r.cues, { chunkSeconds: opts.chunkSeconds, method })
     };
+    await contentCache.set(cacheParts, payload, {});
+    return payload;
   });
 }
 
 module.exports = {
-  fetchYoutubeSource, parseVideoId, canonicalUrl, parseTranscriptXml,
-  chunkTranscript, formatTimestamp, EXTRACTOR_VERSION,
-  // test hooks (mục 2 v6.22)
-  fetchYoutubeHttp, getProxyRotator
+  fetchYoutubeSource, parseVideoId, canonicalUrl, toCues,
+  chunkTranscript, formatTimestamp, EXTRACTOR_VERSION
 };

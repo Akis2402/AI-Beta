@@ -340,6 +340,14 @@ test('extractReadableText: <main> quá nhỏ -> fallback body (mục 53)', () =>
   const html = `<html><body><main><a href="#">Trang chủ</a></main><div>${body}</div></body></html>`;
   const out = webSource.extractReadableText(html);
   assert.ok(out.text.length > 400, `phải lấy được nội dung thật, chỉ nhận ${out.text.length} ký tự`);
+  assert.strictEqual(typeof out.title, 'string');
+  assert.ok(!/Trang chủ/.test(out.text) || out.text.length > 400);
+});
+
+test('extractReadableText (v6.23 Readability): trang SPA rỗng -> {title,text} rỗng, KHÔNG bịa', () => {
+  const out = webSource.extractReadableText('<html><head><title>App</title></head><body><div id="root"></div><script>render()</script></body></html>');
+  assert.deepStrictEqual(Object.keys(out).sort(), ['text', 'title']);
+  assert.strictEqual(out.text, '');
 });
 
 test('L1/L2 khai báo TRUNG THỰC, không tuyên bố suông', () => {
