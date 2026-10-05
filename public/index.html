@@ -445,6 +445,9 @@
 <script src="/js/i18n/languageStore.763a541496.js"></script>
 <script src="/js/i18n/i18n.b5e9554990.js"></script>
 <script src="/js/payloadBudget.c9bd656bea.js"></script>
+<!-- authUI.js PHẢI nạp TRƯỚC app.js: nó bọc window.fetch để bắt 401/429 (đăng nhập/cooldown). build.js tự hash tên file. -->
+<script src="/js/ui/authUI.js"></script>
+<script src="/js/ui/visualViewer.js"></script>
 <script src="/js/storage.1d27028cd0.js"></script>
 <script src="/js/imageStorage.7f0da94f2b.js"></script>
 <script src="/js/config.7dce3170d3.js"></script>
@@ -458,7 +461,7 @@
 <script src="/js/visual/puterVisualManager.6162700d9b.js"></script>
 <script src="/js/ui/puterAuthUI.5384d8ecb0.js"></script>
 <script src="/js/tasks/conversationTaskManager.1eb7e20b62.js"></script>
-<script src="/js/tasks/backgroundTaskUI.066f8e94c2.js"></script>
+<script src="/js/tasks/backgroundTaskUI.87415e7094.js"></script>
 <script src="/js/voiceInput.66463c87c2.js"></script>
 <script src="/js/app.a4ffb119a4.js"></script>
 </body>

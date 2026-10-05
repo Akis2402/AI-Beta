@@ -14,6 +14,20 @@ const recommendRoutes = require('./routes/recommend');
 const studyRoutes = require('./routes/study');
 const visualRoutes = require('./routes/visual');
 const sourceVisionRoutes = require('./routes/sourceVision');
+const authRoutes = require('./routes/auth');
+const assetsRoutes = require('./routes/assets');
+const { requireUser, reserveQuota } = require('./middleware/authQuota');
+const { getConfig: getAuthConfig } = require('./utils/quota/config');
+
+// Validate cấu hình auth/quota NGAY khi nạp server: AI_COOLDOWN_MINUTES ngoài 30–40, AI_TOKEN_LIMIT không phải số,
+// AUTH_ENFORCEMENT=off trên production... => ném lỗi rõ ràng, KHÔNG âm thầm quay về mặc định.
+const authConfig = getAuthConfig();
+if (authConfig.enforcement && !authConfig.supabase.configured) {
+  console.warn('[auth] Supabase chưa được cấu hình (SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY). Mọi route AI sẽ trả 503 cho đến khi cấu hình xong (fail-closed).');
+}
+if (!authConfig.enforcement) {
+  console.warn('[auth] AUTH_ENFORCEMENT=off: xác thực + quota TẮT (chỉ dành cho dev cục bộ).');
+}
 
 const app = express();
 
@@ -75,7 +89,7 @@ const jsonSmall = express.json({ limit: '64kb' });
 // trả 404. Tức là chính endpoint dùng để kiểm tra "hệ thống còn sống không" là endpoint chết trong
 // đúng cấu hình deploy mà nó được viết ra để phục vụ. Nay normalizer chạy ĐẦU TIÊN.
 app.use((req, res, next) => {
-  const apiPrefixes = ['/chat', '/generate', '/recommend', '/study', '/visual', '/source', '/health'];
+  const apiPrefixes = ['/chat', '/generate', '/recommend', '/study', '/visual', '/source', '/auth', '/assets', '/health'];
   if (apiPrefixes.some((p) => req.url === p || req.url.startsWith(p + '/') || req.url.startsWith(p + '?'))) {
     req.url = '/api' + req.url;
   }
@@ -88,25 +102,35 @@ app.get('/api/health', (req, res) => res.json({
   nodeVersion: process.version,
   runtime: process.env.VERCEL ? 'vercel' : 'self-hosted',
   distributedStore: require('./utils/kvStore').isEnabled(),
+  auth: { enforced: authConfig.enforcement, supabaseConfigured: authConfig.supabase.configured, cooldownMinutes: authConfig.quota.cooldownMinutes },
   rateLimitScope: require('./middleware/rateLimit').isGlobalScope() ? 'global' : 'instance'
 }));
 
+// ---------- Auth + Assets (không gọi AI; route tự giới hạn/kiểm tra) ----------
+app.use('/api/auth', authRoutes);
+app.use('/api/assets', assetsRoutes);
+
+// THỨ TỰ BẮT BUỘC cho mọi route gọi AI:  limiter(IP) -> requireUser -> body-parser -> reserveQuota -> router.
+//  - requireUser TRƯỚC parser: người chưa đăng nhập bị chặn trước khi server phải parse tới ~4MB JSON.
+//  - reserveQuota SAU parser (cần req.body để ước lượng) và TRƯỚC router (không gọi model khi đang cooldown/hết quota).
 app.use('/api', appKeyGate); // cổng khóa dùng chung tùy chọn (đọc từ .env, mặc định tắt)
-app.use('/api/chat', chatLimiter, jsonLarge, chatRoutes);
-app.use('/api/generate', generateLimiter, jsonLarge, generateRoutes);
-app.use('/api/recommend', recommendLimiter, jsonSmall, recommendRoutes);
+app.use('/api/chat', chatLimiter, requireUser, jsonLarge, reserveQuota('chat'), chatRoutes);
+app.use('/api/generate', generateLimiter, requireUser, jsonLarge, reserveQuota('generate'), generateRoutes);
+app.use('/api/recommend', recommendLimiter, requireUser, jsonSmall, reserveQuota('recommend'), recommendRoutes);
 // Mục 3A/3C: /api/study/* KHÔNG chạy qua chatLimiter (giới hạn dành cho pipeline giải bài nặng hơn
 // nhiều) — dùng chung generateLimiter (giới hạn cho các tác vụ nhỏ/JSON ngắn) cho hợp lý mức chi phí.
-app.use('/api/study', generateLimiter, jsonSmall, studyRoutes);
+app.use('/api/study', generateLimiter, requireUser, jsonSmall, reserveQuota('study'), studyRoutes);
 // MỤC 1.4: proxy tải hộ ảnh do image provider trả về (CSP/CORS chặn client fetch thẳng). Whitelist
 // domain CỨNG trong routes/visual.js — dùng generateLimiter vì đây là tác vụ nhẹ, không phải
-// pipeline giải bài.
-app.use('/api/visual', generateLimiter, visualRoutes); // parser khai TRONG router: /hq và /retry dùng jsonTiny 4kb THẬT
+// pipeline giải bài. GET (download/asset/status) giữ công khai như cũ (id không đoán được); POST
+// (/hq, /retry) có thể tốn tiền image provider nên BẮT BUỘC đăng nhập.
+app.use('/api/visual', generateLimiter, (req, res, next) => (req.method === 'POST' ? requireUser(req, res, next) : next()), (req, res, next) => (req.method === 'POST' ? reserveQuota('visual')(req, res, next) : next()), visualRoutes); // parser khai TRONG router: /hq và /retry dùng jsonTiny 4kb THẬT. Ảnh sinh thành công bị tính AI_IMAGE_TOKEN_COST (xem imageGenerationClient.chargeImageToQuota)
 // PHẦN A6/A11: batch vision-extraction cho PDF scan (đọc trang 1 lần, cache evidence text ở client
 // để KHÔNG phải gửi lại ảnh base64 mỗi lượt hỏi) — dùng chatLimiter (không phải generateLimiter) vì
 // đây là lệnh gọi AI thật (vision), cùng nhóm chi phí với pipeline giải bài chính, không phải tác
-// vụ nhẹ.
-app.use('/api/source', chatLimiter, jsonLarge, sourceVisionRoutes);
+// vụ nhẹ. /web và /youtube trong cùng router không gọi AI: reserveQuota sẽ release (0 token) nhưng vẫn
+// được bảo vệ bằng đăng nhập (tránh bị lạm dụng làm proxy tải trang/transcript).
+app.use('/api/source', chatLimiter, requireUser, jsonLarge, reserveQuota('source'), sourceVisionRoutes);
 
 // ---------- Frontend tĩnh ----------
 // Lưu ý: khi deploy trên Vercel, thư mục public/ được Vercel phục vụ trực tiếp

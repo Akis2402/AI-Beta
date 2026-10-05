@@ -1,4 +1,4 @@
-import { NextRequest } from 'next/server';
+import { NextRequest, after } from 'next/server';
 import { Readable } from 'stream';
 import { EventEmitter } from 'events';
 import { createRequire } from 'node:module';
@@ -59,6 +59,23 @@ export async function handleNextApiRequest(req: NextRequest | Request): Promise<
   nodeReq.httpVersionMajor = 1;
   nodeReq.httpVersionMinor = 1;
 
+  // Việc nền phải hoàn tất sau khi response đã gửi (vd. ghi token thật vào quota). Trên Vercel, function có thể bị
+  // freeze ngay khi response kết thúc => phải đăng ký với after() của Next để platform giữ function sống.
+  // after() phải được gọi TRONG phạm vi request => gọi ngay ở đây, callback đọc danh sách lúc chạy.
+  const bgTasks: Promise<unknown>[] = [];
+  nodeReq.waitUntil = (p: Promise<unknown>) => { bgTasks.push(Promise.resolve(p).catch(() => undefined)); };
+  try {
+    after(async () => {
+      let seen = -1;
+      while (seen !== bgTasks.length) { // việc mới có thể được thêm trong lúc đang chờ
+        seen = bgTasks.length;
+        await Promise.all(bgTasks.slice());
+      }
+    });
+  } catch {
+    // Ngoài phạm vi request của Next (script/test): không có after() — chạy bình thường, không chặn request.
+  }
+
   return new Promise<Response>((resolve, reject) => {
     let resolved = false;
     let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
@@ -80,23 +97,48 @@ export async function handleNextApiRequest(req: NextRequest | Request): Promise<
     nodeRes.statusCode = 200;
     nodeRes.headersSent = false;
 
+    // Set-Cookie PHẢI là danh sách riêng: Headers.set() + join(', ') sẽ gộp nhiều cookie thành 1 chuỗi
+    // mà trình duyệt không tách được (Expires chứa dấu phẩy) -> phiên đăng nhập không được lưu. Dùng append() lúc commit.
+    const setCookies: string[] = [];
+
     nodeRes.setHeader = (name: string, val: any) => {
       const key = name.toLowerCase();
+      if (key === 'set-cookie') {
+        setCookies.length = 0;
+        (Array.isArray(val) ? val : [val]).forEach((v: any) => setCookies.push(String(v)));
+        return;
+      }
       const valStr = Array.isArray(val) ? val.join(', ') : String(val);
       responseHeaders.set(key, valStr);
       if (key === 'content-type' && valStr.includes('text/event-stream')) {
         isStreaming = true;
       }
     };
-    nodeRes.getHeader = (name: string) => responseHeaders.get(name.toLowerCase());
-    nodeRes.hasHeader = (name: string) => responseHeaders.has(name.toLowerCase());
-    nodeRes.removeHeader = (name: string) => responseHeaders.delete(name.toLowerCase());
-    nodeRes.getHeaders = () => Object.fromEntries(responseHeaders.entries());
+    nodeRes.getHeader = (name: string) => {
+      const key = name.toLowerCase();
+      if (key === 'set-cookie') return setCookies.length ? [...setCookies] : undefined;
+      return responseHeaders.get(key);
+    };
+    nodeRes.hasHeader = (name: string) => {
+      const key = name.toLowerCase();
+      return key === 'set-cookie' ? setCookies.length > 0 : responseHeaders.has(key);
+    };
+    nodeRes.removeHeader = (name: string) => {
+      const key = name.toLowerCase();
+      if (key === 'set-cookie') { setCookies.length = 0; return; }
+      responseHeaders.delete(key);
+    };
+    nodeRes.getHeaders = () => {
+      const h: Record<string, any> = Object.fromEntries(responseHeaders.entries());
+      if (setCookies.length) h['set-cookie'] = [...setCookies];
+      return h;
+    };
 
     function commitHeaders() {
       if (!resolved) {
         resolved = true;
         nodeRes.headersSent = true;
+        setCookies.forEach((c) => responseHeaders.append('set-cookie', c));
         resolve(
           new Response(webStream, {
             status: nodeRes.statusCode || 200,

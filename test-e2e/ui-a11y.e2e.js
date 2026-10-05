@@ -6,8 +6,45 @@
 // Biến tuỳ chọn: E2E_BASE_URL (mặc định http://127.0.0.1:3000), CHROMIUM_PATH (đường dẫn Chromium có sẵn).
 
 const { chromium } = require('playwright');
+const fs = require('fs');
+const http = require('http');
+const path = require('path');
+const { spawn } = require('child_process');
 
 const BASE = process.env.E2E_BASE_URL || 'http://127.0.0.1:3000';
+const ROOT = path.join(__dirname, '..');
+
+// --- Tự bật server nếu chưa có (trước đây: ERR_CONNECTION_REFUSED vì người chạy quên `next start`) ---
+function isUp(url) {
+  return new Promise((resolve) => {
+    const req = http.get(url, { timeout: 2000 }, (res) => { res.resume(); resolve(true); });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+  });
+}
+
+/** @returns {Promise<import('child_process').ChildProcess|null>} tiến trình server do script tự bật (cần tắt cuối), hoặc null */
+async function ensureServer() {
+  if (await isUp(BASE + '/')) return null;
+  if (process.env.E2E_BASE_URL) {
+    throw new Error(`Không kết nối được E2E_BASE_URL=${BASE}. Hãy bật server ở đó (npx next start) rồi chạy lại.`);
+  }
+  if (!fs.existsSync(path.join(ROOT, '.next', 'BUILD_ID'))) {
+    throw new Error('Chưa có bản build (.next/BUILD_ID). Chạy `npm run build` trước, rồi chạy lại `npm run test:e2e-ui` (script sẽ tự bật `next start`).');
+  }
+  const port = new URL(BASE).port || '3000';
+  console.log(`  (server chưa chạy tại ${BASE} -> tự bật \`next start -p ${port}\`)`);
+  const child = spawn(process.execPath, [require.resolve('next/dist/bin/next'), 'start', '-p', port], { cwd: ROOT, stdio: 'ignore' });
+  let exited = false;
+  child.on('exit', () => { exited = true; });
+  for (let i = 0; i < 120; i++) {
+    if (await isUp(BASE + '/')) return child;
+    if (exited) throw new Error('`next start` thoát sớm — thử chạy thủ công `npx next start -p ' + port + '` để xem lỗi.');
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  child.kill();
+  throw new Error('Quá 60s mà server vẫn chưa phản hồi.');
+}
 let passed = 0;
 let failed = 0;
 function check(name, ok, detail) {
@@ -191,6 +228,7 @@ async function ariaChecks(browser) {
 }
 
 (async () => {
+  const server = await ensureServer();
   const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
   try {
     await topbarChecks(browser);
@@ -199,7 +237,8 @@ async function ariaChecks(browser) {
     await ariaChecks(browser);
   } finally {
     await browser.close();
+    if (server) server.kill();
   }
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
-})().catch((e) => { console.error(e); process.exit(2); });
+})().catch((e) => { console.error('\nE2E LỖI:', (e && e.message) || e); process.exit(2); });

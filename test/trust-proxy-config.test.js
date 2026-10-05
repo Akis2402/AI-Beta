@@ -8,6 +8,8 @@ const assert = require('assert');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+// Test dựng Express THẬT -> phải qua _depGuard (quy ước BUG-007 trong audit-v6.2-regressions.test.js).
+require('./_depGuard').requireDeps(['express', 'express-rate-limit'], 'trust-proxy-config');
 
 const root = path.join(__dirname, '..');
 const appSrc = fs.readFileSync(path.join(root, 'server/app.js'), 'utf8');

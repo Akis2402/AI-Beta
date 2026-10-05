@@ -433,6 +433,20 @@ function activePromptCharLimit() {
  * @returns {Promise<{ok:boolean, format?:'data_url', url?:string, model?:string, reason?:string,
  *   latencyMs:number, promptChars:number}>}
  */
+/**
+ * Ghi chi phí 1 ảnh sinh THÀNH CÔNG vào sổ quota của request hiện tại (token-tương-đương cố định,
+ * AI_IMAGE_TOKEN_COST). Đây là điểm chặn DUY NHẤT mọi ảnh server sinh đi qua (chat tự sinh ảnh, /api/visual/hq,
+ * /api/visual/retry) nên không route nào có thể “sinh ảnh miễn phí”. Không bao giờ ném lỗi: đo lường hỏng
+ * không được làm mất ảnh đã sinh xong. Không có context quota (test/script) => no-op.
+ */
+function chargeImageToQuota(providerName) {
+  try {
+    const { recordFlatCost } = require('../quota/usageContext');
+    const { getConfig } = require('../quota/config');
+    recordFlatCost(getConfig().quota.imageTokenCost, { provider: providerName, model: 'image' });
+  } catch (_) { /* đo lường không được phép phá pipeline ảnh */ }
+}
+
 async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, size = '1024x1024', aspectRatio = '1:1', quality = 'standard', deadlineAt }) {
   if (String(process.env.PUTER_VISUAL_MODE || '').toLowerCase() === 'client_primary') {
     throw new Error('server_image_generation_forbidden_in_client_primary');
@@ -475,6 +489,7 @@ async function generateImage({ prompt, timeoutMs = IMAGE_TIMEOUT_MS, signal, siz
     // hỏng) -> không đốt vào circuit breaker của provider đó.
     if (last.reason !== 'cancelled') recordProviderResult(p.name, last.ok);
     if (last.ok) {
+      chargeImageToQuota(p.name);
       return {
         ...base, ...last, providersTried,
         costClass: classifyImageCost({ provider: p.name, size }),

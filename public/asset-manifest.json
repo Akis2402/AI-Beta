@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-01T10:00:14.162Z",
+  "generatedAt": "2026-10-02T04:42:43.360Z",
   "assets": {
     "boot.js": "/js/boot.29aa9029e5.js",
     "payloadBudget.js": "/js/payloadBudget.c9bd656bea.js",
@@ -21,7 +21,7 @@
     "puterVisualManager.js": "/js/visual/puterVisualManager.6162700d9b.js",
     "puterAuthUI.js": "/js/ui/puterAuthUI.5384d8ecb0.js",
     "conversationTaskManager.js": "/js/tasks/conversationTaskManager.1eb7e20b62.js",
-    "backgroundTaskUI.js": "/js/tasks/backgroundTaskUI.066f8e94c2.js",
+    "backgroundTaskUI.js": "/js/tasks/backgroundTaskUI.87415e7094.js",
     "styles.css": "/css/styles.eefa8e4a0d.css"
   }
 }

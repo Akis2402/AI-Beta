@@ -14,12 +14,15 @@ test('W1. số await trong chat.js == số dòng bảng audit (thêm await mới
 test('W2. ensureProvidersReady: hydrate + reserveRotationSlot chạy SONG SONG (~1 RTT, không phải 2)', async () => {
   const rs = require('../server/utils/rotationStore');
   const { ensureProvidersReady } = require('../server/utils/aiProviders');
-  const oh = rs.hydrate, or = rs.reserveRotationSlot; const order = [];
-  rs.hydrate = async () => { order.push('h0'); await new Promise((r) => setTimeout(r, 120)); order.push('h1'); return true; };
-  rs.reserveRotationSlot = async () => { order.push('r0'); await new Promise((r) => setTimeout(r, 120)); order.push('r1'); return 7; };
+  const oh = rs.hydrate, or = rs.reserveRotationSlot; const order = []; let inflight = 0; let maxInflight = 0;
+  rs.hydrate = async () => { order.push('h0'); inflight++; maxInflight = Math.max(maxInflight, inflight); await new Promise((r) => setTimeout(r, 120)); inflight--; order.push('h1'); return true; };
+  rs.reserveRotationSlot = async () => { order.push('r0'); inflight++; maxInflight = Math.max(maxInflight, inflight); await new Promise((r) => setTimeout(r, 120)); inflight--; order.push('r1'); return 7; };
   try {
     const t = Date.now(); await ensureProvidersReady(); const dt = Date.now() - t;
-    assert.ok(dt < 220, `tuần tự sẽ ~240ms, đo được ${dt}ms`);
+    // Bằng chứng XÁC ĐỊNH: cả hai đang chạy cùng lúc (maxInflight=2) + thứ tự sự kiện. Không dựa vào đồng hồ tường
+    // (máy Windows/CI đang tải nặng có thể trễ timer hàng chục ms làm ngưỡng 220ms flake); dt chỉ còn là mốc an toàn rất rộng.
+    assert.strictEqual(maxInflight, 2, `hydrate và reserveRotationSlot phải chạy ĐỒNG THỜI, maxInflight=${maxInflight} (dt=${dt}ms)`);
+    assert.ok(dt < 2000, `quá chậm bất thường: ${dt}ms`);
     assert.deepStrictEqual(order.slice(0, 2).sort(), ['h0', 'r0'], 'cả hai phải BẮT ĐẦU trước khi cái nào xong');
     assert.ok(order.indexOf('h1') > 1 && order.indexOf('r1') > 1);
   } finally { rs.hydrate = oh; rs.reserveRotationSlot = or; }

@@ -1,6 +1,8 @@
 'use strict';
 
 const { recordAttemptFor } = require('./tokenTelemetry');
+// Quota theo user: cộng dồn usage THẬT của provider vào AsyncLocalStorage context của request (no-op khi không có context).
+const { recordUsage: recordQuotaUsage } = require('./quota/usageContext');
 const latencyBreakdown = require('./latencyBreakdown'); // mục 2.1 v6.22: gộp khoảng provider thành 1 dòng latency_breakdown
 
 // ---------- Điều phối AI Rotation: Provider → API Keys → Models → Execution Targets ----------
@@ -72,6 +74,11 @@ function logAttempt({ requestId, stage, target, latency, status, err, usage, ans
     usage, answerBudget, reasoningBudget, providerMaxTokens, finishReason,
     retry: !!retry, recovery: !!recovery, estimatedOutputTokens
   });
+  // ĐIỂM NGHẼN DUY NHẤT của mọi lượt gọi provider -> ghi vào sổ quota của request hiện tại (server tự lấy usage
+  // từ response provider; KHÔNG tin số do client gửi). Không ném lỗi: ghi quota hỏng không được làm hỏng câu trả lời.
+  try {
+    recordQuotaUsage({ usage, provider: target && target.providerKey, model: target && target.modelId, estimatedOutputTokens });
+  } catch (_) { /* quota accounting không được phép làm hỏng luồng trả lời */ }
 }
 
 // ---------- NGÂN SÁCH THỜI GIAN TỔNG cho chế độ "Đối chiếu đa hướng" ----------
@@ -644,7 +651,7 @@ function attemptTarget(p, rawRaceArgs, tried, requestId) {
       const visible = stripThinkingTags(text);
       if (!visible) throw new Error('Phản hồi rỗng');
       const latency = Date.now() - startedAt;
-      logAttempt({ requestId, stage: 'fast', target: p, latency, status: 'success' });
+      logAttempt({ requestId, stage: 'fast', target: p, latency, status: 'success', usage: meta.usage, estimatedOutputTokens: estimateTokens(visible) });
       markSuccess(p, latency);
       recordThroughput(p, { outputTokens: estimateTokens(visible), elapsedMs: latency });
       return { text: visible, provider: p, _latencyMs: latency, finishReason: meta.finishReason || null };
