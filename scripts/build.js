@@ -50,7 +50,7 @@ const CORE_JS = [
 const I18N_JS = ['translations.js', 'languageStore.js', 'i18n.js'];
 const PROVIDER_JS = ['puterAdapter.js', 'providerRouter.js'];
 const VISUAL_JS = ['puterVisualManager.js'];
-const UI_JS = ['puterAuthUI.js']; // Giao diện Auth Puter (Settings + popup thông báo)
+const UI_JS = ['puterAuthUI.js', 'authUI.js', 'visualViewer.js']; // Puter Auth UI + đăng nhập Supabase/quota/Asset Manager + zoom/pan cho lightbox SVG
 const TASK_JS = ['conversationTaskManager.js', 'backgroundTaskUI.js'];
 const CORE_CSS = ['styles.css'];
 

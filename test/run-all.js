@@ -30,7 +30,14 @@ for (const f of files) {
     encoding: 'utf8',
     timeout: FILE_TIMEOUT_MS,
     killSignal: 'SIGKILL',
-    env: { ...process.env, PUTER_VISUAL_MODE: process.env.PUTER_VISUAL_MODE || 'server_fallback' }
+    env: {
+      ...process.env,
+      PUTER_VISUAL_MODE: process.env.PUTER_VISUAL_MODE || 'server_fallback',
+      // Route AI nay BẮT BUỘC đăng nhập + quota. Các test cũ gọi thẳng /api/* (không có Supabase) sẽ nhận 401/503, nên
+      // harness tắt enforcement cho CHÚNG. Auth/quota được kiểm riêng bằng test/auth-quota-unit.test.js (tự đặt env,
+      // xóa AUTH_ENFORCEMENT trước khi nạp cấu hình) và test-integration/. KHÔNG đặt 'off' khi NODE_ENV=production.
+      AUTH_ENFORCEMENT: process.env.AUTH_ENFORCEMENT || 'off'
+    }
   });
   const out = `${r.stdout || ''}${r.stderr || ''}`;
   process.stdout.write(out);

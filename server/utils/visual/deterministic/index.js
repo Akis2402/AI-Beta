@@ -12,6 +12,7 @@ const U = require('./factUtils');
 const geometry = require('./geometry');
 const physics = require('./physics');
 const chemistry = require('./chemistry');
+const inequality = require('./inequality');
 
 const ENGINE_VERSION = 'svg-v1';
 const CACHE_MAX = 300;
@@ -35,9 +36,11 @@ const HUMAN = {
   'geometry_contradiction:angle_vs_sides': 'số đo góc không khớp với độ dài các cạnh đã cho',
   'geometry_contradiction:ssa_no_solution': 'với dữ kiện cạnh–cạnh–góc đã cho, tam giác không tồn tại',
   'geometry_contradiction:degenerate_triangle': 'ba điểm thẳng hàng, không tạo thành tam giác',
-  'geometry_contradiction:radius_not_positive': 'bán kính phải lớn hơn 0'
+  'geometry_contradiction:radius_not_positive': 'bán kính phải lớn hơn 0',
+  'inequality_contradiction:empty_solution': 'tập nghiệm rỗng: các điều kiện mâu thuẫn nhau (vô nghiệm)',
+  'inequality_contradiction:empty_region': 'hệ bất phương trình vô nghiệm (miền nghiệm rỗng hoặc chỉ là một đoạn/điểm)'
 };
-function humanize(detail) { return HUMAN[detail] || String(detail).replace(/^geometry_contradiction:/, '').replace(/_/g, ' '); }
+function humanize(detail) { return HUMAN[detail] || String(detail).replace(/^(?:geometry|inequality)_contradiction:/, '').replace(/_/g, ' '); }
 
 /** Mã lỗi nghĩa là "engine chưa hỗ trợ" chứ KHÔNG phải "dữ kiện đề bài mâu thuẫn" -> rơi xuống nhánh khác, không báo mâu thuẫn. */
 const OUT_OF_SCOPE_CODES = new Set(['unsupported_atomic_number', 'unknown_element', 'element_unknown', 'unsupported_element', 'molecule_not_supported', 'invalid_atomic_number', 'unknown_kind', 'chemistry_layout_required']);
@@ -50,6 +53,13 @@ function supportedSubject(s) { return s === 'math' || s === 'physics' || s === '
 
 function extractFor(domain, text) {
   if (domain === 'math') {
+    // Bất phương trình / miền nghiệm TRƯỚC hình học: extractor này có cổng từ khóa riêng nên không nuốt đề hình học.
+    const q = inequality.extractInequality(text);
+    if (q) {
+      const err = inequality.validateInequality(q);
+      if (err) return { domain, category: `inequality_${q.kind}`, error: { code: err.code, detail: err.detail } };
+      return { domain, category: `inequality_${q.kind}`, spec: q };
+    }
     const g = geometry.extractGeometry(text);
     if (!g) return null;
     if (g.error) return { domain, category: `geometry_${g.kind || 'shape'}`, error: { code: g.error, detail: g.detail || humanize(g.error) } };
@@ -70,6 +80,7 @@ function extractFor(domain, text) {
 }
 
 function renderFor(ext) {
+  if (ext.domain === 'math' && ext.category.startsWith('inequality_')) { const r = inequality.renderInequality(ext.spec); return { svg: r.svg, title: r.title, desc: r.desc, data: ext.spec }; }
   if (ext.domain === 'math') { const r = geometry.renderGeometry(ext.spec); return { svg: r.svg, title: r.title, desc: r.desc, data: ext.spec }; }
   if (ext.domain === 'physics') { const r = physics.renderPhysics(ext.spec); return { svg: r.svg, title: r.title, desc: r.desc, data: ext.spec }; }
   const b = chemistry.buildChemistry(ext.spec);
