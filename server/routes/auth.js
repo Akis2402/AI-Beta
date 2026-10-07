@@ -136,6 +136,86 @@ router.post('/logout', ensureOrigin, async (req, res) => {
   return res.json({ ok: true, status: 'unauthenticated' });
 });
 
+// =====================================================================================
+// QUÊN MẬT KHẨU + HỒ SƠ
+// =====================================================================================
+// Luồng: /forgot (gửi email) -> người dùng bấm link trong email, Supabase đưa về Site URL kèm token trong PHẦN FRAGMENT (#...)
+// -> giao diện đọc token, XÓA khỏi URL ngay (không rò qua Referer/lịch sử) -> /reset (token + mật khẩu mới).
+// /forgot luôn trả cùng một thông điệp (không dò được email nào có tài khoản), có PoW + giới hạn/IP để không bị dùng làm cổng spam email.
+const forgotLimiter = createLimiter({
+  name: 'forgot', windowMs: 60 * 60 * 1000, max: getConfig().auth.signupPerHour,
+  message: { error: 'Bạn yêu cầu đặt lại mật khẩu quá nhiều lần. Vui lòng thử lại sau ít giờ.', code: 'forgot_rate_limited' }
+});
+const resetLimiter = createLimiter({
+  name: 'reset', windowMs: 15 * 60 * 1000, max: 10,
+  message: { error: 'Bạn thử đặt lại mật khẩu quá nhiều lần. Vui lòng thử lại sau ít phút.', code: 'auth_rate_limited' }
+});
+const NEUTRAL_FORGOT = 'Nếu email có tài khoản, một liên kết đặt lại mật khẩu đã được gửi. Hãy kiểm tra hộp thư (kể cả thư rác).';
+const JWT_SHAPE = /^[\w-]{8,2048}\.[\w-]{8,2048}\.[\w-]{0,2048}$/;
+
+router.post('/forgot', ensureConfigured, ensureOrigin, forgotLimiter, authLimiter, async (req, res) => {
+  noStore(res);
+  const body = req.body || {};
+  const e = session.validateEmail(body.email);
+  if (!e.ok) return bad(res, 400, e.message, 'invalid_email');
+  const powResult = await pow.verify(body.challenge, body.nonce);
+  if (!powResult.ok) return bad(res, 400, 'Xác minh chống lạm dụng không hợp lệ. Vui lòng thử lại.', powResult.code);
+  try {
+    const r = await sb.auth.recover(e.value, getConfig().auth.redirectUrl || undefined);
+    if (r.status >= 500) return bad(res, 503, 'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
+    if (r.status === 429) return bad(res, 429, 'Quá nhiều yêu cầu. Vui lòng thử lại sau.', 'auth_rate_limited');
+    // Mọi kết quả khác (kể cả email không tồn tại / lỗi nghiệp vụ): cùng một câu trả lời.
+    return res.json({ ok: true, status: 'recovery_pending', message: NEUTRAL_FORGOT });
+  } catch (err) {
+    return bad(res, 503, 'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
+  }
+});
+
+router.post('/reset', ensureConfigured, ensureOrigin, resetLimiter, async (req, res) => {
+  noStore(res);
+  const body = req.body || {};
+  const token = typeof body.accessToken === 'string' ? body.accessToken.trim() : '';
+  if (!JWT_SHAPE.test(token)) return bad(res, 400, 'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Hãy yêu cầu liên kết mới.', 'reset_token_invalid');
+  const p = session.validatePassword(body.password);
+  if (!p.ok) return bad(res, 400, p.message, 'weak_password');
+  if (body.confirmPassword !== undefined && String(body.confirmPassword) !== String(body.password)) {
+    return bad(res, 400, 'Mật khẩu xác nhận không khớp.', 'password_mismatch');
+  }
+  try {
+    const r = await sb.auth.updatePassword(token, p.value);
+    if (r.status >= 500) return bad(res, 503, 'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
+    if (r.status === 401 || r.status === 403) return bad(res, 400, 'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Hãy yêu cầu liên kết mới.', 'reset_token_invalid');
+    if (!r.ok) {
+      const code = r.data && (r.data.error_code || r.data.code);
+      if (code === 'same_password') return bad(res, 400, 'Mật khẩu mới phải khác mật khẩu cũ.', 'same_password');
+      if (code === 'weak_password') return bad(res, 400, 'Mật khẩu quá yếu.', 'weak_password');
+      return bad(res, 400, 'Không đặt lại được mật khẩu. Vui lòng thử lại.', 'reset_failed');
+    }
+    session.forgetToken(token);
+    return res.json({ ok: true, status: 'password_updated' }); // không tự đăng nhập: người dùng đăng nhập lại bằng mật khẩu mới
+  } catch (err) {
+    return bad(res, 503, 'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
+  }
+});
+
+// ---- PATCH /api/auth/profile  (đổi tên hiển thị; chỉ cột display_name, KHÔNG bao giờ role/email) ----
+const BAD_NAME_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/;
+router.patch('/profile', requireUser, async (req, res) => {
+  noStore(res);
+  if (!req.user) return bad(res, 400, 'Xác thực đang tắt.', 'auth_disabled');
+  const raw = req.body && req.body.displayName;
+  const name = typeof raw === 'string' ? raw.normalize('NFC').trim().replace(/\s+/g, ' ') : '';
+  if (!name || name.length > 60) return bad(res, 400, 'Tên hiển thị cần từ 1 đến 60 ký tự.', 'invalid_display_name');
+  if (BAD_NAME_CHARS.test(name)) return bad(res, 400, 'Tên hiển thị chứa ký tự không hợp lệ.', 'invalid_display_name');
+  try {
+    const row = await sb.patch('profiles', `id=eq.${encodeURIComponent(req.user.id)}`, { display_name: name, updated_at: new Date().toISOString() });
+    session.forgetProfile(req.user.id);
+    return res.json({ ok: true, displayName: (row && row.display_name) || name });
+  } catch (err) {
+    return bad(res, 502, 'Không lưu được tên hiển thị. Vui lòng thử lại.', 'profile_save_failed');
+  }
+});
+
 // ---- GET /api/auth/quota  (số liệu cho UI; SERVER là nguồn sự thật) ----
 router.get('/quota', requireUser, async (req, res) => {
   noStore(res);

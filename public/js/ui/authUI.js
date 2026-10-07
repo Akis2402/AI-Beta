@@ -139,6 +139,38 @@
     }
   };
 
+  // Bổ sung: quên mật khẩu, đặt mật khẩu mới, tên hiển thị, nút lưới/trục của bộ xem ảnh.
+  Object.assign(DICT.vi, {
+    'auth.forgot.link': 'Quên mật khẩu?', 'auth.forgot.title': 'Quên mật khẩu',
+    'auth.forgot.sub': 'Nhập email của bạn, chúng tôi sẽ gửi liên kết đặt lại mật khẩu.',
+    'auth.forgot.submit': 'Gửi liên kết', 'auth.forgot.back': 'Quay lại đăng nhập',
+    'auth.forgot.sent': 'Nếu email có tài khoản, một liên kết đặt lại mật khẩu đã được gửi. Hãy kiểm tra hộp thư (kể cả thư rác).',
+    'auth.reset.title': 'Đặt mật khẩu mới', 'auth.reset.sub': 'Nhập mật khẩu mới cho tài khoản của bạn.',
+    'auth.reset.field': 'Mật khẩu mới', 'auth.reset.submit': 'Lưu mật khẩu',
+    'auth.reset.done': 'Đã đổi mật khẩu. Hãy đăng nhập bằng mật khẩu mới.',
+    'auth.err.reset_token_invalid': 'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Hãy yêu cầu liên kết mới.',
+    'auth.err.same_password': 'Mật khẩu mới phải khác mật khẩu cũ.', 'auth.err.reset_failed': 'Không đặt lại được mật khẩu. Vui lòng thử lại.',
+    'auth.err.forgot_rate_limited': 'Bạn yêu cầu đặt lại mật khẩu quá nhiều lần. Vui lòng thử lại sau ít giờ.',
+    'auth.err.invalid_display_name': 'Tên hiển thị cần từ 1 đến 60 ký tự hợp lệ.', 'auth.err.profile_save_failed': 'Không lưu được tên hiển thị. Vui lòng thử lại.',
+    'auth.acct.name': 'Tên hiển thị', 'auth.acct.nameSave': 'Lưu tên', 'auth.acct.nameSaved': 'Đã lưu tên hiển thị.',
+    'viewer.grid': 'Lưới', 'viewer.axes': 'Trục'
+  });
+  Object.assign(DICT.en, {
+    'auth.forgot.link': 'Forgot password?', 'auth.forgot.title': 'Forgot password',
+    'auth.forgot.sub': 'Enter your email and we will send you a password reset link.',
+    'auth.forgot.submit': 'Send link', 'auth.forgot.back': 'Back to sign in',
+    'auth.forgot.sent': 'If the email has an account, a reset link has been sent. Check your inbox (and spam folder).',
+    'auth.reset.title': 'Set a new password', 'auth.reset.sub': 'Enter a new password for your account.',
+    'auth.reset.field': 'New password', 'auth.reset.submit': 'Save password',
+    'auth.reset.done': 'Password updated. Sign in with your new password.',
+    'auth.err.reset_token_invalid': 'The reset link is invalid or has expired. Please request a new one.',
+    'auth.err.same_password': 'The new password must be different from the old one.', 'auth.err.reset_failed': 'Could not reset the password. Please try again.',
+    'auth.err.forgot_rate_limited': 'Too many reset requests. Please try again in a few hours.',
+    'auth.err.invalid_display_name': 'Display name must be 1–60 valid characters.', 'auth.err.profile_save_failed': 'Could not save your display name. Please try again.',
+    'auth.acct.name': 'Display name', 'auth.acct.nameSave': 'Save name', 'auth.acct.nameSaved': 'Display name saved.',
+    'viewer.grid': 'Grid', 'viewer.axes': 'Axes'
+  });
+
   /** Nạp bản dịch vào window.TRANSLATIONS (không ghi đè key đã có) để dùng chung cơ chế t() của dự án. */
   function mergeDict() {
     var all = window.TRANSLATIONS = window.TRANSLATIONS || {};
@@ -361,6 +393,21 @@
     if (S.status !== 'authenticated') { body.appendChild(h('p', { class: 'tg-sub', text: tx('auth.acct.notSignedIn') })); return; }
     var u = S.user || {};
     body.appendChild(h('p', { class: 'tg-sub' }, tx('auth.acct.signedInAs'), h('b', { text: u.email || '' }), u.role === 'admin' ? tx('auth.acct.admin') : ''));
+    // Tên hiển thị (S.nameDraft giữ chữ đang gõ khi hộp thoại bị dựng lại do số token cập nhật)
+    var nameIn = h('input', { class: 'tg-in', type: 'text', maxlength: '60', value: S.nameDraft !== undefined ? S.nameDraft : (u.displayName || ''), 'aria-label': tx('auth.acct.name'), placeholder: tx('auth.acct.name'), style: 'min-height:40px;font-size:14px', oninput: function () { S.nameDraft = nameIn.value; } });
+    var nameMsg = h('div', { class: 'tg-msg', role: 'status', 'aria-live': 'polite' });
+    var nameBtn = h('button', { class: 'tg-btn', type: 'button', style: 'min-height:40px', text: tx('auth.acct.nameSave'), onclick: function () {
+      var v = nameIn.value.trim();
+      if (!v) { nameMsg.textContent = tx('auth.err.invalid_display_name'); nameMsg.className = 'tg-msg err'; return; }
+      nameBtn.disabled = true;
+      api('PATCH', '/api/auth/profile', { displayName: v }).then(function (r) {
+        nameBtn.disabled = false;
+        if (!r.ok) { nameMsg.textContent = errText(r.json); nameMsg.className = 'tg-msg err'; return; }
+        if (S.user) S.user.displayName = r.json.displayName; S.nameDraft = undefined;
+        nameMsg.textContent = tx('auth.acct.nameSaved'); nameMsg.className = 'tg-msg ok';
+      }).catch(function () { nameBtn.disabled = false; nameMsg.textContent = tx('auth.err.network'); nameMsg.className = 'tg-msg err'; });
+    } });
+    body.appendChild(h('div', { class: 'tg-row', style: 'margin:0 0 4px' }, nameIn, nameBtn)); body.appendChild(nameMsg);
     var qs = quotaSummary();
     if (qs) {
       var pct = qs.limit ? Math.min(100, Math.round((qs.used + qs.reserved) / qs.limit * 100)) : 0;
@@ -469,15 +516,21 @@
     var close = h('button', { class: 'tg-x', type: 'button', 'aria-label': tx('auth.close'), onclick: closeAuth, text: '✕' });
     var img = h('img', { class: 'tg-authimg', alt: '', hidden: true });
     var confirmWrap = h('label', { class: 'tg-field', hidden: true }, h('span', { text: tx('auth.field.confirm') }), pw2);
+    var forgotLink = h('button', { class: 'tg-btn', type: 'button', style: 'min-height:40px;margin:-4px 0 12px;padding:0 4px;border:0;background:transparent;color:var(--tg-primary);text-decoration:underline', onclick: function () { switchMode('forgot'); }, text: tx('auth.forgot.link') });
+    var backLink = h('button', { class: 'tg-btn', type: 'button', hidden: true, style: 'min-height:40px;margin:8px 0 0;padding:0 4px;border:0;background:transparent;color:var(--tg-primary);text-decoration:underline', onclick: function () { switchMode('login'); }, text: tx('auth.forgot.back') });
+    var pwWrap = h('label', { class: 'tg-field' }, h('span', { text: tx('auth.field.password') }), h('div', { class: 'tg-row' }, pw, show));
+    var rememberWrap = h('label', { class: 'tg-check' }, remember, h('span', { text: tx('auth.remember') }));
     var form = h('form', { novalidate: true, onsubmit: onSubmit },
       h('label', { class: 'tg-field' }, h('span', { text: tx('auth.field.email') }), email),
-      h('label', { class: 'tg-field' }, h('span', { text: tx('auth.field.password') }), h('div', { class: 'tg-row' }, pw, show)),
+      pwWrap,
       confirmWrap,
-      h('label', { class: 'tg-check' }, remember, h('span', { text: tx('auth.remember') })),
-      msg, submit);
-    var card = h('div', { class: 'tg-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'tgAuthTitle' }, close, img, title, sub, h('div', { class: 'tg-tabs', role: 'tablist' }, tabLogin, tabReg), form);
+      forgotLink,
+      rememberWrap,
+      msg, submit, backLink);
+    var tabs = h('div', { class: 'tg-tabs', role: 'tablist' }, tabLogin, tabReg);
+    var card = h('div', { class: 'tg-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'tgAuthTitle' }, close, img, title, sub, tabs, form);
     var ov = h('div', { class: 'tg-overlay', hidden: true, onmousedown: function (e) { if (e.target === ov) closeAuth(); }, onkeydown: trapKeys }, card);
-    els.auth = ov; els.authEls = { title: title, sub: sub, tabLogin: tabLogin, tabReg: tabReg, email: email, pw: pw, pw2: pw2, confirmWrap: confirmWrap, remember: remember, msg: msg, submit: submit, img: img };
+    els.auth = ov; els.authEls = { title: title, sub: sub, tabs: tabs, tabLogin: tabLogin, tabReg: tabReg, email: email, pw: pw, pw2: pw2, pwWrap: pwWrap, confirmWrap: confirmWrap, rememberWrap: rememberWrap, remember: remember, forgotLink: forgotLink, backLink: backLink, msg: msg, submit: submit, img: img };
     document.body.appendChild(ov);
   }
   function trapKeys(e) {
@@ -491,13 +544,16 @@
     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
+  function submitLabel() { return tx(authMode === 'register' ? 'auth.submit.register' : (authMode === 'forgot' ? 'auth.forgot.submit' : 'auth.submit.login')); }
   function switchMode(mode) {
     authMode = mode;
-    var E = els.authEls, reg = mode === 'register';
-    E.tabLogin.setAttribute('aria-selected', String(!reg)); E.tabReg.setAttribute('aria-selected', String(reg));
+    var E = els.authEls, reg = mode === 'register', forgot = mode === 'forgot';
+    E.tabLogin.setAttribute('aria-selected', String(mode === 'login')); E.tabReg.setAttribute('aria-selected', String(reg));
+    E.tabs.hidden = forgot; E.pwWrap.hidden = forgot; E.rememberWrap.hidden = forgot; E.forgotLink.hidden = mode !== 'login'; E.backLink.hidden = !forgot;
     E.confirmWrap.hidden = !reg; E.pw.autocomplete = reg ? 'new-password' : 'current-password';
-    E.title.textContent = tx(reg ? 'auth.title.register' : 'auth.title.login');
-    E.submit.textContent = tx(reg ? 'auth.submit.register' : 'auth.submit.login');
+    E.title.textContent = tx(forgot ? 'auth.forgot.title' : (reg ? 'auth.title.register' : 'auth.title.login'));
+    E.sub.textContent = tx(forgot ? 'auth.forgot.sub' : 'auth.sub');
+    E.submit.textContent = submitLabel();
     E.msg.textContent = ''; E.msg.className = 'tg-msg';
   }
   function setMsg(text, kind) { els.authEls.msg.textContent = text || ''; els.authEls.msg.className = 'tg-msg' + (kind ? ' ' + kind : ''); }
@@ -514,7 +570,7 @@
   function closeAuth() { if (els.auth) els.auth.hidden = true; if (lastFocus && lastFocus.focus) try { lastFocus.focus(); } catch (e) {} }
   function setBusy(b, label) {
     busy = b; var E = els.authEls;
-    E.submit.disabled = b; E.submit.textContent = b ? (label || tx('auth.busy')) : tx(authMode === 'register' ? 'auth.submit.register' : 'auth.submit.login');
+    E.submit.disabled = b; E.submit.textContent = b ? (label || tx('auth.busy')) : submitLabel();
     E.submit.setAttribute('aria-busy', String(b));
   }
   /** Lấy challenge + giải PoW. Trả {challenge, nonce} hoặc {} nếu server tắt PoW. */
@@ -531,6 +587,18 @@
     var E = els.authEls;
     var email = E.email.value.trim(), pw = E.pw.value;
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { setMsg(tx('auth.v.email'), 'err'); E.email.focus(); return; }
+    if (authMode === 'forgot') {
+      setBusy(true, tx('auth.pow.working')); setMsg('');
+      getPowSolution()
+        .then(function (pow) { setBusy(true); return api('POST', '/api/auth/forgot', { email: email, challenge: pow.challenge, nonce: pow.nonce }); })
+        .then(function (r) {
+          setBusy(false);
+          if (!r.ok) { setMsg(errText(r.json), 'err'); return; }
+          setMsg(tx('auth.forgot.sent'), 'ok');
+        })
+        .catch(function (err) { setBusy(false); setMsg(err && err.json ? errText(err.json) : tx('auth.err.network'), 'err'); });
+      return;
+    }
     if (!pw) { setMsg(tx('auth.v.pwEmpty'), 'err'); E.pw.focus(); return; }
     var reg = authMode === 'register';
     if (reg) {
@@ -573,7 +641,7 @@
     lastFocus = document.activeElement; els.account.hidden = false; renderAccount(); refreshQuota();
     setTimeout(function () { var b = els.account.querySelector('.tg-x'); b && b.focus(); }, 0);
   }
-  function closeAccount() { if (els.account) els.account.hidden = true; if (lastFocus && lastFocus.focus) try { lastFocus.focus(); } catch (e) {} }
+  function closeAccount() { S.nameDraft = undefined; if (els.account) els.account.hidden = true; if (lastFocus && lastFocus.focus) try { lastFocus.focus(); } catch (e) {} }
 
   // ---------------------------------------------------------------- assets (apply + admin)
   function captureOriginalIcons() {
@@ -679,9 +747,54 @@
 
   // ---------------------------------------------------------------- đổi ngôn ngữ: dựng lại hộp thoại, cập nhật chữ cố định
   function onLanguageChange() {
-    ['auth', 'account', 'assets'].forEach(function (k) { if (els[k]) { if (els[k].parentNode) els[k].parentNode.removeChild(els[k]); els[k] = null; } });
+    ['auth', 'account', 'assets', 'reset'].forEach(function (k) { if (els[k]) { if (els[k].parentNode) els[k].parentNode.removeChild(els[k]); els[k] = null; } });
     renderBannerStatic(); renderPill(); renderBanner();
+    if (pendingReset) openReset();
   }
+
+  // ---------------------------------------------------------------- đặt mật khẩu từ link email
+  // Supabase đưa người dùng về Site URL kèm token trong FRAGMENT (#access_token=...&type=recovery). Token được đọc, XÓA KHỎİ URL
+  // ngay (không rò qua Referer/lịch sử/chia sẻ link) và chỉ sống trong bộ nhớ đến khi gửi /api/auth/reset.
+  var pendingReset = null;
+  var suppressAutoLogin = false;
+  function readRecoveryFromHash() {
+    var hash = String(location.hash || '');
+    if (hash.length < 2) return null;
+    var params; try { params = new URLSearchParams(hash.slice(1)); } catch (e) { return null; }
+    var tok = params.get('access_token'); var isRecovery = params.get('type') === 'recovery' && !!tok;
+    var isError = !isRecovery && (params.has('error_code') || params.get('error') === 'access_denied');
+    if (!isRecovery && !isError) return null;
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
+    return isRecovery ? { token: tok } : { error: true };
+  }
+  function buildReset() {
+    var pw = h('input', { class: 'tg-in', type: 'password', id: 'tgNewPw', autocomplete: 'new-password', maxlength: '72', required: true });
+    var pw2 = h('input', { class: 'tg-in', type: 'password', id: 'tgNewPw2', autocomplete: 'new-password', maxlength: '72', required: true });
+    var msg = h('div', { class: 'tg-msg', role: 'alert', 'aria-live': 'assertive' });
+    var submit = h('button', { class: 'tg-btn primary', type: 'submit', text: tx('auth.reset.submit') });
+    var form = h('form', { novalidate: true, onsubmit: function (e) {
+      e.preventDefault();
+      if (busy) return;
+      var v = pw.value;
+      if (v.length < 8 || !/[A-Za-z]/.test(v) || !/\d/.test(v)) { msg.textContent = tx('auth.v.pwWeak'); msg.className = 'tg-msg err'; pw.focus(); return; }
+      if (v !== pw2.value) { msg.textContent = tx('auth.v.mismatch'); msg.className = 'tg-msg err'; pw2.focus(); return; }
+      busy = true; submit.disabled = true; submit.textContent = tx('auth.busy'); msg.textContent = '';
+      api('POST', '/api/auth/reset', { accessToken: pendingReset, password: v, confirmPassword: pw2.value }).then(function (r) {
+        busy = false; submit.disabled = false; submit.textContent = tx('auth.reset.submit');
+        if (!r.ok) { msg.textContent = errText(r.json); msg.className = 'tg-msg err'; return; }
+        pendingReset = null; pw.value = ''; pw2.value = '';
+        closeReset(); openAuth('login'); setMsg(tx('auth.reset.done'), 'ok');
+      }).catch(function () { busy = false; submit.disabled = false; submit.textContent = tx('auth.reset.submit'); msg.textContent = tx('auth.err.network'); msg.className = 'tg-msg err'; });
+    } },
+    h('label', { class: 'tg-field' }, h('span', { text: tx('auth.reset.field') }), pw),
+    h('label', { class: 'tg-field' }, h('span', { text: tx('auth.field.confirm') }), pw2), msg, submit);
+    var close = h('button', { class: 'tg-x', type: 'button', 'aria-label': tx('auth.close'), onclick: function () { pendingReset = null; closeReset(); loadSession(); }, text: '✕' });
+    var card = h('div', { class: 'tg-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'tgResetTitle' }, close, h('h2', { id: 'tgResetTitle', text: tx('auth.reset.title') }), h('p', { class: 'tg-sub', text: tx('auth.reset.sub') }), form);
+    var ov = h('div', { class: 'tg-overlay', hidden: true, onkeydown: trapKeys }, card);
+    els.reset = ov; document.body.appendChild(ov);
+  }
+  function openReset() { if (!els.reset) buildReset(); els.reset.hidden = false; setTimeout(function () { var i = document.getElementById('tgNewPw'); if (i) i.focus(); }, 0); }
+  function closeReset() { if (els.reset) els.reset.hidden = true; }
 
   // ---------------------------------------------------------------- bootstrap
   function loadSession() {
@@ -691,7 +804,7 @@
       if (j.status === 'authenticated') { setStatus('authenticated', j.user); refreshQuota(); }
       else if (j.status === 'disabled' || j.status === 'unconfigured') { setStatus(j.status, null); }
       else if (j.status === 'unavailable') { setStatus('unavailable', null); }
-      else { var first = S.status === 'loading'; setStatus('unauthenticated', null); if (first) openAuth('login', j.status === 'expired' ? tx('auth.err.session_expired') : ''); }
+      else { var first = S.status === 'loading'; setStatus('unauthenticated', null); if (first && !suppressAutoLogin && !pendingReset) openAuth('login', j.status === 'expired' ? tx('auth.err.session_expired') : ''); }
     }).catch(function () { setStatus('unavailable', null); });
   }
 
@@ -713,6 +826,9 @@
     tickTimer = setInterval(tick, 1000);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) { tick(); if (S.status === 'authenticated') refreshQuota(); } });
     try { if (window.languageStore && typeof window.languageStore.subscribe === 'function') window.languageStore.subscribe(onLanguageChange); } catch (e) { /* ignore */ }
+    var rec = readRecoveryFromHash();
+    if (rec && rec.token) { pendingReset = rec.token; openReset(); }
+    else if (rec && rec.error) { suppressAutoLogin = true; setTimeout(function () { openAuth('forgot', tx('auth.err.reset_token_invalid')); }, 0); }
     loadAssets(); loadSession();
   }
 

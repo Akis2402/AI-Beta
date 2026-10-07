@@ -16,6 +16,29 @@
   function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
   function label(key, fb) { try { var s = typeof window.t === 'function' ? window.t(key) : null; return s && s !== key ? s : fb; } catch (e) { return fb; } }
 
+  // ---- Bật/tắt lưới & trục: ảnh nằm trong <img src="data:image/svg+xml..."> nên không chỉnh DOM bên trong được. Giải mã SVG,
+  // ẩn nhóm có id layer-grid / layer-axes (do server sinh), rồi gán lại src. SVG đã được server kiểm allowlist; ta chỉ thêm
+  // thuộc tính display="none" vào phần tử có sẵn, không chèn nội dung mới.
+  function decodeSvgDataUrl(src) {
+    if (!/^data:image\/svg\+xml/i.test(src || '')) return null;
+    var comma = src.indexOf(','); if (comma < 0) return null;
+    var meta = src.slice(0, comma); var data = src.slice(comma + 1);
+    try {
+      if (/;base64/i.test(meta)) { var bin = atob(data); var u8 = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return new TextDecoder('utf-8').decode(u8); }
+      return decodeURIComponent(data);
+    } catch (e) { return null; }
+  }
+  function encodeSvgDataUrl(text) { return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(text); }
+  /** Trả về chuỗi SVG đã ẩn các lớp trong `hide` (mảng id), hoặc null nếu không phân tích được. */
+  function withLayersHidden(text, hide) {
+    try {
+      var doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+      if (doc.querySelector('parsererror')) return null;
+      hide.forEach(function (id) { var el = doc.querySelector('[id="' + id + '"]'); if (el) el.setAttribute('display', 'none'); });
+      return new XMLSerializer().serializeToString(doc.documentElement);
+    } catch (e) { return null; }
+  }
+
   /** Logic thuần (test được): giới hạn dịch chuyển sao cho ảnh phóng to luôn còn phủ khung nhìn. */
   function clampPan(pan, scale, box) {
     var maxX = Math.max(0, (box.w * scale - box.w) / 2);
@@ -75,6 +98,26 @@
     var lvl = document.createElement('span'); lvl.className = 'tg-zoom-level'; lvl.setAttribute('aria-live', 'polite'); bar.appendChild(lvl);
     var btnIn = mk('+', label('viewer.in', 'Phóng to'), function () { zoom(STEP); });
     var btnReset = mk('⟲', label('viewer.reset', 'Đặt lại khung nhìn'), reset);
+
+    // Nút Lưới / Trục (chỉ hiện khi SVG có các lớp tương ứng — miền nghiệm do server sinh)
+    var svgText = decodeSvgDataUrl(img.getAttribute('src'));
+    if (svgText && /id="layer-(grid|axes)"/.test(svgText)) {
+      var hidden = { 'layer-grid': false, 'layer-axes': false };
+      var refresh = function () {
+        var list = Object.keys(hidden).filter(function (k) { return hidden[k]; });
+        var out = list.length ? withLayersHidden(svgText, list) : svgText;
+        if (out) img.src = encodeSvgDataUrl(out);
+      };
+      [['layer-grid', 'viewer.grid', 'Lưới'], ['layer-axes', 'viewer.axes', 'Trục']].forEach(function (cfg) {
+        if (svgText.indexOf('id="' + cfg[0] + '"') < 0) return;
+        var b = document.createElement('button'); b.type = 'button'; b.className = 'visual-btn tg-zoom-btn tg-layer-btn';
+        b.textContent = label(cfg[1], cfg[2]); b.setAttribute('aria-pressed', 'true'); b.setAttribute('data-layer', cfg[0]);
+        b.addEventListener('click', function () {
+          hidden[cfg[0]] = !hidden[cfg[0]]; b.setAttribute('aria-pressed', String(!hidden[cfg[0]])); refresh();
+        });
+        bar.appendChild(b);
+      });
+    }
     var innerBar = inner.querySelector('.visual-lightbox-bar');
     if (innerBar) innerBar.insertBefore(bar, innerBar.firstChild); else inner.appendChild(bar);
 
@@ -136,6 +179,7 @@
       '.tg-zoom-bar{display:inline-flex;align-items:center;gap:6px;margin-right:auto}',
       '.tg-zoom-btn{min-width:44px;min-height:44px;font-size:18px;line-height:1}',
       '.tg-zoom-btn[disabled]{opacity:.45;cursor:not-allowed}',
+      '.tg-layer-btn{min-width:auto;padding:0 12px;font-size:13px;font-weight:600}.tg-layer-btn[aria-pressed="false"]{opacity:.55;text-decoration:line-through}',
       '.tg-zoom-level{min-width:3.5em;text-align:center;font:600 13px/1 system-ui,sans-serif;font-variant-numeric:tabular-nums}'
     ].join('\n');
     document.head.appendChild(s);
@@ -155,6 +199,6 @@
     scan(document);
   }
 
-  window.TGVisualViewer = { _clampPan: clampPan, _zoomAt: zoomAt, MIN: MIN, MAX: MAX };
+  window.TGVisualViewer = { _clampPan: clampPan, _zoomAt: zoomAt, _decode: decodeSvgDataUrl, _hide: withLayersHidden, MIN: MIN, MAX: MAX };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

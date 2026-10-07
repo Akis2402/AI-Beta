@@ -17,8 +17,12 @@ r = D.tryRender('Giải bất phương trình 2x - 3 > 5 và biểu diễn tập
 ok(r.status === 'rendered' && r.category === 'inequality_number_line', 'trục số -> rendered', [r.status, r.category]);
 r = D.tryRender('Biểu diễn miền nghiệm của hệ bất phương trình: x + y ≤ 1; x + y ≥ 3', 'math');
 ok(r.status === 'contradiction' && /vô nghiệm/.test(r.errors[0].detail), 'vô nghiệm -> contradiction (mô tả tiếng Việt)', r.errors);
-r = D.tryRender('Giải bất phương trình x² - 4 < 0 và biểu diễn trên trục số', 'math');
-ok(r.status === 'not_deterministic', 'phi tuyến -> not_deterministic (không vẽ bừa)', [r.status, r.reason]);
+r = D.tryRender('Giải bất phương trình x² - 4 < 0 và biểu diễn tập nghiệm trên trục số', 'math');
+ok(r.status === 'rendered' && r.category === 'inequality_number_line' && /\(−2; 2\)/.test(r.svg), 'bậc hai x²−4<0 -> trục số (−2; 2)', [r.status, r.category]);
+r = D.tryRender('Biểu diễn miền nghiệm của bất phương trình x² + y² ≤ 9', 'math');
+ok(r.status === 'rendered' && r.category === 'inequality_region_curved', 'đường tròn -> region_curved', [r.status, r.category]);
+r = D.tryRender('Giải bất phương trình x³ - 8 < 0 và biểu diễn trên trục số', 'math');
+ok(r.status === 'not_deterministic', 'bậc 3 -> not_deterministic (không vẽ bừa)', [r.status, r.reason]);
 
 console.log('# Hồi quy: hình học / vật lí không bị nuốt');
 r = D.tryRender('Cho tam giác ABC vuông tại A có AB = 3 cm, AC = 4 cm. Tính BC và vẽ hình.', 'math');
