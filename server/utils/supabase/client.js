@@ -94,6 +94,19 @@ const auth = {
     const cfg = getConfig().supabase;
     const res = await call('POST', '/auth/v1/logout?scope=local', { apiKey: cfg.anonKey, bearer: accessToken });
     return { ok: res.ok, status: res.status };
+  },
+  /** Gửi email đặt lại mật khẩu. GoTrue trả 200 cả khi email không tồn tại (không lộ tài khoản). */
+  async recover(email, redirectTo) {
+    const cfg = getConfig().supabase;
+    const q = redirectTo ? `?redirect_to=${encodeURIComponent(redirectTo)}` : '';
+    const res = await call('POST', `/auth/v1/recover${q}`, { apiKey: cfg.anonKey, body: { email } });
+    return { ok: res.ok, status: res.status, data: await readJson(res) };
+  },
+  /** Đổi mật khẩu bằng access token (token khôi phục trong link email). GoTrue xác minh token. */
+  async updatePassword(accessToken, password) {
+    const cfg = getConfig().supabase;
+    const res = await call('PUT', '/auth/v1/user', { apiKey: cfg.anonKey, bearer: accessToken, body: { password } });
+    return { ok: res.ok, status: res.status, data: await readJson(res) };
   }
 };
 
@@ -124,6 +137,15 @@ async function upsert(table, row, onConflict) {
   const data = await readJson(res);
   if (!res.ok) throw new SupabaseError(`Ghi ${table} thất bại (HTTP ${res.status}).`, { code: 'supabase_upsert_failed', detail: data && (data.message || data._raw) });
   return Array.isArray(data) ? data[0] : data;
+}
+
+/** Cập nhật dòng theo bộ lọc PostgREST (service role). Trả dòng đã cập nhật hoặc null. */
+async function patch(table, query, body) {
+  const cfg = getConfig().supabase;
+  const res = await call('PATCH', `/rest/v1/${encodeURIComponent(table)}?${query}`, { apiKey: cfg.serviceKey, body, headers: { Prefer: 'return=representation' } });
+  const data = await readJson(res);
+  if (!res.ok) throw new SupabaseError(`Cập nhật ${table} thất bại (HTTP ${res.status}).`, { code: 'supabase_patch_failed', detail: data && (data.message || data._raw) });
+  return Array.isArray(data) ? (data[0] || null) : data;
 }
 
 async function remove(table, query) {
@@ -162,4 +184,4 @@ const storage = {
 
 function isConfigured() { return getConfig().supabase.configured; }
 
-module.exports = { auth, rpc, select, upsert, remove, storage, isConfigured, SupabaseError, _setFetchForTest };
+module.exports = { auth, rpc, select, upsert, patch, remove, storage, isConfigured, SupabaseError, _setFetchForTest };

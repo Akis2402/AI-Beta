@@ -14,6 +14,8 @@
 //   AUTH_SIGNUP_POW_BITS      độ khó proof-of-work khi ĐĂNG KÝ (số bit 0 đầu của SHA-256; 0 = tắt; mặc định 16 ≈ 1 giây)
 //   RATE_LIMIT_SIGNUP         số lần đăng ký tối đa / giờ / IP (mặc định 5)
 //   AUTH_POW_SECRET           khóa ký challenge (mặc định: dẫn xuất từ SUPABASE_SERVICE_ROLE_KEY)
+//   AUTH_REDIRECT_URL         URL trang web mà link “đặt lại mật khẩu” trong email đưa người dùng về (tuỳ chọn; phải nằm trong
+//                             Supabase -> Authentication -> URL Configuration -> Redirect URLs; trống = dùng Site URL)
 //   SUPABASE_URL, SUPABASE_ANON_KEY (hoặc NEXT_PUBLIC_*), SUPABASE_SERVICE_ROLE_KEY (CHỈ server)
 //   AUTH_ENFORCEMENT          'on' (mặc định) | 'off' — 'off' bị CẤM khi NODE_ENV=production
 //
@@ -32,6 +34,16 @@ function readInt(env, name, def, { min, max } = {}) {
   if (min !== undefined && n < min) throw new ConfigError(`${name} phải >= ${min}, nhận được ${n}.`);
   if (max !== undefined && n > max) throw new ConfigError(`${name} phải <= ${max}, nhận được ${n}.`);
   return n;
+}
+
+/** URL tuỳ chọn (http/https). Trống => ''. Sai định dạng => ConfigError (không âm thầm bỏ qua). */
+function readUrl(env, name) {
+  const raw = String(env[name] || '').trim();
+  if (!raw) return '';
+  let u;
+  try { u = new URL(raw); } catch (_) { throw new ConfigError(`${name} phải là URL hợp lệ, nhận được "${raw}".`); }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new ConfigError(`${name} phải bắt đầu bằng https:// (hoặc http:// khi dev).`);
+  return u.toString();
 }
 
 const RESERVE_DEFAULTS = Object.freeze({ chat: 8000, generate: 4000, recommend: 3000, study: 3000, source: 6000, visual: 4000 });
@@ -71,7 +83,8 @@ function loadConfig(env = process.env) {
     auth: Object.freeze({
       powBits: readInt(env, 'AUTH_SIGNUP_POW_BITS', 16, { min: 0, max: 24 }),
       signupPerHour: readInt(env, 'RATE_LIMIT_SIGNUP', 5, { min: 1, max: 1000 }),
-      powSecret: String(env.AUTH_POW_SECRET || '').trim()
+      powSecret: String(env.AUTH_POW_SECRET || '').trim(),
+      redirectUrl: readUrl(env, 'AUTH_REDIRECT_URL')
     }),
     quota: Object.freeze({
       tokenLimit: readInt(env, 'AI_TOKEN_LIMIT', 100000, { min: 1000 }),

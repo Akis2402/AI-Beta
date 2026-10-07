@@ -67,6 +67,11 @@ const realFetch = global.fetch;
     assert.throws(() => cfgMod.loadConfig({ RATE_LIMIT_SIGNUP: '0' }), /RATE_LIMIT_SIGNUP/);
     assert.throws(() => cfgMod.loadConfig({ AI_IMAGE_TOKEN_COST: '5' }), /AI_IMAGE_TOKEN_COST/);
   });
+  await t('config: AUTH_REDIRECT_URL hợp lệ / trống ok; sai định dạng hoặc giao thức lạ => lỗi rõ ràng', () => {
+    assert.strictEqual(cfgMod.loadConfig({}).auth.redirectUrl, '');
+    assert.strictEqual(cfgMod.loadConfig({ AUTH_REDIRECT_URL: 'https://hoc.example.vn' }).auth.redirectUrl, 'https://hoc.example.vn/');
+    ['khong-phai-url', 'javascript:alert(1)', 'ftp://x.vn', 'data:text/html,x'].forEach((v) => assert.throws(() => cfgMod.loadConfig({ AUTH_REDIRECT_URL: v }), /AUTH_REDIRECT_URL/));
+  });
 
   // ---------------- chi phí cố định ----------------
   await t('recordFlatCost: không có context => no-op, không ném lỗi', () => {

@@ -25,6 +25,9 @@ process.env.AI_MAX_CONCURRENT = '2';
 process.env.AI_RESERVE_CHAT = '2000';
 process.env.AI_MIN_REQUEST_TOKENS = '500';
 process.env.AI_ABORT_SETTLE_GRACE_MS = '200';
+process.env.AUTH_SIGNUP_POW_BITS = '10'; // đăng ký PHẢI giải PoW (10 bit để test nhanh)
+process.env.RATE_LIMIT_SIGNUP = '11';    // 11 POST /signup đầu được phép (limiter đếm cả lượt lỗi); lượt thứ 12 ở mục #15 phải bị chặn
+process.env.RATE_LIMIT_AUTH = '500';     // không để limiter đăng nhập chung gây nhiễu test
 process.env.NODE_ENV = 'test';
 delete process.env.AUTH_ENFORCEMENT;
 
@@ -35,6 +38,7 @@ const users = new Map(); // email -> {id, password}
 const tokens = new Map(); // access -> userId
 const refreshes = new Map(); // refresh -> userId
 const revoked = new Set();
+const recovered = [];
 function issue(userId, email) {
   const access = jwt(userId, Math.floor(Date.now() / 1000) + 3600 + Math.floor(Math.random() * 100000));
   tokens.set(access, userId);
@@ -52,6 +56,19 @@ const mock = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
   try {
+    if (req.method === 'POST' && p === '/auth/v1/recover') { recovered.push(body.email); return send(200, {}); }
+    if (req.method === 'PUT' && p === '/auth/v1/user') {
+      const t = (req.headers.authorization || '').replace('Bearer ', '');
+      if (revoked.has(t) || !tokens.has(t)) return send(401, { msg: 'invalid JWT' });
+      const id = tokens.get(t); const email = emailOf(id);
+      if (users.get(email).password === body.password) return send(422, { error_code: 'same_password', msg: 'same' });
+      users.get(email).password = body.password; return send(200, { id, email });
+    }
+    if (req.method === 'PATCH' && p === '/rest/v1/profiles') {
+      const id = url.searchParams.get('id').replace('eq.', '');
+      const r = await pool.query('update public.profiles set display_name=$1 where id=$2 returning id,display_name,role', [body.display_name, id]);
+      return send(200, r.rows);
+    }
     if (p === '/auth/v1/signup') {
       if (users.has(body.email)) return send(200, { id: users.get(body.email).id, email: body.email }); // email tồn tại: GoTrue trả "giả thành công"
       const id = crypto.randomUUID();
@@ -134,6 +151,15 @@ const cookieJar = (sc) => sc.map((c) => c.split(';')[0]).filter((c) => !/=$/.tes
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const q = (sql, args) => pool.query(sql, args).then((r) => r.rows);
 
+const lzBits = (buf) => { let bits = 0; for (const b of buf) { if (b === 0) { bits += 8; continue; } bits += Math.clz32(b) - 24; break; } return bits; };
+function solvePow(salt, bits) { for (let n = 0; ; n += 1) { if (lzBits(crypto.createHash('sha256').update(`${salt}:${n}`).digest()) >= bits) return String(n); } }
+/** Đăng ký như trình duyệt thật: lấy challenge -> giải PoW -> POST. */
+async function signup(body) {
+  const ch = (await call('GET', '/api/auth/challenge')).json;
+  const pow = ch && ch.enabled ? { challenge: ch.token, nonce: solvePow(ch.salt, ch.bits) } : {};
+  return call('POST', '/api/auth/signup', { body: { ...body, ...pow } });
+}
+
 (async () => {
   await q('truncate public.ai_usage, public.ai_quota cascade');
   await new Promise((r) => mock.listen(MOCK_PORT, r));
@@ -150,12 +176,12 @@ const q = (sql, args) => pool.query(sql, args).then((r) => r.rows);
   ok(r.status === 400 && r.json.code === 'weak_password', 'mật khẩu yếu bị từ chối', r.json);
   r = await call('POST', '/api/auth/signup', { body: { email: 'a@x.vn', password: 'abcdef12', confirmPassword: 'zzzzzz99' } });
   ok(r.status === 400 && r.json.code === 'password_mismatch', 'confirm không khớp bị từ chối', r.json);
-  r = await call('POST', '/api/auth/signup', { body: { email: ' A@X.vn ', password: 'abcdef12', confirmPassword: 'abcdef12', remember: true } });
+  r = await signup({ email: ' A@X.vn ', password: 'abcdef12', confirmPassword: 'abcdef12', remember: true });
   ok(r.status === 200 && r.json.status === 'authenticated', 'đăng ký ok (trim + lowercase email)', r.json);
   ok(r.setCookie.length === 3 && r.setCookie.every((c) => /HttpOnly/.test(c) && /SameSite=Lax/.test(c)), '3 cookie httpOnly SameSite=Lax', r.setCookie);
   ok(/tg_rt=.*Max-Age=2592000/.test(r.setCookie.join('|')), 'remember => refresh cookie bền 30 ngày');
   let cookieA = cookieJar(r.setCookie);
-  const dup = await call('POST', '/api/auth/signup', { body: { email: 'a@x.vn', password: 'abcdef12', confirmPassword: 'abcdef12' } });
+  const dup = await signup({ email: 'a@x.vn', password: 'abcdef12', confirmPassword: 'abcdef12' });
   ok(dup.status === 200 && dup.json.status === 'confirmation_pending' && !dup.setCookie.length, 'email đã tồn tại -> thông điệp trung tính, không cookie', dup.json);
 
   console.log('# 3. Đăng nhập / session');
@@ -234,7 +260,7 @@ const q = (sql, args) => pool.query(sql, args).then((r) => r.rows);
   ok(r.status === 429 && r.json.code === 'quota_cooldown', 'login lại: vẫn cooldown', r.json);
 
   console.log('# 11. User khác có quota riêng');
-  r = await call('POST', '/api/auth/signup', { body: { email: 'b@x.vn', password: 'abcdef12', confirmPassword: 'abcdef12' } });
+  r = await signup({ email: 'b@x.vn', password: 'abcdef12', confirmPassword: 'abcdef12' });
   const cookieB = cookieJar(r.setCookie);
   r = await call('POST', '/api/chat', { cookie: cookieB, body: { inTok: 100, outTok: 100 } });
   ok(r.status === 200, 'user B không bị ảnh hưởng bởi cooldown của A');
@@ -255,7 +281,84 @@ const q = (sql, args) => pool.query(sql, args).then((r) => r.rows);
   r = await call('POST', '/api/chat', { cookie: `tg_at=${expired}; tg_rt=rt_bad; tg_rm=0`, body: { inTok: 5 } });
   ok(r.status === 401 && r.json.code === 'session_expired' && r.setCookie.every((c) => /Max-Age=0/.test(c)), 'refresh hỏng => session_expired + xoá cookie', r.json);
 
-  console.log('# 14. Fail-closed khi Supabase chết');
+  console.log('# 14. Chống tạo hàng loạt tài khoản: PoW bắt buộc khi đăng ký');
+  const goodBody = { password: 'abcdef12', confirmPassword: 'abcdef12' };
+  r = await call('POST', '/api/auth/signup', { body: { ...goodBody, email: 'c@x.vn' } });
+  ok(r.status === 400 && r.json.code === 'pow_missing', 'đăng ký KHÔNG kèm PoW bị từ chối (pow_missing)', r.json);
+  ok(!users.has('c@x.vn'), 'Supabase KHÔNG bị gọi khi PoW thiếu (không tạo user)');
+  let ch = (await call('GET', '/api/auth/challenge')).json;
+  ok(ch.enabled === true && ch.bits === 10 && typeof ch.token === 'string' && typeof ch.salt === 'string', 'GET /challenge trả token/salt/bits', ch);
+  r = await call('POST', '/api/auth/signup', { body: { ...goodBody, email: 'c@x.vn', challenge: ch.token, nonce: '99999999' } });
+  ok(r.status === 400 && r.json.code === 'pow_invalid', 'nonce sai bị từ chối (pow_invalid)', r.json);
+  const nonceC = solvePow(ch.salt, ch.bits);
+  r = await call('POST', '/api/auth/signup', { body: { ...goodBody, email: 'c@x.vn', challenge: ch.token, nonce: nonceC } });
+  ok(r.status === 200 && users.has('c@x.vn'), 'PoW đúng => tạo tài khoản', r.json);
+  r = await call('POST', '/api/auth/signup', { body: { ...goodBody, email: 'd@x.vn', challenge: ch.token, nonce: nonceC } });
+  ok(r.status === 400 && r.json.code === 'pow_replay' && !users.has('d@x.vn'), 'dùng lại cùng lời giải cho tài khoản thứ hai bị chặn (pow_replay)', r.json);
+  ch = (await call('GET', '/api/auth/challenge')).json;
+  r = await call('POST', '/api/auth/signup', { body: { ...goodBody, email: 'khong-hop-le', challenge: ch.token, nonce: solvePow(ch.salt, ch.bits) } });
+  ok(r.status === 400 && r.json.code === 'invalid_email', 'gõ sai email trả lỗi email (kiểm tra rẻ chạy TRƯỚC PoW)', r.json);
+  r = await call('POST', '/api/auth/signup', { body: { ...goodBody, email: 'e@x.vn', challenge: ch.token, nonce: solvePow(ch.salt, ch.bits) } });
+  ok(r.status === 200, 'challenge KHÔNG bị đốt khi form sai: dùng lại cho form đúng vẫn được', r.json);
+
+  console.log('# 15. Giới hạn đăng ký theo IP (rateLimit.js thật)');
+  r = await signup({ ...goodBody, email: 'f@x.vn' });
+  ok(r.status === 429 && !users.has('f@x.vn'), 'vượt RATE_LIMIT_SIGNUP => 429, không tạo user', { s: r.status, j: r.json });
+  r = await call('POST', '/api/auth/login', { body: { email: 'a@x.vn', password: 'abcdef12' } });
+  ok(r.status === 200, 'đăng nhập vẫn hoạt động khi đăng ký bị giới hạn');
+
+  console.log('# 15b. Quên mật khẩu (PoW + trung tính) / đặt lại mật khẩu / hồ sơ');
+  r = await call('POST', '/api/auth/forgot', { body: { email: 'khong-hop-le' } });
+  ok(r.status === 400 && r.json.code === 'invalid_email', 'forgot: email sai => 400', r.json);
+  r = await call('POST', '/api/auth/forgot', { body: { email: 'a@x.vn' } });
+  ok(r.status === 400 && r.json.code === 'pow_missing' && recovered.length === 0, 'forgot: thiếu PoW => 400, KHÔNG gửi email (không dùng làm cổng spam)', { j: r.json, rec: recovered.length });
+  let chF = (await call('GET', '/api/auth/challenge')).json;
+  const nF = solvePow(chF.salt, chF.bits);
+  const rKnown = await call('POST', '/api/auth/forgot', { body: { email: 'a@x.vn', challenge: chF.token, nonce: nF } });
+  ok(rKnown.status === 200 && recovered.includes('a@x.vn'), 'forgot: PoW đúng => gửi email khôi phục', rKnown.json);
+  chF = (await call('GET', '/api/auth/challenge')).json;
+  const rUnknown = await call('POST', '/api/auth/forgot', { body: { email: 'khong.ton.tai@x.vn', challenge: chF.token, nonce: solvePow(chF.salt, chF.bits) } });
+  ok(rUnknown.status === 200 && JSON.stringify(rUnknown.json) === JSON.stringify(rKnown.json), 'forgot: email lạ trả Y HỆT câu trả lời (không dò được tài khoản)', { known: rKnown.json, unknown: rUnknown.json });
+  r = await call('POST', '/api/auth/forgot', { body: { email: 'a@x.vn', challenge: chF.token, nonce: solvePow(chF.salt, chF.bits) } });
+  ok(r.status === 400 && r.json.code === 'pow_replay', 'forgot: tái dùng lời giải bị chặn', r.json);
+
+  r = await call('POST', '/api/auth/login', { body: { email: 'a@x.vn', password: 'abcdef12' } });
+  const recToken = decodeURIComponent((r.setCookie.find((c) => c.startsWith('tg_at=')) || '').split(';')[0].slice(6));
+  r = await call('POST', '/api/auth/reset', { body: { accessToken: 'khong-phai-jwt', password: 'matkhaumoi9' } });
+  ok(r.status === 400 && r.json.code === 'reset_token_invalid', 'reset: token sai dạng => 400', r.json);
+  r = await call('POST', '/api/auth/reset', { body: { accessToken: recToken, password: 'abc' } });
+  ok(r.status === 400 && r.json.code === 'weak_password', 'reset: mật khẩu yếu => 400', r.json);
+  r = await call('POST', '/api/auth/reset', { body: { accessToken: recToken, password: 'matkhaumoi9', confirmPassword: 'khac12345' } });
+  ok(r.status === 400 && r.json.code === 'password_mismatch', 'reset: xác nhận không khớp => 400', r.json);
+  r = await call('POST', '/api/auth/reset', { body: { accessToken: jwt('ai-do', Math.floor(Date.now() / 1000) + 3600), password: 'matkhaumoi9' } });
+  ok(r.status === 400 && r.json.code === 'reset_token_invalid', 'reset: token GoTrue không nhận => reset_token_invalid', r.json);
+  r = await call('POST', '/api/auth/reset', { body: { accessToken: recToken, password: 'abcdef12' } });
+  ok(r.status === 400 && r.json.code === 'same_password', 'reset: trùng mật khẩu cũ => same_password', r.json);
+  r = await call('POST', '/api/auth/reset', { body: { accessToken: recToken, password: 'matkhaumoi9', confirmPassword: 'matkhaumoi9' } });
+  ok(r.status === 200 && r.json.status === 'password_updated' && !r.setCookie.length, 'reset: thành công, KHÔNG tự đăng nhập (không đặt cookie)', r.json);
+  r = await call('POST', '/api/auth/login', { body: { email: 'a@x.vn', password: 'abcdef12' } });
+  ok(r.status === 401, 'sau reset: mật khẩu CŨ bị từ chối');
+  r = await call('POST', '/api/auth/login', { body: { email: 'a@x.vn', password: 'matkhaumoi9' } });
+  ok(r.status === 200, 'sau reset: mật khẩu MỚI đăng nhập được');
+  const cookieNew = cookieJar(r.setCookie);
+
+  r = await call('PATCH', '/api/auth/profile', { body: { displayName: 'Học sinh A' } });
+  ok(r.status === 401, 'profile: chưa đăng nhập => 401');
+  r = await call('PATCH', '/api/auth/profile', { cookie: cookieNew, headers: { Origin: 'https://evil.example' }, body: { displayName: 'X' } });
+  ok(r.status === 403 && r.json.code === 'bad_origin', 'profile: Origin lạ => 403', r.json);
+  r = await call('PATCH', '/api/auth/profile', { cookie: cookieNew, body: { displayName: '  Học   sinh A  ' } });
+  ok(r.status === 200 && r.json.displayName === 'Học sinh A', 'profile: lưu (gọn khoảng trắng)', r.json);
+  r = await call('GET', '/api/auth/session', { cookie: cookieNew });
+  ok(r.json.user.displayName === 'Học sinh A' && r.json.user.role === 'user', 'session trả tên mới, role vẫn user', r.json.user);
+  for (const bad of ['', '   ', 'x'.repeat(61), 'tr\u202eoi', 'a\u0000b', 'a\nb\u0007', 42]) {
+    r = await call('PATCH', '/api/auth/profile', { cookie: cookieNew, body: { displayName: bad } });
+    ok(r.status === 400 && r.json.code === 'invalid_display_name', `profile: tên không hợp lệ bị từ chối (${JSON.stringify(bad).slice(0, 20)})`, r.json);
+  }
+  r = await call('PATCH', '/api/auth/profile', { cookie: cookieNew, body: { displayName: 'Tên mới', role: 'admin' } });
+  const roleRow = await q('select role from public.profiles where email = $1', ['a@x.vn']);
+  ok(r.status === 200 && roleRow[0].role === 'user', 'profile: gửi kèm role=admin KHÔNG nâng quyền', roleRow);
+
+  console.log('# 16. Fail-closed khi Supabase chết');
   mock.closeAllConnections(); mock.close(); await sleep(150);
   require('../server/utils/auth/session')._clearCachesForTest();
   r = await call('POST', '/api/chat', { cookie: `tg_at=${expired}; tg_rt=${rt}`, body: { inTok: 5 } });
