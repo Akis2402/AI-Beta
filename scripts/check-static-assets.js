@@ -57,15 +57,25 @@ if (!fs.existsSync(manifestPath)) {
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const html = fs.readFileSync(indexHtmlPath, 'utf8');
+// Nhiều trang: manifest.pages liệt kê asset của từng trang (index.html, landing.html, auth.html).
+const pageHtml = {};
+for (const f of Object.keys(manifest.pages || { 'index.html': [] })) {
+  pageHtml[f] = fs.readFileSync(path.join(publicDir, f), 'utf8');
+}
+const allHtml = Object.values(pageHtml).join('\n');
 
 // ---------- 1 & 2: mỗi asset trong manifest phải tồn tại trên đĩa VÀ được index.html tham chiếu ----------
 for (const [logicalName, urlPath] of Object.entries(manifest.assets)) {
   const diskPath = path.join(publicDir, urlPath.replace(/^\//, ''));
   check(`${logicalName}: file đã-hash tồn tại trên đĩa (${urlPath})`, fs.existsSync(diskPath));
 
-  const tagCount = html.split(urlPath).length - 1;
-  check(`${logicalName}: index.html tham chiếu ĐÚNG 1 lần tới ${urlPath}`, tagCount === 1,
-    `tìm thấy ${tagCount} lần trong index.html`);
+  const owners = Object.keys(pageHtml).filter((f) => !manifest.pages || (manifest.pages[f] || []).includes(logicalName));
+  check(`${logicalName}: ít nhất 1 trang tham chiếu tới asset này`, owners.length > 0);
+  for (const f of owners) {
+    const tagCount = pageHtml[f].split(urlPath).length - 1;
+    check(`${logicalName}: ${f} tham chiếu ĐÚNG 1 lần tới ${urlPath}`, tagCount === 1,
+      `tìm thấy ${tagCount} lần trong ${f}`);
+  }
 
   // ---------- BUG-002: HASH PHẢI KHỚP NỘI DUNG (§14) ----------
   // Lỗ hổng của bản trước: script này chỉ kiểm tra file đã-hash CÓ TỒN TẠI, chưa bao giờ kiểm tra
@@ -107,8 +117,8 @@ for (const name of CORE_NAMES) {
 }
 
 // ---------- 4: không có <script src> hay <link href> trỏ ra CDN bên thứ 3 ngoài ý muốn ----------
-const scriptSrcs = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]);
-const linkHrefs = [...html.matchAll(/<link[^>]+href="([^"]+)"/g)].map((m) => m[1]);
+const scriptSrcs = [...allHtml.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]);
+const linkHrefs = [...allHtml.matchAll(/<link[^>]+href="([^"]+)"/g)].map((m) => m[1]);
 const ALLOWED_EXTERNAL_ORIGINS = ['https://fonts.googleapis.com', 'https://fonts.gstatic.com'];
 function originOf(url) {
   try { return new URL(url).origin; } catch (e) { return null; }

@@ -120,14 +120,15 @@ async function main() {
     });
 
     await test('index.html KHÔNG chứa 2 thẻ <script> nào trỏ cùng 1 file JS core (không load trùng)', async () => {
-      const res = await get(server, '/');
+      // "/" nay là trang giới thiệu (landing) — app thật nằm ở /index.html.
+      const res = await get(server, '/index.html');
       // FIX: stem TRƯỚC ĐÂY suy từ logicalName (vd "translations.js" -> "/js/translations...") —
       // SAI khi asset thật nằm trong subfolder (vd i18n.js/translations.js build ra
       // "/js/i18n/translations.<hash>.js"), khiến regex không bao giờ khớp và test luôn báo giả
       // "0 lần" dù index.html hoàn toàn đúng. Nay suy stem từ CHÍNH đường dẫn thật trong manifest
       // (giữ nguyên subfolder), escape ký tự đặc biệt regex (dấu / không cần escape nhưng để chắc
       // chắn với path lạ trong tương lai).
-      for (const logicalName of Object.keys(manifest.assets)) {
+      for (const logicalName of (manifest.pages ? manifest.pages['index.html'] : Object.keys(manifest.assets))) {
         if (!logicalName.endsWith('.js')) continue;
         const assetPath = manifest.assets[logicalName]; // vd "/js/i18n/translations.c0f5a9cc96.js"
         const stem = assetPath.replace(/\.[0-9a-f]{10}\.js$/, '').replace(/\.js$/, '');
@@ -137,6 +138,22 @@ async function main() {
         assert.strictEqual(count, 1, `${logicalName} xuất hiện ${count} lần trong index.html trả về`);
       }
     });
+    // Các trang mới: mỗi trang chỉ được nạp mỗi asset đúng 1 lần, và URL "/" phải là landing, "/auth" phải là trang đăng nhập.
+    for (const [pageFile, pageUrl] of [['landing.html', '/'], ['auth.html', '/auth']]) {
+      await test(`GET ${pageUrl} -> ${pageFile}: 200, HTML, no-store, mỗi asset nạp đúng 1 lần`, async () => {
+        const res = await get(server, pageUrl);
+        assert.strictEqual(res.status, 200);
+        assert.ok((res.headers['content-type'] || '').includes('html'));
+        assert.ok(/no-store/.test(res.headers['cache-control'] || ''), `Cache-Control: "${res.headers['cache-control']}"`);
+        assert.strictEqual(res.body, fs.readFileSync(path.join(publicDir, pageFile), 'utf8'), 'nội dung trả về khác file trên đĩa');
+        const names = manifest.pages && manifest.pages[pageFile];
+        assert.ok(Array.isArray(names) && names.length > 0, `manifest.pages thiếu ${pageFile}`);
+        for (const n of names) {
+          const n2 = res.body.split(manifest.assets[n]).length - 1;
+          assert.strictEqual(n2, 1, `${n} xuất hiện ${n2} lần trong ${pageFile}`);
+        }
+      });
+    }
   } finally {
     server.close();
   }

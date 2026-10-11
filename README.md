@@ -330,3 +330,12 @@ Chi tiết đầy đủ, bảng kiểm chứng và giới hạn: xem **`HYBRID-V
 - **`output_redundancy`**: mỗi câu trả lời cuối ghi 1 dòng log `branchCount` (số "Cách N") và `repeatedEquationCount` (phương trình lặp). Tất định, 0 token, chỉ quan sát — không chặn/viết lại response.
 - **Audit `await` của `chat.js`**: xem `AWAIT-AUDIT-chat-js.md` (28 `await` đã phân loại; `test/await-audit.test.js` khoá số lượng). Đã bỏ 1 RTT thừa: `hydrate` + `reserveRotationSlot` giờ chạy song song.
 
+## Trang giới thiệu, trang đăng nhập và linh vật Akis
+
+- **Route**: `/` → `public/landing.html` (giới thiệu), `/auth` → `public/auth.html` (đăng nhập / đăng ký / quên mật khẩu; `?mode=login|signup|forgot`, `?next=/index.html`), `/index.html` → app. Khai báo ở `proxy.ts` (Next), `app/page.tsx` (dự phòng), `server/app.js` (legacy-express) và `vercel.json` (Cache-Control no-store). Link email Supabase (khôi phục mật khẩu / lỗi) trỏ về `/` hay `/auth` đều được chuyển nguyên hash sang `/index.html` để `authUI.js` xử lý.
+- **Không tốn token AI**: JS của hai trang chỉ gọi `/api/auth/*` (cookie HttpOnly, PoW, giới hạn tốc độ dùng chung server với modal trong app). `public/js/auth/authClient.js` là lớp gọi API + PoW (có SHA-256 dự phòng cho ngữ cảnh không có `crypto.subtle`) + `safeNext()` chống open-redirect.
+- **Akis = ẢNH GỐC người dùng cung cấp** (không vẽ lại, không AI sinh ảnh). `public/js/mascot/akisImage.js` chứa đúng ảnh đó (chỉ cắt khung + thu nhỏ, WebP 560×410) dạng data URI; `public/favicon.svg` là vỏ SVG bọc đúng ảnh đã cắt (JPEG 96×96). `test/akis-mascot-image.test.js` khoá cứng sha256 của cả hai: thay ảnh khác hoặc vẽ lại là test đỏ. Đổi ảnh: tạo lại hai file này từ ảnh mới rồi cập nhật hai hằng số sha256 trong test.
+- **Biểu cảm**: 15 trạng thái (`idle`, `wave`, `look`, `peek`, `type-email`, `hide-eyes`, `working`, `success`, `error`, `sleepy`, `point-left`, `point-right`, `hold-card`, `spin-3d`, `celebrate`) chỉ là chuyển động/ánh sáng của chính tấm ảnh (`public/css/mascot.css`), tắt chuyển động khi `prefers-reduced-motion`.
+- **Trong app**: `public/js/ui/mascotCompanion.js` (nạp SAU `app.js`) — Akis đứng góc phải khi đã đăng nhập, tour 4 bước lần đầu (`localStorage` `tg.akis.tour.v1`), thu nhỏ/mở lại (`tg.akis.min`). Chạy lại tour: `TGAkis.startTour()` trong console.
+- **Build nhiều trang**: `scripts/build.js` xử lý cả 3 trang (`PAGES`); `asset-manifest.json` có thêm `pages` liệt kê asset từng trang; `check-static-assets.js` kiểm từng trang.
+

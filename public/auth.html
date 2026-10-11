@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Đăng nhập — Trợ Giải</title>
+  <meta name="description" content="Đăng nhập hoặc tạo tài khoản Trợ Giải để học cùng Akis.">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#04061A">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="apple-touch-icon" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=Itim&display=swap">
+  <link rel="stylesheet" href="/css/site.css">
+  <link rel="stylesheet" href="/css/mascot.css">
+  <link rel="stylesheet" href="/css/auth.css">
+</head>
+<body class="ap">
+  <a class="skip" href="#main" data-i18n="site.skip">Bỏ qua tới nội dung chính</a>
+
+  <header class="topbar">
+    <div class="container bar">
+      <a class="brand" href="/" aria-label="Trợ Giải">
+        <img class="brand-mark" src="/favicon.svg" alt="" width="34" height="34">
+        <span data-i18n="site.brand">Trợ Giải</span>
+      </a>
+      <button class="lang-btn" id="langBtn" type="button" data-i18n="site.langSwitch" data-i18n-aria-label="site.langAria" aria-label="Đổi ngôn ngữ giao diện">EN</button>
+    </div>
+  </header>
+
+  <main id="main" class="auth-wrap">
+    <section class="auth-stage" aria-hidden="true">
+      <div class="stage-bubble" id="stageBubble"></div>
+      <div class="stage-akis" id="stageAkis"></div>
+    </section>
+
+    <section class="auth-card" aria-labelledby="apTitle">
+      <a class="back" href="/" data-i18n="ap.back">Về trang giới thiệu</a>
+      <h1 id="apTitle" data-i18n="ap.title.login">Chào mừng quay lại</h1>
+      <p class="sub" id="apSub" data-i18n="ap.sub.login">Đăng nhập để tiếp tục học cùng Akis.</p>
+
+      <div class="tabs" id="apTabs" role="tablist" aria-label="Chọn đăng nhập hoặc đăng ký" data-i18n-aria-label="ap.tab.aria">
+        <button class="tab" id="tabLogin" type="button" role="tab" aria-selected="true" aria-controls="apForm" data-mode="login" data-i18n="ap.tab.login">Đăng nhập</button>
+        <button class="tab" id="tabSignup" type="button" role="tab" aria-selected="false" aria-controls="apForm" data-mode="signup" tabindex="-1" data-i18n="ap.tab.signup">Đăng ký</button>
+      </div>
+
+      <form id="apForm" novalidate>
+        <div class="field">
+          <label for="apEmail" data-i18n="ap.f.email">Email</label>
+          <input class="input" id="apEmail" name="email" type="email" inputmode="email" autocomplete="username" autocapitalize="none" spellcheck="false" required aria-describedby="apMsg">
+        </div>
+
+        <div class="field" id="pwField">
+          <label for="apPw" data-i18n="ap.f.pw">Mật khẩu</label>
+          <div class="pw">
+            <input class="input" id="apPw" name="password" type="password" autocomplete="current-password" required aria-describedby="pwHint apMsg">
+            <button class="pw-toggle" id="pwToggle" type="button" aria-pressed="false" aria-controls="apPw" aria-label="Hiện mật khẩu" data-i18n="ap.pw.show" data-i18n-aria-label="ap.pw.showAria">Hiện</button>
+          </div>
+          <p class="hint" id="pwHint" data-i18n="ap.pw.hint" hidden>Ít nhất 8 ký tự, gồm cả chữ và số.</p>
+        </div>
+
+        <div class="field" id="pw2Field" hidden>
+          <label for="apPw2" data-i18n="ap.f.pw2">Nhập lại mật khẩu</label>
+          <input class="input" id="apPw2" name="confirmPassword" type="password" autocomplete="new-password" aria-describedby="apMsg">
+        </div>
+
+        <label class="check" id="rememberRow">
+          <input type="checkbox" id="apRemember" checked>
+          <span data-i18n="ap.remember">Ghi nhớ đăng nhập trên thiết bị này</span>
+        </label>
+
+        <p class="msg" id="apMsg" aria-live="polite"></p>
+
+        <button class="btn btn-lg wide" id="apSubmit" type="submit" data-i18n="ap.submit.login">Đăng nhập</button>
+
+        <div class="links">
+          <button class="linkbtn" id="forgotLink" type="button" data-i18n="ap.forgotLink">Quên mật khẩu?</button>
+          <button class="linkbtn" id="backLogin" type="button" data-i18n="ap.backLogin" hidden>Quay lại đăng nhập</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <script src="/js/i18n/translations.js"></script>
+  <script src="/js/i18n/languageStore.js"></script>
+  <script src="/js/i18n/i18n.js"></script>
+  <script src="/js/mascot/akisImage.js"></script>
+  <script src="/js/mascot/mascot.js"></script>
+  <script src="/js/auth/authClient.js"></script>
+  <script src="/js/pages/auth.js"></script>
+</body>
+</html>

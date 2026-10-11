@@ -88,6 +88,13 @@ const jsonSmall = express.json({ limit: '64kb' });
 // `/api/health` NHƯNG handler health đã bị đi qua từ trước -> request rơi xuống notFoundHandler và
 // trả 404. Tức là chính endpoint dùng để kiểm tra "hệ thống còn sống không" là endpoint chết trong
 // đúng cấu hình deploy mà nó được viết ra để phục vụ. Nay normalizer chạy ĐẦU TIÊN.
+// Trang đăng nhập "/auth" (GET, đúng đường dẫn này) PHẢI đứng TRƯỚC normalizer bên dưới: normalizer viết lại
+// "/auth" thành "/api/auth" (cho nền tảng tước tiền tố /api) nên trang sẽ 404. Không đụng /auth/* hay /api/auth/*.
+app.get('/auth', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, must-revalidate');
+  res.sendFile(path.join(__dirname, '..', 'public', 'auth.html'));
+});
+
 app.use((req, res, next) => {
   const apiPrefixes = ['/chat', '/generate', '/recommend', '/study', '/visual', '/source', '/auth', '/assets', '/health'];
   if (apiPrefixes.some((p) => req.url === p || req.url.startsWith(p + '/') || req.url.startsWith(p + '?'))) {
@@ -164,6 +171,14 @@ const publicDir = path.join(__dirname, '..', 'public');
 // Vercel phục vụ static trực tiếp qua CDN edge nên header thật sự áp dụng cho production là ở
 // vercel.json; các dòng dưới đây chỉ đảm bảo `npm start`/`npm run dev` (local, không qua Vercel)
 // có cùng hành vi cache, không lệch giữa 2 môi trường.
+// Trang giới thiệu "/" (khớp proxy.ts khi chạy qua Next). Chỉ đường dẫn CỐ ĐỊNH
+// — KHÔNG phải fallback '*' (fallback đó đã bị xoá vì từng trả HTML cho request JS). App thật vẫn ở /index.html.
+// ("/auth" được khai báo sớm hơn, trước middleware chuẩn hoá /api.)
+app.get('/', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, must-revalidate');
+  res.sendFile(path.join(publicDir, 'landing.html'));
+});
+
 const HASHED_ASSET_RE = /\.[0-9a-f]{10}\.(js|css)$/i;
 app.use(
   express.static(publicDir, {

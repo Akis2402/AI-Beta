@@ -27,6 +27,24 @@
       ]
     },
     {
+      "source": "/landing.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/auth",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/auth.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" }
+      ]
+    },
+    {
       "source": "/js/(.*)\\.[0-9a-f]{10}\\.js",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
