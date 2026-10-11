@@ -1,0 +1,87 @@
+/* =====================================================================================
+   mascot.css — Akis (ẢNH GỐC của bạn, không vẽ lại). Mọi trạng thái chỉ là chuyển động/ánh sáng của chính
+   tấm ảnh: transform, translate/rotate, filter. Chuyển động tắt khi prefers-reduced-motion (vẫn đổi tư thế tĩnh).
+   ===================================================================================== */
+
+.ak { --look-x: 0; --look-y: 0; --p: 0; position: relative; display: block; max-width: 100%; user-select: none; -webkit-user-select: none;
+  mix-blend-mode: lighten; /* nền đen của ảnh hoà vào nền tối của trang; bản sáng dùng khung tối (xem site.css) */ }
+.ak-img { display: block; width: 100%; height: auto; pointer-events: none; -webkit-user-drag: none;
+  /* làm mờ mép khung cắt để không lộ đường viền chữ nhật */
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 4%, #000 96%, transparent), linear-gradient(to bottom, transparent, #000 4%, #000 96%, transparent);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(to right, transparent, #000 4%, #000 96%, transparent), linear-gradient(to bottom, transparent, #000 4%, #000 96%, transparent);
+  mask-composite: intersect; }
+
+/* Bản "body": chỉ lấy vùng thân + mặt của chính ảnh (cắt bằng CSS, không đổi pixel) — dùng cho cỡ nhỏ */
+.ak-body-only { aspect-ratio: 580 / 490; overflow: hidden; border-radius: inherit; }
+.ak-body-only .ak-actor, .ak-body-only .ak-fx { position: absolute; inset: 0; }
+.ak-body-only .ak-img { position: absolute; max-width: none; width: 141.38%; left: -18.97%; top: -4.08%; }
+
+.ak-actor { transform-origin: 50% 100%; animation: ak-breathe 4.2s ease-in-out infinite; }
+.ak-fx { transform-origin: 50% 88%; will-change: transform;
+  /* hướng nhìn: ảnh nghiêng/dịch nhẹ về phía con trỏ (translate/rotate tách riêng khỏi transform của trạng thái) */
+  translate: calc(var(--look-x) * 1.6%) calc(var(--look-y) * 1.4%); rotate: calc(var(--look-x) * 1.4deg);
+  transition: translate .2s ease-out, rotate .2s ease-out, transform .45s cubic-bezier(.34, 1.56, .64, 1), filter .35s; }
+
+@keyframes ak-breathe { 0%, 100% { transform: scale(1, 1); } 50% { transform: scale(1.015, 1.028); } }
+@keyframes ak-wiggle { 0%, 100% { transform: rotate(-3.5deg); } 50% { transform: rotate(3.5deg); } }
+@keyframes ak-nod { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(3%) rotate(1.2deg); } }
+@keyframes ak-work { 0%, 100% { transform: translateY(0); filter: brightness(1) saturate(1); } 50% { transform: translateY(-2%); filter: brightness(1.22) saturate(1.25); } }
+@keyframes ak-hop { 0% { transform: scale(1.04, .94); } 35% { transform: translateY(-9%) scale(.97, 1.04); } 70% { transform: scale(1.04, .94); } 100% { transform: scale(1); } }
+@keyframes ak-glow { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.3) saturate(1.2); } }
+@keyframes ak-shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-4%) rotate(-2deg); } 40% { transform: translateX(3.5%) rotate(2deg); } 60% { transform: translateX(-2.5%); } 80% { transform: translateX(1.5%); } }
+@keyframes ak-spin { 0%, 100% { transform: scaleX(1); } 25% { transform: scaleX(.04); } 50% { transform: scaleX(-1); } 75% { transform: scaleX(.04); } }
+
+/* ---- trạng thái (chỉ chuyển động của chính ảnh) ---- */
+.ak[data-state="wave"] .ak-fx { animation: ak-wiggle 1.2s ease-in-out infinite; }
+.ak[data-state="look"] .ak-fx { rotate: calc(var(--look-x) * 3.2deg); translate: calc(var(--look-x) * 3%) calc(var(--look-y) * 2.4%); }
+.ak[data-state="peek"] .ak-fx { transform: translate(-7%, 15%) rotate(-7deg) scale(.93); }
+.ak[data-state="type-email"] .ak-fx { animation: ak-nod 1.6s ease-in-out infinite; }
+.ak[data-state="hide-eyes"] .ak-fx { transform: rotate(5deg) translateY(2%); filter: brightness(.62) saturate(.85); }
+.ak[data-state="working"] .ak-fx { animation: ak-work 1.4s ease-in-out infinite; }
+.ak[data-state="success"] .ak-fx { animation: ak-hop .9s cubic-bezier(.3, 0, .3, 1) 2, ak-glow .9s ease-in-out 2; }
+.ak[data-state="celebrate"] .ak-fx { animation: ak-hop .8s cubic-bezier(.3, 0, .3, 1) infinite, ak-glow .8s ease-in-out infinite; }
+.ak[data-state="error"] .ak-fx { animation: ak-shake .55s ease-in-out 1; filter: saturate(.55) brightness(.92); }
+.ak[data-state="sleepy"] .ak-fx { transform: rotate(-4deg) translateY(3%); filter: brightness(.58) saturate(.7); }
+.ak[data-state="sleepy"] .ak-actor { animation-duration: 6.5s; }
+.ak[data-state="point-left"] .ak-fx { transform: rotate(-5deg) translateX(-4%); }
+.ak[data-state="point-right"] .ak-fx { transform: rotate(5deg) translateX(4%); }
+.ak[data-state="point-left"] { --look-x: -1; --look-y: -.1; }
+.ak[data-state="point-right"] { --look-x: 1; --look-y: -.1; }
+.ak[data-state="hold-card"] .ak-fx { transform: scale(1.05) translateY(-2%); }
+.ak[data-state="spin-3d"] .ak-fx { animation: ak-spin 2.8s ease-in-out infinite; }
+
+/* ---- bong bóng thoại (văn bản thật nằm trong vùng aria-live) ---- */
+.ak-bubble { position: relative; max-width: min(300px, 80vw); padding: 10px 14px; border-radius: 16px; background: #fff; color: #0F1330;
+  font: 400 17px/1.35 var(--font-hand, 'Itim', 'Inter', system-ui, sans-serif); box-shadow: 0 8px 24px rgba(0, 4, 25, .28);
+  opacity: 0; transform: translateY(6px) scale(.96); transition: opacity .18s, transform .22s cubic-bezier(.34, 1.56, .64, 1); pointer-events: none; }
+.ak-bubble::after { content: ''; position: absolute; left: 28px; bottom: -8px; width: 16px; height: 16px; background: inherit; transform: rotate(45deg); border-radius: 3px; }
+.ak-bubble.is-on { opacity: 1; transform: none; }
+.ak-bubble-t:empty { display: none; }
+
+/* ---- Akis đồng hành trong ứng dụng (mascotCompanion.js) ---- */
+.tg-akis { position: fixed; right: max(12px, env(safe-area-inset-right)); bottom: calc(max(12px, env(safe-area-inset-bottom)) + 118px); z-index: 30; display: grid; justify-items: end; gap: 8px; pointer-events: none; }
+.tg-akis > * { pointer-events: auto; }
+.tg-akis-btn { width: 84px; padding: 0; border: 1px solid rgba(143, 165, 255, .4); background: #04061A; border-radius: 22px; overflow: hidden; cursor: pointer; box-shadow: 0 10px 24px rgba(0, 4, 25, .4); transition: width .25s cubic-bezier(.34, 1.56, .64, 1), opacity .2s; }
+.tg-akis.is-min .tg-akis-btn { width: 48px; border-radius: 16px; opacity: .85; }
+.tg-akis-btn:focus-visible { outline: 3px solid #FDDEAF; outline-offset: 3px; }
+.tg-akis .ak-bubble { margin-right: 4px; }
+.tg-akis .ak-bubble::after { left: auto; right: 30px; }
+.tg-akis-tour { width: min(300px, calc(100vw - 24px)); padding: 14px 16px; border-radius: 18px; background: #0F1740; color: #EEF1FF; border: 1px solid rgba(143, 165, 255, .4); box-shadow: 0 16px 40px rgba(0, 4, 25, .5); font: 400 .95rem/1.5 Inter, system-ui, sans-serif; }
+.tg-tour-n { margin: 0 0 4px; font-size: .75rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #FDDEAF; }
+.tg-tour-t { margin: 0 0 12px; }
+.tg-tour-row { display: flex; align-items: center; gap: 8px; }
+.tg-tour-gap { flex: 1; }
+.tg-tour-b { min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(143, 165, 255, .4); background: transparent; color: #EEF1FF; font: 600 .9rem Inter, system-ui, sans-serif; cursor: pointer; }
+.tg-tour-main { background: #3E5DF3; border-color: #3E5DF3; color: #fff; }
+.tg-tour-b:focus-visible { outline: 3px solid #FDDEAF; outline-offset: 2px; }
+.tg-akis-hl { outline: 3px solid #FDDEAF !important; outline-offset: 3px; border-radius: 10px; }
+@media (max-width: 700px) {
+  .tg-akis { bottom: calc(max(10px, env(safe-area-inset-bottom)) + 132px); }
+  .tg-akis-btn { width: 56px; border-radius: 16px; }
+  .tg-akis.is-min .tg-akis-btn { width: 40px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ak-actor, .ak-fx, .ak-bubble { animation: none !important; transition: none !important; }
+}

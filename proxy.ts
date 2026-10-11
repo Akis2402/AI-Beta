@@ -29,17 +29,24 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 export default function proxy(req: NextRequest) {
   const p = req.nextUrl.pathname;
-  // Chỉ rewrite đúng "/" (không đụng /index.html, /api/*, /js/*, /css/*, /vendor/*).
+  // Trang giới thiệu (landing) là cổng vào mới: "/" -> /landing.html, "/auth" -> /auth.html.
+  // App thật (legacy engine) vẫn nằm nguyên ở /index.html — nút "Vào ứng dụng" và đăng nhập thành công
+  // trỏ thẳng tới đó, nên mọi link cũ tới /index.html không bị ảnh hưởng.
   if (p === '/' || p === '') {
     const url = req.nextUrl.clone();
-    url.pathname = '/index.html';
+    url.pathname = '/landing.html';
+    return NextResponse.rewrite(url);
+  }
+  if (p === '/auth') {
+    const url = req.nextUrl.clone();
+    url.pathname = '/auth.html';
     return NextResponse.rewrite(url);
   }
   return NextResponse.next();
 }
 
 export const config = {
-  // Proxy chỉ chạy cho root path — mọi asset tĩnh (/js/*, /css/*, /vendor/*), API route
+  // Proxy chỉ chạy cho "/" và "/auth" — mọi asset tĩnh (/js/*, /css/*, /vendor/*), API route
   // (/api/*) và Next internals (/_next/*) đều bypass tự động.
-  matcher: '/'
+  matcher: ['/', '/auth']
 };

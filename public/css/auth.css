@@ -1,0 +1,35 @@
+/* auth.css — trang đăng nhập / đăng ký / quên mật khẩu. Token từ site.css, linh vật từ mascot.css. */
+.auth-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(24px, 5vw, 72px); align-items: center; width: min(1040px, 100% - 40px); margin: 0 auto; min-height: calc(100vh - 64px); padding: 32px 0 56px; }
+
+.auth-stage { position: relative; display: grid; justify-items: center; align-content: center; gap: 8px; padding: 28px 20px 20px; border-radius: 32px; border: 1px solid var(--line);
+  background: radial-gradient(circle at 50% 42%, rgba(71, 114, 255, .38), #04061A 72%); overflow: hidden; }
+.stage-bubble { min-height: 62px; display: grid; align-items: end; justify-items: start; width: 100%; padding-left: 8%; }
+.stage-akis { width: min(100%, 460px); }
+
+.auth-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: clamp(22px, 4vw, 36px); box-shadow: var(--shadow); }
+.back { display: inline-flex; align-items: center; min-height: 44px; margin: -8px 0 4px; color: var(--muted); text-decoration: none; font-size: .92rem; }
+.back::before { content: '\2190'; margin-right: 8px; }
+.back:hover { color: var(--text); }
+h1 { font-size: clamp(1.6rem, 3.6vw, 2.1rem); line-height: 1.15; font-weight: 800; letter-spacing: -.01em; }
+.sub { color: var(--muted); margin: 8px 0 22px; }
+
+.tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 22px; border-radius: 999px; background: var(--surface2); border: 1px solid var(--line); }
+.tab { min-height: 44px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: 600 .95rem var(--font); cursor: pointer; transition: background .2s, color .2s; }
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { background: var(--btn); color: #fff; box-shadow: 0 6px 16px var(--glow); }
+
+.pw { position: relative; }
+.pw .input { padding-right: 88px; }
+.pw-toggle { position: absolute; right: 6px; top: 50%; translate: 0 -50%; min-height: 40px; min-width: 56px; padding: 0 12px; border: 0; border-radius: 10px; background: transparent; color: var(--primary); font: 600 .9rem var(--font); cursor: pointer; }
+.pw-toggle:hover { background: var(--surface); }
+.wide { width: 100%; }
+.links { display: flex; justify-content: center; margin-top: 12px; }
+.linkbtn { min-height: 44px; padding: 0 12px; border: 0; background: none; color: var(--primary); font: 600 .95rem var(--font); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; border-radius: 8px; }
+.linkbtn:hover { color: var(--text); }
+
+@media (max-width: 860px) {
+  .auth-wrap { grid-template-columns: 1fr; min-height: 0; padding-top: 16px; }
+  .auth-stage { order: -1; padding: 14px 14px 10px; }
+  .stage-akis { width: min(64%, 260px); }
+  .stage-bubble { min-height: 50px; justify-items: center; padding-left: 0; }
+}

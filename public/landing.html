@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Trợ Giải — Trợ giảng AI cùng Akis</title>
+  <meta name="description" content="Trợ Giải là trợ giảng AI cho học sinh: hướng giải trước, lời giải chi tiết sau, có hình minh họa và tài liệu trích nguồn. Cùng học với Akis.">
+  <meta name="theme-color" content="#04061A">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Trợ Giải — Trợ giảng AI cùng Akis">
+  <meta property="og:description" content="Hiểu bài, không chỉ chép đáp án. Hướng giải, lời giải chi tiết, hình minh họa và tài liệu trích nguồn.">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="apple-touch-icon" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=Itim&display=swap">
+  <link rel="stylesheet" href="/css/site.css">
+  <link rel="stylesheet" href="/css/mascot.css">
+  <link rel="stylesheet" href="/css/landing.css">
+</head>
+<body class="lp">
+  <a class="skip" href="#main" data-i18n="site.skip">Bỏ qua tới nội dung chính</a>
+  <div class="progress" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="container bar">
+      <a class="brand" href="/" aria-label="Trợ Giải">
+        <img class="brand-mark" src="/favicon.svg" alt="" width="34" height="34">
+        <span data-i18n="site.brand">Trợ Giải</span>
+      </a>
+      <nav class="navlinks" aria-label="Điều hướng chính" data-i18n-aria-label="lp.nav.aria">
+        <a href="#features" data-i18n="lp.nav.features">Tính năng</a>
+        <a class="btn btn-ghost" href="/auth" data-cta="login" data-i18n="lp.nav.login">Đăng nhập</a>
+        <a class="btn" href="/auth?mode=signup" data-cta="signup" data-i18n="lp.nav.signup">Tạo tài khoản</a>
+        <a class="btn" href="/index.html" data-cta="app" data-i18n="lp.nav.app" hidden>Vào ứng dụng</a>
+      </nav>
+      <button class="lang-btn" id="langBtn" type="button" data-i18n="site.langSwitch" data-i18n-aria-label="site.langAria" aria-label="Đổi ngôn ngữ giao diện">EN</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- 1. HERO -->
+    <section class="hero" id="hero" data-akis-state="wave" data-akis-say="lp.say.hero">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <p class="kicker rv" data-i18n="lp.hero.kicker">Trợ giảng AI cho học sinh</p>
+          <h1 class="rv d1" data-i18n="lp.hero.title">Hiểu bài, không chỉ chép đáp án</h1>
+          <p class="lead rv d2" data-i18n="lp.hero.sub">Akis dẫn bạn đi từ hướng giải đến lời giải chi tiết, có hình minh họa và tài liệu trích nguồn rõ ràng.</p>
+          <div class="cta-row rv d3">
+            <a class="btn btn-lg" href="/auth?mode=signup" data-cta="signup" data-i18n="lp.cta.signup">Tạo tài khoản</a>
+            <a class="btn btn-lg btn-ghost" href="/auth" data-cta="login" data-i18n="lp.cta.login">Đăng nhập</a>
+            <a class="btn btn-lg" href="/index.html" data-cta="app" data-i18n="lp.cta.app" hidden>Vào ứng dụng</a>
+          </div>
+          <p class="note rv d3" data-i18n="lp.hero.note">Chạy ngay trên trình duyệt, không cần cài đặt.</p>
+        </div>
+        <div class="hero-stage" id="heroStage">
+          <div class="hero-bubble" id="heroBubbleSlot"></div>
+          <div class="hero-akis" id="heroAkis"></div>
+        </div>
+      </div>
+      <a class="scroll-cue" href="#features"><span data-i18n="lp.hero.scroll">Cuộn xuống để xem Akis giúp được gì</span></a>
+    </section>
+
+    <!-- 2. GIẢI BÀI -->
+    <section class="sec" id="features" data-akis-state="point-right" data-akis-say="lp.say.s2">
+      <div class="container grid2">
+        <div class="rv">
+          <p class="kicker" data-i18n="lp.s2.kicker">1 · Giải bài</p>
+          <h2 data-i18n="lp.s2.title">Hướng giải trước, lời giải sau</h2>
+          <p class="lead" data-i18n="lp.s2.body">Bạn tự thử trước với gợi ý các bước chính. Cần xem đầy đủ thì mở lời giải chi tiết.</p>
+          <ol class="steps">
+            <li><span class="n">1</span><div><h3 data-i18n="lp.s2.step1">Hướng giải</h3><p data-i18n="lp.s2.step1d">Nêu dạng bài và các bước chính để bạn tự làm.</p></div></li>
+            <li><span class="n">2</span><div><h3 data-i18n="lp.s2.step2">Lời giải chi tiết</h3><p data-i18n="lp.s2.step2d">Giải thích từng bước, kèm công thức dùng trong bài.</p></div></li>
+          </ol>
+        </div>
+        <div class="card demo rv d1">
+          <p class="demo-q" data-i18n="lp.s2.demoQ">Giải phương trình 2x + 6 = 14</p>
+          <p class="demo-tag" data-i18n="lp.s2.step1">Hướng giải</p>
+          <p class="demo-hint" data-i18n="lp.s2.demoHint">Chuyển số hạng tự do sang vế phải, rồi chia hai vế cho hệ số của x.</p>
+          <button class="btn btn-ghost" id="solBtn" type="button" aria-expanded="false" aria-controls="solBox" data-i18n="lp.s2.reveal">Xem lời giải chi tiết</button>
+          <div class="demo-sol" id="solBox" hidden>
+            <p class="demo-tag" data-i18n="lp.s2.step2">Lời giải chi tiết</p>
+            <p data-i18n="lp.s2.demoSol">2x = 14 − 6 = 8, nên x = 8 : 2 = 4.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. TÀI LIỆU -->
+    <section class="sec alt" id="sources" data-akis-state="hold-card" data-akis-say="lp.say.s3">
+      <div class="container grid2 flip">
+        <div class="card doc rv" aria-hidden="true">
+          <div class="doc-head"><span class="chip">PDF</span><span class="chip">DOCX</span><span class="chip">TXT</span><span class="chip" data-i18n="lp.s3.c4">YouTube</span><span class="chip" data-i18n="lp.s3.c5">Trang web</span></div>
+          <div class="doc-line w90"></div><div class="doc-line w70"></div>
+          <div class="doc-line mark w80"></div><div class="doc-cite"><span data-i18n="lp.s3.cite">Trích nguồn</span> [1]</div>
+          <div class="doc-line w60"></div>
+        </div>
+        <div class="rv d1">
+          <p class="kicker" data-i18n="lp.s3.kicker">2 · Tài liệu</p>
+          <h2 data-i18n="lp.s3.title">Học từ chính tài liệu của bạn</h2>
+          <p class="lead" data-i18n="lp.s3.body">Tải lên PDF, DOCX hoặc TXT, hoặc thêm liên kết YouTube và trang web. Câu trả lời dựa trên nguồn bạn chọn và có trích dẫn.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. HÌNH MINH HỌA -->
+    <section class="sec" id="visuals" data-akis-state="spin-3d" data-akis-say="lp.say.s4">
+      <div class="container">
+        <div class="center rv">
+          <p class="kicker" data-i18n="lp.s4.kicker">3 · Hình minh họa</p>
+          <h2 data-i18n="lp.s4.title">Nhìn thấy bài toán</h2>
+          <p class="lead" data-i18n="lp.s4.body">Đồ thị hàm số, hình học phẳng và khối 3D xoay được giúp bạn hình dung nhanh hơn.</p>
+        </div>
+        <div class="vis-grid">
+          <figure class="card vis rv">
+            <svg viewBox="0 0 200 140" role="img" aria-label="Đồ thị parabol" data-i18n-aria-label="lp.s4.t1">
+              <path class="ax" d="M16 112H188M100 126V14"/>
+              <path class="curve" d="M30 22Q100 190 170 22"/>
+              <circle class="dot" cx="100" cy="106" r="4.5"/>
+            </svg>
+            <figcaption data-i18n="lp.s4.t1">Đồ thị</figcaption>
+          </figure>
+          <figure class="card vis rv d1">
+            <svg viewBox="0 0 200 140" role="img" aria-label="Tam giác vuông" data-i18n-aria-label="lp.s4.t2">
+              <path class="shape" d="M30 112L170 112L30 28Z"/>
+              <path class="ax" d="M30 98H44V112"/>
+              <path class="arc" d="M146 112A24 24 0 0 0 136 94"/>
+              <text class="lab" x="18" y="24">A</text><text class="lab" x="18" y="126">B</text><text class="lab" x="174" y="126">C</text>
+            </svg>
+            <figcaption data-i18n="lp.s4.t2">Hình học</figcaption>
+          </figure>
+          <figure class="card vis rv d2">
+            <div class="cube-scene" aria-hidden="true"><div class="cube"><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+            <figcaption data-i18n="lp.s4.t3">Khối 3D</figcaption>
+          </figure>
+        </div>
+        <p class="center note rv" data-i18n="lp.s4.hint">Khối 3D xoay được ngay trong ứng dụng.</p>
+      </div>
+    </section>
+
+    <!-- 5. ÔN TẬP -->
+    <section class="sec alt" id="review" data-akis-state="point-left" data-akis-say="lp.say.s5">
+      <div class="container grid2">
+        <div class="rv">
+          <p class="kicker" data-i18n="lp.s5.kicker">4 · Ôn tập</p>
+          <h2 data-i18n="lp.s5.title">Ôn nhanh, nhớ lâu</h2>
+          <p class="lead" data-i18n="lp.s5.body">Biến bài học thành flashcard, đề cương .docx hoặc sơ đồ tư duy.</p>
+          <div class="chips"><span class="chip" data-i18n="lp.s5.f1">Flashcard</span><span class="chip" data-i18n="lp.s5.f2">Đề cương .docx</span><span class="chip" data-i18n="lp.s5.f3">Sơ đồ tư duy</span></div>
+        </div>
+        <div class="rv d1">
+          <button class="flash" id="flash" type="button" aria-pressed="false">
+            <span class="flash-in">
+              <span class="face front"><span class="demo-tag" data-i18n="lp.s5.f1">Flashcard</span><span class="fq" data-i18n="lp.s5.q">Công thức nghiệm của phương trình bậc hai?</span></span>
+              <span class="face back"><span class="fa" data-i18n="lp.s5.a">x = (−b ± √Δ) / 2a, với Δ = b² − 4ac</span></span>
+            </span>
+          </button>
+          <p class="note center" data-i18n="lp.s5.flip">Lật thẻ</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6. CÔNG CỤ -->
+    <section class="sec" id="tools" data-akis-state="celebrate" data-akis-say="lp.say.s6">
+      <div class="container">
+        <div class="center rv">
+          <p class="kicker" data-i18n="lp.s6.kicker">5 · Công cụ</p>
+          <h2 data-i18n="lp.s6.title">Mọi thứ ôn bài trong tầm tay</h2>
+        </div>
+        <ul class="tools">
+          <li class="card rv"><h3 data-i18n="lp.s6.i1">Công thức</h3><p data-i18n="lp.s6.i1d">Tra nhanh theo môn và lớp.</p></li>
+          <li class="card rv d1"><h3 data-i18n="lp.s6.i2">Ghi chú</h3><p data-i18n="lp.s6.i2d">Lưu lại điều cần nhớ.</p></li>
+          <li class="card rv d2"><h3 data-i18n="lp.s6.i3">Lịch sử học</h3><p data-i18n="lp.s6.i3d">Quay lại các bài đã hỏi.</p></li>
+          <li class="card rv d3"><h3 data-i18n="lp.s6.i4">Nhập bằng giọng nói</h3><p data-i18n="lp.s6.i4d">Đọc câu hỏi thay vì gõ.</p></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 7. MINH BẠCH -->
+    <section class="sec alt" id="trust" data-akis-state="idle" data-akis-prop="shield" data-akis-say="lp.say.s7">
+      <div class="container">
+        <div class="center rv">
+          <p class="kicker" data-i18n="lp.s7.kicker">6 · Minh bạch</p>
+          <h2 data-i18n="lp.s7.title">Hạn mức rõ ràng, đăng nhập an toàn</h2>
+        </div>
+        <ul class="trust">
+          <li class="card rv"><p data-i18n="lp.s7.b1">Mỗi tài khoản có hạn mức token AI. Khi đạt giới hạn, ứng dụng báo thời gian chờ cụ thể.</p></li>
+          <li class="card rv d1"><p data-i18n="lp.s7.b2">Phiên đăng nhập dùng cookie HttpOnly. Đăng ký có bước xác minh chống lạm dụng.</p></li>
+          <li class="card rv d2"><p data-i18n="lp.s7.b3">Trang giới thiệu và trang đăng nhập không tốn token AI.</p></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 8. CTA CUỐI -->
+    <section class="sec final" id="start" data-akis-state="success" data-akis-say="lp.say.s8">
+      <div class="container center">
+        <h2 class="rv" data-i18n="lp.s8.title">Sẵn sàng học cùng Akis?</h2>
+        <p class="lead rv d1" data-i18n="lp.s8.body">Tạo tài khoản và bắt đầu từ bài đầu tiên.</p>
+        <div class="cta-row mid rv d2">
+          <a class="btn btn-lg" href="/auth?mode=signup" data-cta="signup" data-i18n="lp.cta.signup">Tạo tài khoản</a>
+          <a class="btn btn-lg btn-ghost" href="/auth" data-cta="login" data-i18n="lp.cta.login">Đăng nhập</a>
+          <a class="btn btn-lg" href="/index.html" data-cta="app" data-i18n="lp.cta.app" hidden>Vào ứng dụng</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="container"><p data-i18n="lp.foot">Trợ Giải · Trợ giảng AI</p></div>
+  </footer>
+
+  <!-- Akis đồng hành khi cuộn (hiện sau khi rời hero) -->
+  <div class="dock is-off" id="dock">
+    <div id="dockBubbleSlot"></div>
+    <button class="dock-btn" id="dockBtn" type="button" aria-label="Akis, linh vật của Trợ Giải" data-i18n-aria-label="lp.dock.aria"><span id="dockAkis"></span></button>
+  </div>
+
+  <script src="/js/i18n/translations.js"></script>
+  <script src="/js/i18n/languageStore.js"></script>
+  <script src="/js/i18n/i18n.js"></script>
+  <script src="/js/mascot/akisImage.js"></script>
+  <script src="/js/mascot/mascot.js"></script>
+  <script src="/js/pages/landing.js"></script>
+</body>
+</html>

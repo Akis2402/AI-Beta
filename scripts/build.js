@@ -1,25 +1,23 @@
 'use strict';
 
 /*
- * scripts/build.js — chạy TỰ ĐỘNG bởi Vercel (xem vercel.json: "buildCommand": "npm run build")
+ * scripts/build.js — chạy TỰ ĐỘNG bởi Vercel (vercel.json: "buildCommand": "npm run build")
  * NGAY TRƯỚC KHI thư mục `public/` được snapshot làm output tĩnh của deployment đó.
  *
- * MỤC ĐÍCH DUY NHẤT (khớp PHẦN 4 của yêu cầu audit): loại bỏ hoàn toàn việc phụ thuộc vào 1 con số
- * "?v=..." hard-code trong index.html để cache-bust. Thay vào đó:
- *   1. Đọc nội dung THẬT của từng file JS/CSS "core".
- *   2. Băm nội dung đó (sha256, lấy 10 ký tự hex đầu) -> đổi tên file thành "<tên>.<hash>.<ext>".
- *   3. Ghi đè lại index.html để mọi <script src>/<link href> trỏ đúng tên file đã hash đó.
- *   4. Ghi ra public/asset-manifest.json để scripts/check-static-assets.js và test HTTP có thể xác
- *      minh lại (không đoán mò) rằng deployment thật sự phục vụ đúng asset vừa build.
+ * MỤC ĐÍCH (khớp PHẦN 4 của yêu cầu audit): không phụ thuộc "?v=..." hard-code để cache-bust. Thay vào đó:
+ *   1. Đọc nội dung THẬT của từng file JS/CSS.
+ *   2. Băm nội dung (sha256, 10 hex đầu) -> ghi bản "<tên>.<hash>.<ext>" cạnh file nguồn.
+ *   3. Ghi đè từng trang HTML để mọi <script src>/<link href> trỏ đúng tên đã hash.
+ *   4. Ghi public/asset-manifest.json để scripts/check-static-assets.js và test HTTP xác minh lại.
+ * Nội dung đổi -> hash đổi -> URL đổi: 2 deployment không bao giờ dùng chung 1 URL cho 2 nội dung khác nhau
+ * (triệt tiêu lỗi "HTML mới + JS cũ" / "Identifier ... already been declared").
  *
- * Vì bước này chạy LẠI TỪ ĐẦU trên 1 checkout sạch cho MỖI deployment (đúng mô hình build của
- * Vercel), 2 deployment KHÔNG BAO GIỜ có thể vô tình dùng chung 1 URL asset cho 2 nội dung khác
- * nhau nữa -> triệt tiêu tận gốc lớp lỗi "HTML mới + JS cũ" / "HTML cũ + JS mới" /
- * "Identifier ... already been declared" do version bị giữ lại giữa các lần deploy.
+ * NHIỀU TRANG: trước đây chỉ có public/index.html. Nay có 3 trang (index.html = app, landing.html = trang
+ * giới thiệu ở "/", auth.html = trang đăng nhập ở "/auth"), mỗi trang khai báo danh sách asset riêng trong PAGES.
+ * Asset dùng chung (i18n, mascot) được băm MỘT lần và thay vào mọi trang cần. Trang thiếu thẻ cho một asset
+ * trong danh sách của nó -> build DỪNG (không tự chèn lại) để tránh deploy thiếu asset.
  *
- * File nguồn public/index.html trong repo CỐ Ý giữ tên KHÔNG hash (vd "/js/app.js") — đó là
- * template. Script này ghi đè bản ĐÃ hash vào chính public/index.html trong quá trình build (diễn
- * ra trong container build tạm thời của Vercel), KHÔNG commit ngược thay đổi đó về git.
+ * File nguồn trong repo giữ tên KHÔNG hash (template). Bản hash được ghi trong container build, không commit ngược.
  */
 
 const fs = require('fs');
@@ -27,10 +25,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const publicDir = path.join(__dirname, '..', 'public');
-const indexHtmlPath = path.join(publicDir, 'index.html');
 
-// Thứ tự này chỉ để liệt kê đủ file — KHÔNG quyết định thứ tự <script> thật trong index.html
-// (thứ tự thật đọc trực tiếp từ chính index.html, xem PHẦN 8 của yêu cầu audit).
 const CORE_JS = [
   'boot.js',
   'payloadBudget.js', // PHẦN A: ngân sách payload dùng chung client/server
@@ -45,14 +40,42 @@ const CORE_JS = [
   'voiceInput.js', // PHẦN D: nhập bằng giọng nói (Web Speech API, xử lý hoàn toàn trong trình duyệt)
   'app.js',
 ];
-// PHẦN T-AZ (i18n) / A-C (Puter) / E-I (task manager): asset mới nằm ở thư mục con riêng —
-// fingerprint từng nhóm bằng process() riêng (mỗi nhóm 1 relDir) thay vì gộp chung CORE_JS.
 const I18N_JS = ['translations.js', 'languageStore.js', 'i18n.js'];
 const PROVIDER_JS = ['puterAdapter.js', 'providerRouter.js'];
 const VISUAL_JS = ['puterVisualManager.js'];
-const UI_JS = ['puterAuthUI.js', 'authUI.js', 'visualViewer.js']; // Puter Auth UI + đăng nhập Supabase/quota/Asset Manager + zoom/pan cho lightbox SVG
+// Puter Auth UI + đăng nhập Supabase/quota/Asset Manager + zoom/pan cho lightbox SVG + Akis đồng hành.
+// mascotCompanion.js PHẢI nạp SAU app.js (xem thứ tự thẻ trong index.html).
+const UI_JS = ['puterAuthUI.js', 'authUI.js', 'visualViewer.js', 'mascotCompanion.js'];
 const TASK_JS = ['conversationTaskManager.js', 'backgroundTaskUI.js'];
 const CORE_CSS = ['styles.css'];
+// Linh vật Akis: ảnh gốc của người dùng nhúng dạng data URI (akisImage.js) + lớp điều khiển (mascot.js).
+const MASCOT_JS = ['akisImage.js', 'mascot.js'];
+
+/** Mỗi trang: file HTML + danh sách [thư mục con của public/, [tên file]] mà trang đó PHẢI tham chiếu. */
+const PAGES = [
+  {
+    file: 'index.html',
+    groups: [
+      ['js', CORE_JS], ['js/i18n', I18N_JS], ['js/providers', PROVIDER_JS], ['js/visual', VISUAL_JS],
+      ['js/ui', UI_JS], ['js/tasks', TASK_JS], ['js/mascot', MASCOT_JS],
+      ['css', CORE_CSS], ['css', ['mascot.css']],
+    ],
+  },
+  {
+    file: 'landing.html',
+    groups: [
+      ['js/i18n', I18N_JS], ['js/mascot', MASCOT_JS], ['js/pages', ['landing.js']],
+      ['css', ['site.css', 'mascot.css', 'landing.css']],
+    ],
+  },
+  {
+    file: 'auth.html',
+    groups: [
+      ['js/i18n', I18N_JS], ['js/mascot', MASCOT_JS], ['js/auth', ['authClient.js']], ['js/pages', ['auth.js']],
+      ['css', ['site.css', 'mascot.css', 'auth.css']],
+    ],
+  },
+];
 
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -62,8 +85,7 @@ function hashOf(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex').slice(0, 10);
 }
 
-// Dọn các bản đã-hash TỪ LẦN BUILD TRƯỚC (nếu script này từng chạy trong cùng 1 checkout, vd khi
-// chạy `npm run build` nhiều lần ở local) để không tích tụ file rác theo thời gian.
+/** Xoá các bản hash CŨ của cùng 1 file nguồn (tránh phình public/ sau nhiều lần build). */
 function cleanPreviousHashed(dir, baseName) {
   const ext = path.extname(baseName);
   const stem = baseName.slice(0, -ext.length);
@@ -84,75 +106,67 @@ function fingerprintAsset(relDir, baseName) {
   const ext = path.extname(baseName);
   const stem = baseName.slice(0, -ext.length);
   const hashedName = `${stem}.${hash}${ext}`;
-
   cleanPreviousHashed(dir, baseName);
   fs.writeFileSync(path.join(dir, hashedName), content);
-
   return { baseName, hashedName, hash, urlPath: `/${relDir}/${hashedName}` };
 }
 
-// Khớp thẻ <script src="..."> / <link href="..."> trỏ tới asset này ở BẤT KỲ dạng nào từng tồn
-// tại trước đây (không version, ?v=<số>, hoặc đã có hash từ lần build trước) rồi thay bằng URL đã
-// hash MỚI NHẤT — nhờ vậy script này idempotent (chạy lại nhiều lần vẫn ra kết quả đúng).
+/**
+ * Regex khớp mọi cách đang tham chiếu tới asset này trong HTML: tên gốc, tên đã-hash cũ, hoặc kèm ?v=...
+ * Cờ `g` + `.test()` làm lastIndex nhích đi — người gọi PHẢI reset lastIndex = 0 trước khi dùng `.replace()`.
+ */
 function buildTagRegex(relDir, baseName) {
   const ext = path.extname(baseName);
   const stem = baseName.slice(0, -ext.length);
   const pattern =
     `(["'])/${escapeRegExp(relDir)}/${escapeRegExp(stem)}` +
     `(?:\\.[0-9a-f]{10})?${escapeRegExp(ext)}(?:\\?[^"']*)?\\1`;
-  // BUG-002b: regex này TRƯỚC ĐÂY không có cờ `g`, nên `html.replace(re, ...)` chỉ thay THẺ ĐẦU TIÊN.
-  // Nếu index.html tham chiếu cùng một asset hai lần (vd <link rel="preload"> + <script src>, hoặc
-  // <link rel="modulepreload">), thẻ thứ hai giữ nguyên tên KHÔNG hash -> trang tải CẢ HAI bản của
-  // cùng một file (một bản immutable, một bản no-cache) => khai báo lại biến top-level =>
-  // "Identifier ... has already been declared" — đúng lớp lỗi mà toàn bộ pipeline fingerprint này
-  // được viết ra để diệt. Nay dùng cờ `g`: thay MỌI tham chiếu.
   return new RegExp(pattern, 'g');
 }
 
 function main() {
-  if (!fs.existsSync(indexHtmlPath)) {
-    throw new Error('[build] Không tìm thấy public/index.html — kiểm tra lại outputDirectory.');
-  }
-  let html = fs.readFileSync(indexHtmlPath, 'utf8');
-  const manifest = { generatedAt: new Date().toISOString(), assets: {} };
+  const manifest = { generatedAt: new Date().toISOString(), assets: {}, pages: {} };
+  const done = new Map(); // "relDir/name" -> info (asset dùng chung chỉ băm 1 lần)
 
-  function process(relDir, list) {
-    for (const name of list) {
-      const info = fingerprintAsset(relDir, name);
-      const re = buildTagRegex(relDir, name);
-      if (!re.test(html)) {
-        throw new Error(
-          `[build] index.html KHÔNG có thẻ tham chiếu tới /${relDir}/${name} — có thể đã bị xoá ` +
-          `nhầm khỏi index.html. Dừng build (không đoán/tự chèn lại) để tránh deploy thiếu asset.`
-        );
-      }
-      // BUG-002b (bẫy kèm theo): với regex có cờ `g`, `re.test()` ĐÃ đẩy `re.lastIndex` lên sau lần
-      // khớp đầu. Nếu không reset, `html.replace(re, ...)` bắt đầu tìm TỪ vị trí đó và BỎ QUA chính
-      // thẻ đầu tiên — tức là bản vá "thay tất cả" sẽ biến thành "thay tất cả TRỪ cái đầu".
-      re.lastIndex = 0;
-      html = html.replace(re, `$1${info.urlPath}$1`);
-      manifest.assets[name] = info.urlPath;
+  for (const page of PAGES) {
+    const htmlPath = path.join(publicDir, page.file);
+    if (!fs.existsSync(htmlPath)) {
+      throw new Error(`[build] Không tìm thấy public/${page.file} — kiểm tra lại outputDirectory.`);
     }
+    let html = fs.readFileSync(htmlPath, 'utf8');
+    manifest.pages[page.file] = [];
+
+    for (const [relDir, list] of page.groups) {
+      for (const name of list) {
+        const key = `${relDir}/${name}`;
+        let info = done.get(key);
+        if (!info) { info = fingerprintAsset(relDir, name); done.set(key, info); }
+
+        const re = buildTagRegex(relDir, name);
+        if (!re.test(html)) {
+          throw new Error(
+            `[build] ${page.file} KHÔNG có thẻ tham chiếu tới /${relDir}/${name} — có thể đã bị xoá ` +
+            `nhầm. Dừng build (không đoán/tự chèn lại) để tránh deploy thiếu asset.`
+          );
+        }
+        re.lastIndex = 0;
+        html = html.replace(re, `$1${info.urlPath}$1`);
+
+        if (manifest.assets[name] && manifest.assets[name] !== info.urlPath) {
+          throw new Error(`[build] Tên asset "${name}" trùng giữa 2 thư mục khác nhau — manifest khoá theo tên nên phải đổi tên 1 file.`);
+        }
+        manifest.assets[name] = info.urlPath;
+        manifest.pages[page.file].push(name);
+      }
+    }
+    fs.writeFileSync(htmlPath, html, 'utf8');
   }
 
-  process('js', CORE_JS);
-  process('js/i18n', I18N_JS);
-  process('js/providers', PROVIDER_JS);
-  process('js/visual', VISUAL_JS);
-  process('js/ui', UI_JS);
-  process('js/tasks', TASK_JS);
-  process('css', CORE_CSS);
+  fs.writeFileSync(path.join(publicDir, 'asset-manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 
-  fs.writeFileSync(indexHtmlPath, html, 'utf8');
-  fs.writeFileSync(
-    path.join(publicDir, 'asset-manifest.json'),
-    JSON.stringify(manifest, null, 2) + '\n',
-    'utf8'
-  );
-
-  console.log(`[build] Fingerprint xong ${Object.keys(manifest.assets).length} asset:`);
+  console.log(`[build] Fingerprint xong ${Object.keys(manifest.assets).length} asset cho ${PAGES.length} trang:`);
   for (const [k, v] of Object.entries(manifest.assets)) console.log(`  ${k} -> ${v}`);
-  console.log('[build] Đã ghi public/asset-manifest.json và cập nhật public/index.html.');
+  console.log('[build] Đã ghi public/asset-manifest.json và cập nhật ' + PAGES.map((p) => 'public/' + p.file).join(', ') + '.');
 }
 
 if (require.main === module) {
@@ -164,4 +178,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { main, hashOf, buildTagRegex, CORE_JS, CORE_CSS, VISUAL_JS, UI_JS };
+module.exports = { main, hashOf, buildTagRegex, CORE_JS, CORE_CSS, VISUAL_JS, UI_JS, MASCOT_JS, PAGES };
