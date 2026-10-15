@@ -28,6 +28,7 @@ const publicDir = path.join(__dirname, '..', 'public');
 
 const CORE_JS = [
   'boot.js',
+  'analytics.js', // Vercel Web Analytics initialization
   'payloadBudget.js', // PHẦN A: ngân sách payload dùng chung client/server
   'storage.js',
   'imageStorage.js',
