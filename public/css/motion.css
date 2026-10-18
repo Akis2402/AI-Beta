@@ -1,0 +1,12 @@
+/* =====================================================================================
+   motion.css — cầu nối giữa uiMotion.js (GSAP) và CSS. GSAP chỉ tween các biến --mx/--my/--ps/--py;
+   file này gắn biến vào thuộc tính RIÊNG `translate` / `scale` nên KHÔNG ghi đè `transform` của CSS cũ
+   (hover nâng nút, .rv reveal...). Chỉ có hiệu lực khi <html class="mo"> (uiMotion.js bật, chưa tắt motion).
+   ===================================================================================== */
+.mo .btn, .mo .chip, .mo .iconbtn, .mo .tool-btn, .mo .sbtab, .mo .linkbtn, .mo .lang-btn { scale: var(--ps, 1); }
+.mo .btn-lg { translate: var(--mx, 0px) var(--my, 0px); }
+.mo .hero-akis, .mo .auth-card { translate: 0 var(--py, 0px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mo .btn, .mo .chip, .mo .iconbtn, .mo .tool-btn, .mo .sbtab, .mo .linkbtn, .mo .lang-btn, .mo .btn-lg, .mo .hero-akis, .mo .auth-card { scale: none; translate: none; }
+}

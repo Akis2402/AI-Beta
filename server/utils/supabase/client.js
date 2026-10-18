@@ -69,9 +69,28 @@ async function readJson(res) {
 // ---------------- Auth (GoTrue) ----------------
 const auth = {
   /** @returns {Promise<{ok:boolean,status:number,data:any}>} — không ném với lỗi nghiệp vụ (4xx). */
-  async signUp(email, password) {
+  async signUp(email, password, data) {
     const cfg = getConfig().supabase;
-    const res = await call('POST', '/auth/v1/signup', { apiKey: cfg.anonKey, body: { email, password } });
+    // `data` -> raw_user_meta_data (trigger public.handle_new_user() đọc full_name). Chỉ gửi khi có.
+    const body = data && typeof data === 'object' && Object.keys(data).length ? { email, password, data } : { email, password };
+    const res = await call('POST', '/auth/v1/signup', { apiKey: cfg.anonKey, body });
+    return { ok: res.ok, status: res.status, data: await readJson(res) };
+  },
+  /** URL bắt đầu OAuth (PKCE) của Supabase. Không gọi mạng. Xác minh với @supabase/auth-js 2.118.0 (_getUrlForProvider). */
+  oauthAuthorizeUrl(provider, redirectTo, codeChallenge) {
+    const cfg = getConfig().supabase;
+    const q = new URLSearchParams({
+      provider: String(provider),
+      redirect_to: redirectTo,
+      code_challenge: codeChallenge,
+      code_challenge_method: 's256'
+    });
+    return `${cfg.url}/auth/v1/authorize?${q.toString()}`;
+  },
+  /** Đổi auth code (PKCE) lấy phiên. POST /auth/v1/token?grant_type=pkce {auth_code, code_verifier}. */
+  async exchangePkce(authCode, codeVerifier) {
+    const cfg = getConfig().supabase;
+    const res = await call('POST', '/auth/v1/token?grant_type=pkce', { apiKey: cfg.anonKey, body: { auth_code: authCode, code_verifier: codeVerifier } });
     return { ok: res.ok, status: res.status, data: await readJson(res) };
   },
   async signInWithPassword(email, password) {

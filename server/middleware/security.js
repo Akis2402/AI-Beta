@@ -68,7 +68,7 @@ const helmetConfig = helmet({
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com'],
       imgSrc: ["'self'", 'data:', 'blob:'],
-      connectSrc: ["'self'", 'https://api.puter.com', 'https://js.puter.com'],
+      connectSrc: ["'self'", 'https://api.puter.com', 'wss://api.puter.com', 'https://js.puter.com'],
       // pdf.worker.min.js giờ tự host tại /vendor/pdfjs/pdf.worker.min.js (cùng-origin) — 'self' +
       // blob: (Worker tạo qua Blob URL nội bộ của pdf.js) là đủ, không cần domain CDN nào nữa.
       workerSrc: ["'self'", 'blob:'],

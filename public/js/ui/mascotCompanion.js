@@ -24,10 +24,10 @@
   function visible(n) { return !!(n && n.getClientRects().length && getComputedStyle(n).visibility !== 'hidden'); }
 
   var STEPS = [
-    { sel: '#addSourceBtn', key: 'ak.t1', state: 'point-left' },
-    { sel: '#qInput', key: 'ak.t2', state: 'type-email' },
-    { sel: '#subjectBtn', key: 'ak.t3', state: 'point-left' },
-    { sel: '#flashcardTopBtn', key: 'ak.t4', state: 'celebrate' }
+    { sel: '#addSourceBtn', key: 'ak.t1', state: 'sources' },
+    { sel: '#qInput', key: 'ak.t2', state: 'hint' },
+    { sel: '#subjectBtn', key: 'ak.t3', state: 'formula' },
+    { sel: '#flashcardTopBtn', key: 'ak.t4', state: 'flashcard' }
   ];
 
   var host, btn, mk, bubble, tour, idleT = 0, built = false;
@@ -91,7 +91,7 @@
       }).observe(thread, { childList: true, subtree: true, characterData: true });
     }
     if (input) {
-      input.addEventListener('focus', function () { if (!pending && !tour) mk.setState('look'); });
+      input.addEventListener('focus', function () { if (!pending && !tour) mk.setState('hint'); });
       input.addEventListener('blur', function () { if (!pending && !tour) mk.setState('idle'); });
     }
   }

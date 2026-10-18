@@ -12,8 +12,10 @@
      script CDN để bắt được cả lỗi xảy ra khi các CDN đó tải/parse thất bại. -->
 <script src="/js/boot.29aa9029e5.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="alternate icon" href="/favicon.svg">
-<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Itim&display=swap" rel="stylesheet">
 <!-- FIX ROOT CAUSE (iPhone/Safari "Không thể khởi động ứng dụng"): TRƯỚC ĐÂY 6 thư viện phía dưới
@@ -34,6 +36,7 @@
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
 <link rel="stylesheet" href="/css/styles.eefa8e4a0d.css">
 <link rel="stylesheet" href="/css/mascot.css">
+<link rel="stylesheet" href="/css/motion.css">
 </head>
 <body>
 <div id="app">
@@ -465,9 +468,13 @@
 <script src="/js/tasks/backgroundTaskUI.87415e7094.js"></script>
 <script src="/js/voiceInput.66463c87c2.js"></script>
 <script src="/js/app.a4ffb119a4.js"></script>
-<!-- Akis (ảnh gốc của người dùng) + trợ lý đồng hành. mascotCompanion.js PHẢI nạp SAU app.js. -->
-<script src="/js/mascot/akisImage.js"></script>
+<!-- Akis (vector có rig: hình akisRig.js · tư thế akisPoses.js · chuyển động GSAP akisMotion.js) + trợ lý đồng hành. mascotCompanion.js PHẢI nạp SAU app.js. -->
+<script src="/vendor/gsap/gsap.min.js"></script>
+<script src="/js/mascot/akisRig.js"></script>
+<script src="/js/mascot/akisPoses.js"></script>
+<script src="/js/mascot/akisMotion.js"></script>
 <script src="/js/mascot/mascot.js"></script>
 <script src="/js/ui/mascotCompanion.js"></script>
+<script src="/js/ui/uiMotion.js"></script>
 </body>
 </html>

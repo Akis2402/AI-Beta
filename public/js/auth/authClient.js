@@ -132,9 +132,15 @@
   var AuthClient = {
     session: function () { return api('GET', '/api/auth/session'); },
     login: function (email, password, remember) { return api('POST', '/api/auth/login', { email: email, password: password, remember: !!remember }); },
-    signup: async function (email, password, confirmPassword, remember) {
+    signup: async function (email, password, confirmPassword, remember, fullName) {
       var pow = await getPow();
-      return api('POST', '/api/auth/signup', { email: email, password: password, confirmPassword: confirmPassword, remember: !!remember, challenge: pow.challenge, nonce: pow.nonce });
+      var body = { email: email, password: password, confirmPassword: confirmPassword, remember: !!remember, challenge: pow.challenge, nonce: pow.nonce };
+      if (fullName) body.fullName = fullName;
+      return api('POST', '/api/auth/signup', body);
+    },
+    /** Link bắt đầu đăng nhập Google (server tự kiểm tra lại next, chỉ cho /index.html). */
+    googleUrl: function (next, remember) {
+      return '/api/auth/google?next=' + encodeURIComponent(safeNext(next)) + (remember ? '&remember=1' : '');
     },
     forgot: async function (email) {
       var pow = await getPow();
