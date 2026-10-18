@@ -97,7 +97,7 @@
       var key = open ? 'lp.s2.hide' : 'lp.s2.reveal';
       solBtn.setAttribute('data-i18n', key);
       solBtn.textContent = tr(key);
-      if (open) flash('success', 1800);
+      if (open) flash('solution', 3200);
     });
   }
   var card = $('flash');

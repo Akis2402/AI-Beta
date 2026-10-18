@@ -25,7 +25,8 @@
     form: $('apForm'), email: $('apEmail'), pw: $('apPw'), pw2: $('apPw2'), pwField: $('pwField'), pw2Field: $('pw2Field'),
     hint: $('pwHint'), toggle: $('pwToggle'), remember: $('apRemember'), rememberRow: $('rememberRow'), msg: $('apMsg'),
     submit: $('apSubmit'), title: $('apTitle'), sub: $('apSub'), tabs: $('apTabs'), tabLogin: $('tabLogin'), tabSignup: $('tabSignup'),
-    forgot: $('forgotLink'), backLogin: $('backLogin')
+    forgot: $('forgotLink'), backLogin: $('backLogin'),
+    name: $('apName'), nameField: $('nameField'), oauth: $('oauthBlock'), google: $('googleBtn')
   };
 
   var params = new URLSearchParams(location.search);
@@ -74,6 +75,7 @@
     });
     el.pwField.hidden = forgot; el.pw.required = !forgot;
     el.pw2Field.hidden = !signup; el.hint.hidden = !signup;
+    el.nameField.hidden = !signup; el.oauth.hidden = forgot;
     el.rememberRow.hidden = forgot;
     el.pw.autocomplete = signup ? 'new-password' : 'current-password';
     el.forgot.hidden = mode !== 'login'; el.backLogin.hidden = !forgot;
@@ -100,6 +102,18 @@
   });
   el.forgot.addEventListener('click', function () { setMode('forgot', true); });
   el.backLogin.addEventListener('click', function () { setMode('login', true); });
+
+  // ------------------------------------------------------------------ Google (server lo PKCE; trang chỉ điều hướng)
+  function syncGoogle() { el.google.href = C.googleUrl(next, el.remember.checked); }
+  syncGoogle();
+  el.remember.addEventListener('change', syncGoogle);
+  el.google.addEventListener('click', function () {
+    syncGoogle();
+    el.google.setAttribute('aria-disabled', 'true');
+    state('wave'); say('ap.say.google', 3000);
+  });
+  // Nhấn Back từ Google (bfcache) quay lại: mở khóa nút.
+  window.addEventListener('pageshow', function () { el.google.removeAttribute('aria-disabled'); });
 
   // ------------------------------------------------------------------ Akis phản ứng khi nhập
   el.email.addEventListener('focus', function () { if (busy) return; state('type-email'); say('ap.say.email', 3500); });
@@ -138,12 +152,13 @@
   }
 
   async function submit() {
-    [el.email, el.pw, el.pw2].forEach(function (i) { i.removeAttribute('aria-invalid'); });
+    [el.email, el.pw, el.pw2, el.name].forEach(function (i) { i.removeAttribute('aria-invalid'); });
     var email = el.email.value.trim(), pw = el.pw.value, pw2 = el.pw2.value;
     if (!C.isEmail(email)) return fail('ap.v.email', el.email);
     if (mode !== 'forgot') {
       if (!pw) return fail('ap.v.pwEmpty', el.pw);
       if (mode === 'signup') {
+        if (el.name.value.trim().length > 60) return fail('ap.v.name', el.name);
         if (!C.isStrongPassword(pw)) return fail('ap.v.pwWeak', el.pw);
         if (pw !== pw2) return fail('ap.v.mismatch', el.pw2);
       }
@@ -152,7 +167,7 @@
     var r;
     try {
       if (mode === 'login') r = await C.login(email, pw, el.remember.checked);
-      else if (mode === 'signup') r = await C.signup(email, pw, pw2, el.remember.checked);
+      else if (mode === 'signup') r = await C.signup(email, pw, pw2, el.remember.checked, el.name.value.trim());
       else r = await C.forgot(email);
     } catch (err) {
       setBusy(false);
@@ -194,4 +209,8 @@
   }).catch(function () { /* mạng lỗi: vẫn cho nhập, lỗi cụ thể sẽ hiện khi gửi */ });
 
   setMode(mode, false);
+
+  // Quay lại từ /api/auth/callback khi đăng nhập Google lỗi/hủy: chỉ nhận 2 giá trị trong danh sách trắng (setMode đã dọn URL).
+  var oauthErr = params.get('oauth_error');
+  if (oauthErr === 'failed' || oauthErr === 'cancelled') fail('ap.err.oauth_' + oauthErr, null);
 })();

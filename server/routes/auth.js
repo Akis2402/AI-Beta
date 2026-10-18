@@ -8,6 +8,7 @@
 // một thông điệp trung tính; đăng nhập sai luôn là "Email hoặc mật khẩu không đúng".
 
 const express = require('express');
+const crypto = require('crypto');
 const { createLimiter } = require('../middleware/rateLimit');
 const { originAllowed, requireUser } = require('../middleware/authQuota');
 const { getConfig } = require('../utils/quota/config');
@@ -45,6 +46,17 @@ function ensureOrigin(req, res, next) {
 
 const NEUTRAL_SIGNUP = 'Nếu email hợp lệ, bạn sẽ nhận được thư xác nhận (nếu dự án bật xác nhận email). Hãy kiểm tra hộp thư rồi đăng nhập.';
 
+// Họ tên tùy chọn lúc đăng ký -> options.data.full_name -> trigger public.handle_new_user() -> profiles.display_name.
+// Chuẩn hóa giống PATCH /profile (1–60 ký tự, không ký tự điều khiển/zero-width). Rỗng = không gửi.
+function cleanFullName(raw) {
+  if (raw === undefined || raw === null || raw === '') return { ok: true, value: null };
+  if (typeof raw !== 'string') return { ok: false };
+  const name = raw.normalize('NFC').trim().replace(/\s+/g, ' ');
+  if (!name) return { ok: true, value: null };
+  if (name.length > 60 || BAD_NAME_CHARS.test(name)) return { ok: false };
+  return { ok: true, value: name };
+}
+
 // ---- GET /api/auth/session  (UI hỏi sau mỗi lần F5) ----
 router.get('/session', async (req, res) => {
   noStore(res);
@@ -78,6 +90,8 @@ router.post('/signup', ensureConfigured, ensureOrigin, signupLimiter, authLimite
   if (body.confirmPassword !== undefined && String(body.confirmPassword) !== String(body.password)) {
     return bad(res, 400, 'Mật khẩu xác nhận không khớp.', 'password_mismatch');
   }
+  const fullName = cleanFullName(body.fullName);
+  if (!fullName.ok) return bad(res, 400, 'Họ tên không hợp lệ (tối đa 60 ký tự).', 'invalid_display_name');
   // PoW SAU các kiểm tra rẻ: gõ sai email/mật khẩu không đốt challenge của người dùng thật.
   const powResult = await pow.verify(body.challenge, body.nonce);
   if (!powResult.ok) {
@@ -85,7 +99,7 @@ router.post('/signup', ensureConfigured, ensureOrigin, signupLimiter, authLimite
     return bad(res, 400, msg, powResult.code);
   }
   try {
-    const r = await sb.auth.signUp(e.value, p.value);
+    const r = await sb.auth.signUp(e.value, p.value, fullName.value ? { full_name: fullName.value } : undefined);
     if (r.status >= 500) return bad(res, 503, 'Dịch vụ đăng ký tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
     if (r.status === 429) return bad(res, 429, 'Quá nhiều yêu cầu đăng ký. Vui lòng thử lại sau.', 'auth_rate_limited');
     // Nếu dự án tắt xác nhận email, GoTrue trả luôn session -> đăng nhập ngay.
@@ -134,6 +148,95 @@ router.post('/logout', ensureOrigin, async (req, res) => {
     try { await sb.auth.signOut(at); } catch (_) { /* thu hồi phía Supabase là best-effort; cookie đã xoá */ }
   }
   return res.json({ ok: true, status: 'unauthenticated' });
+});
+
+// =====================================================================================
+// ĐĂNG NHẬP BẰNG GOOGLE (provider Google có sẵn của Supabase; PKCE chạy phía server)
+// =====================================================================================
+// Luồng: GET /google (tạo code_verifier, lưu cookie HttpOnly tg_pkce, 302 sang Supabase /auth/v1/authorize)
+//        -> Google -> Supabase -> GET /callback?code=... (đổi code + verifier lấy phiên, đặt cookie phiên, 302 vào app).
+// PKCE gắn code với trình duyệt đã khởi tạo (verifier chỉ nằm trong cookie HttpOnly) => chống login-CSRF/code injection.
+// KHÔNG tự gọi API Google, KHÔNG giữ Client Secret: secret chỉ nằm trong Supabase Dashboard.
+// Tham số `next` KHÔNG đi qua redirect_to (Supabase đối chiếu allow-list cả query string) mà nằm trong cookie; mọi
+// đích đến đều qua safeNext() (chỉ /index.html) nên không có open redirect.
+const PKCE_COOKIE = 'tg_pkce';
+const PKCE_COOKIE_MAX_AGE = 600;
+const b64url = (buf) => Buffer.from(buf).toString('base64url');
+
+function safeNext(raw) {
+  const fallback = '/index.html';
+  try {
+    if (typeof raw !== 'string' || !raw || raw.length > 300) return fallback;
+    if (raw.charAt(0) !== '/' || raw.charAt(1) === '/' || raw.charAt(1) === '\\' || /[\u0000-\u001f\\]/.test(raw)) return fallback;
+    const u = new URL(raw, 'http://x.invalid');
+    if (u.origin !== 'http://x.invalid' || u.pathname !== '/index.html') return fallback;
+    return u.pathname + u.search;
+  } catch (_) { return fallback; }
+}
+
+/** Điều hướng trình duyệt (không trả JSON: đây là route điều hướng của người dùng). */
+function navigate(res, location) {
+  noStore(res);
+  res.statusCode = 302;
+  res.setHeader('Location', location);
+  res.end();
+}
+const OAUTH_ERR = { failed: 'failed', cancelled: 'cancelled' };
+function navigateError(res, kind) { return navigate(res, `/auth?oauth_error=${OAUTH_ERR[kind] || 'failed'}`); }
+
+/** URL callback gửi cho Supabase: phải nằm trong Authentication -> URL Configuration -> Redirect URLs. */
+function oauthCallbackUrl(req) {
+  const configured = getConfig().auth.redirectUrl;
+  if (configured) return new URL('/api/auth/callback', configured).toString();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  if (!/^[a-z0-9.-]+(:\d{1,5})?$/i.test(host)) return null;
+  const proto = session.isSecureRequest(req) ? 'https' : 'http';
+  return `${proto}://${host}/api/auth/callback`;
+}
+
+function ensureConfiguredNav(req, res, next) {
+  if (!getConfig().supabase.configured) return navigateError(res, 'failed');
+  return next();
+}
+
+router.get('/google', ensureConfiguredNav, authLimiter, (req, res) => {
+  const cb = oauthCallbackUrl(req);
+  if (!cb) return navigateError(res, 'failed');
+  const q = req.query || {};
+  const verifier = b64url(crypto.randomBytes(32)); // 43 ký tự base64url, trong khoảng 43–128 của RFC 7636
+  const challenge = b64url(crypto.createHash('sha256').update(verifier).digest());
+  const meta = b64url(JSON.stringify({ n: safeNext(typeof q.next === 'string' ? q.next : ''), r: q.remember === '1' }));
+  session.appendSetCookie(res, [
+    session.serializeCookie(PKCE_COOKIE, `${verifier}.${meta}`, { maxAge: PKCE_COOKIE_MAX_AGE, secure: session.isSecureRequest(req) })
+  ]);
+  return navigate(res, sb.auth.oauthAuthorizeUrl('google', cb, challenge));
+});
+
+router.get('/callback', ensureConfiguredNav, authLimiter, async (req, res) => {
+  const secure = session.isSecureRequest(req);
+  const raw = session.parseCookies(req.headers.cookie)[PKCE_COOKIE];
+  // Cookie PKCE dùng 1 lần: xóa ngay dù thành công hay lỗi.
+  session.appendSetCookie(res, [session.serializeCookie(PKCE_COOKIE, '', { maxAge: 0, secure })]);
+
+  const q = req.query || {};
+  if (q.error) return navigateError(res, q.error === 'access_denied' ? 'cancelled' : 'failed');
+  const code = typeof q.code === 'string' ? q.code : '';
+  if (!/^[\w.~-]{8,512}$/.test(code) || typeof raw !== 'string') return navigateError(res, 'failed');
+
+  const dot = raw.indexOf('.');
+  const verifier = dot > 0 ? raw.slice(0, dot) : '';
+  let meta = {};
+  try { meta = JSON.parse(Buffer.from(raw.slice(dot + 1), 'base64url').toString('utf8')) || {}; } catch (_) { meta = {}; }
+  if (!/^[A-Za-z0-9_-]{43}$/.test(verifier)) return navigateError(res, 'failed');
+
+  try {
+    const r = await sb.auth.exchangePkce(code, verifier);
+    if (!r.ok || !r.data || !r.data.access_token || !r.data.refresh_token) return navigateError(res, 'failed');
+    session.setSessionCookies(req, res, r.data, { remember: meta.r === true });
+    return navigate(res, safeNext(meta.n));
+  } catch (err) {
+    return navigateError(res, 'failed');
+  }
 });
 
 // =====================================================================================
