@@ -16,7 +16,7 @@
     look:        { eyes: 'open',   mouth: 'smile', props: [], loop: 'idle' },
     peek:        { eyes: 'both',   mouth: 'o',     props: [], parts: { book: { y: 62 }, face: { y: -4 } }, loop: 'peek' },
     'type-email':{ eyes: 'open',   mouth: 'smile', props: ['prop-mail'], hide: ['note-paper'], loop: 'nod' },
-    'hide-eyes': { eyes: 'closed', mouth: 'flat',  props: [], parts: { book: { y: -88, scale: 1.04 } }, loop: 'hide' },
+    'hide-eyes': { eyes: 'closed', mouth: 'flat',  props: ['hand-left', 'hand-right'], loop: 'hide' },
     working:     { eyes: 'both',   mouth: 'flat',  props: ['prop-dots', 'prop-question'], loop: 'think' },
     success:     { eyes: 'happy',  mouth: 'grin',  props: ['prop-check', 'prop-hearts'], loop: 'joy' },
     error:       { eyes: 'both',   mouth: 'sad',   props: ['prop-exclaim', 'sweat'], loop: 'shake' },

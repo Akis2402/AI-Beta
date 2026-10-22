@@ -15,7 +15,7 @@
   var MOUTHS = { smile: 'mouth', open: 'mouth-open', o: 'mouth-o', flat: 'mouth-flat', sad: 'mouth-sad', grin: 'mouth-grin' };
   var ALL_PROPS = ['glasses', 'sweat', 'blush', 'solution-scribbles', 'prop-pencil', 'prop-magnifier', 'prop-cite', 'prop-graph', 'prop-cube', 'prop-flashcard',
     'prop-formula', 'prop-note', 'prop-clock', 'prop-mic', 'prop-shield', 'prop-lock', 'prop-meter', 'prop-mail', 'prop-dots', 'prop-zzz',
-    'prop-question', 'prop-exclaim', 'prop-check', 'prop-hearts', 'prop-confetti'];
+    'prop-question', 'prop-exclaim', 'prop-check', 'prop-hearts', 'prop-confetti', 'hand-left', 'hand-right'];
   var reduceMQ = root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)');
   function rnd(a, b) { return a + Math.random() * (b - a); }
 
@@ -189,7 +189,15 @@
         T.to(el['prop-mail'], { rotation: -3, y: -4, duration: 0.8, yoyo: true, repeat: -1, ease: 'sine.inOut' });
       },
       peek: function () { T.to([el['eye-left'], el['eye-right']], { x: 6, duration: 1.2, yoyo: true, repeat: -1, ease: 'sine.inOut' }); },
-      hide: function () { T.to(el['book'], { rotation: 1, duration: 0.9, yoyo: true, repeat: -1, ease: 'sine.inOut' }); },
+      // Hai tay mitten trượt từ dưới lên che mắt (đã vẽ sẵn đúng vị trí che trong rig); sau đó chỉ nhún nhẹ.
+      // Không GSAP/reduced-motion: engine chỉ bật opacity (xem vis()) => tay hiện đúng vị trí che, không chuyển động.
+      hide: function () {
+        var l = el['hand-left'], r = el['hand-right'];
+        T.fromTo(l, { y: 110, x: -26, rotation: -18 }, { y: 0, x: 0, rotation: 0, duration: 0.5, ease: 'back.out(1.5)' });
+        T.fromTo(r, { y: 110, x: 26, rotation: 18 }, { y: 0, x: 0, rotation: 0, duration: 0.5, delay: 0.06, ease: 'back.out(1.5)' });
+        T.to(l, { y: -3, rotation: -2, duration: 0.9, delay: 0.6, yoyo: true, repeat: -1, ease: 'sine.inOut' });
+        T.to(r, { y: -3, rotation: 2, duration: 0.9, delay: 0.66, yoyo: true, repeat: -1, ease: 'sine.inOut' });
+      },
       point: function () { T.to(el['burst-rays'], { opacity: 1, duration: 0.4, yoyo: true, repeat: -1 }); },
       spin: function () {
         T.to(el['mascot-root'], { scaleX: -1, duration: 1.5, ease: 'sine.inOut', yoyo: true, repeat: -1, repeatDelay: 0.7, transformOrigin: '50% 50%' });

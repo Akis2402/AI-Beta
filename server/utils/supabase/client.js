@@ -114,6 +114,12 @@ const auth = {
     const res = await call('POST', '/auth/v1/logout?scope=local', { apiKey: cfg.anonKey, bearer: accessToken });
     return { ok: res.ok, status: res.status };
   },
+  /** Đăng xuất MỌI thiết bị (scope=global): thu hồi tất cả refresh token của user. */
+  async signOutAll(accessToken) {
+    const cfg = getConfig().supabase;
+    const res = await call('POST', '/auth/v1/logout?scope=global', { apiKey: cfg.anonKey, bearer: accessToken });
+    return { ok: res.ok, status: res.status };
+  },
   /** Gửi email đặt lại mật khẩu. GoTrue trả 200 cả khi email không tồn tại (không lộ tài khoản). */
   async recover(email, redirectTo) {
     const cfg = getConfig().supabase;

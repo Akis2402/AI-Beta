@@ -131,20 +131,27 @@
 
   var AuthClient = {
     session: function () { return api('GET', '/api/auth/session'); },
-    login: function (email, password, remember) { return api('POST', '/api/auth/login', { email: email, password: password, remember: !!remember }); },
-    signup: async function (email, password, confirmPassword, remember, fullName) {
+    login: function (email, password, remember, turnstileToken) {
+      var body = { email: email, password: password, remember: !!remember };
+      if (turnstileToken) body.turnstileToken = turnstileToken;
+      return api('POST', '/api/auth/login', body);
+    },
+    signup: async function (email, password, confirmPassword, remember, fullName, turnstileToken) {
       var pow = await getPow();
       var body = { email: email, password: password, confirmPassword: confirmPassword, remember: !!remember, challenge: pow.challenge, nonce: pow.nonce };
       if (fullName) body.fullName = fullName;
+      if (turnstileToken) body.turnstileToken = turnstileToken;
       return api('POST', '/api/auth/signup', body);
     },
     /** Link bắt đầu đăng nhập Google (server tự kiểm tra lại next, chỉ cho /index.html). */
     googleUrl: function (next, remember) {
       return '/api/auth/google?next=' + encodeURIComponent(safeNext(next)) + (remember ? '&remember=1' : '');
     },
-    forgot: async function (email) {
+    forgot: async function (email, turnstileToken) {
       var pow = await getPow();
-      return api('POST', '/api/auth/forgot', { email: email, challenge: pow.challenge, nonce: pow.nonce });
+      var body = { email: email, challenge: pow.challenge, nonce: pow.nonce };
+      if (turnstileToken) body.turnstileToken = turnstileToken;
+      return api('POST', '/api/auth/forgot', body);
     },
     isEmail: isEmail, isStrongPassword: isStrongPassword, errorKey: errorKey, safeNext: safeNext,
     _sha256: sha256Js, _leadingZeroBits: leadingZeroBits, _solvePow: solvePow

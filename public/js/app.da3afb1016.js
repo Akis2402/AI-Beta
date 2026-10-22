@@ -1119,8 +1119,12 @@ function chunkText(pages, meta = {}, size = 900) {
   pageList.forEach(({ page, text }) => {
     const clean = cleanExtractedText(text).replace(/\s+/g, ' ').trim();
     if (!clean) return;
-    for (let i = 0; i < clean.length; i += size) {
-      const t = clean.slice(i, i + size);
+    // Cắt ở ranh giới TỪ (lùi tối đa 20% size) thay vì giữa chữ: từ khóa truy hồi không bị xé đôi giữa 2 chunk.
+    for (let i = 0, end = 0; i < clean.length; i = end) {
+      end = Math.min(clean.length, i + size);
+      if (end < clean.length) { const sp = clean.lastIndexOf(' ', end); if (sp > i + size * 0.8) end = sp + 1; }
+      const t = clean.slice(i, end).trim();
+      if (!t) continue;
       out.push({ text: t, garbled: garbledRatio(t) > 0.3, page, startPage: page, endPage: page, doc, sourceId });
     }
   });
@@ -1176,6 +1180,73 @@ async function rasterizePdfPage(pdf, pageNum) {
   return { mediaType: m[1], base64: m[2] };
 }
 
+// TỐC ĐỘ: trước đây đọc text từng trang TUẦN TỰ (await getPage -> await getTextContent) và không giải phóng
+// trang. Nay đọc song song theo lô nhỏ + page.cleanup() (trả bộ nhớ glyph/operator list ngay). Giữ nguyên thứ tự
+// trang; 1 trang lỗi vẫn làm parsePDF() ném lỗi như cũ (không nuốt lỗi).
+const PDF_TEXT_CONCURRENCY = 6;
+async function extractPdfPageLines(pdf) {
+  const out = new Array(pdf.numPages);
+  let next = 1;
+  async function worker() {
+    for (;;) {
+      const p = next++;
+      if (p > pdf.numPages) return;
+      const page = await pdf.getPage(p);
+      try {
+        const content = await page.getTextContent();
+        const lines = [];
+        let cur = [];
+        content.items.forEach((it) => {
+          if (it.str) cur.push(it.str);
+          if (it.hasEOL) { if (cur.length) lines.push(cur.join(' ')); cur = []; }
+        });
+        if (cur.length) lines.push(cur.join(' '));
+        out[p - 1] = { page: p, lines };
+      } finally { if (typeof page.cleanup === 'function') page.cleanup(); }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(PDF_TEXT_CONCURRENCY, pdf.numPages) }, worker));
+  return out;
+}
+// TOKEN: header/footer lặp ở mọi trang (tên sách, "Trang 23"...) bị gửi cho AI lặp đi lặp lại trong từng chunk.
+// Chỉ xét 2 dòng đầu + 2 dòng cuối mỗi trang, ngắn (<=80 ký tự), lặp ở >=40% số trang (tối thiểu 3, tài liệu >=5
+// trang). Dòng bắt đầu bằng nhãn yêu cầu (Bài/Câu/Ví dụ/Chương...) KHÔNG được gộp số thành '#' — để "Bài 12" ở đầu
+// mỗi trang (mỗi trang 1 bài) không bị coi là header và xóa mất nhãn mà retrieval tầng 1 cần.
+const PDF_PROTECTED_LINE_RE = /^(bài|bai|câu|cau|ví dụ|vi du|vd|chương|chuong|mục|muc|phần|phan|problem|exercise|question|example|chapter|section|part)\b/i;
+// Nhãn yêu cầu nằm GIỪ dòng (vd "Trang 3. Bài 2.3 ...") cũng được bảo vệ. Trang < 6 dòng KHÔNG BAO GIỜ bị bóc dòng: PDF mà
+// text cả trang chỉ là 1–3 "dòng" (pdf.js không đánh dấu hasEOL) sẽ bị nhầm cả trang là header và mất sạch nội dung.
+const PDF_LABEL_INLINE_RE = /(?:^|\s)(bài|bai|câu|cau|ví dụ|vi du|vd|problem|exercise|question|example)\s*\.?\s*\d/i;
+const PDF_MIN_LINES_TO_STRIP = 6;
+function stripRepeatedPageLines(sets) {
+  if (!Array.isArray(sets) || sets.length < 5) return;
+  const exactKey = (l) => l.toLowerCase().replace(/\s+/g, ' ').trim();
+  const numKey = (l) => ((PDF_PROTECTED_LINE_RE.test(l.trim()) || PDF_LABEL_INLINE_RE.test(l) || l.length > 60) ? null : exactKey(l).replace(/\d+/g, '#'));
+  const edgeIdx = (n) => (n < PDF_MIN_LINES_TO_STRIP ? [] : Array.from(new Set([0, 1, n - 2, n - 1])).filter((i) => i >= 0 && i < n));
+  const countExact = new Map();
+  const countNum = new Map();
+  const bump = (m, k) => { if (k) m.set(k, (m.get(k) || 0) + 1); };
+  sets.forEach((s) => {
+    const seenE = new Set(); const seenN = new Set();
+    edgeIdx(s.lines.length).forEach((i) => {
+      const l = s.lines[i];
+      if (!l || l.length > 80) return;
+      seenE.add(exactKey(l)); const nk = numKey(l); if (nk) seenN.add(nk);
+    });
+    seenE.forEach((k) => bump(countExact, k));
+    seenN.forEach((k) => bump(countNum, k));
+  });
+  const need = Math.max(3, Math.ceil(sets.length * 0.4));
+  sets.forEach((s) => {
+    const drop = new Set();
+    edgeIdx(s.lines.length).forEach((i) => {
+      const l = s.lines[i];
+      if (!l || l.length > 80) return;
+      const nk = numKey(l);
+      if ((countExact.get(exactKey(l)) || 0) >= need || (nk && (countNum.get(nk) || 0) >= need)) drop.add(i);
+    });
+    if (drop.size) s.lines = s.lines.filter((_, i) => !drop.has(i));
+  });
+}
 async function parsePDF(file) {
   try { await ensurePdfJs(); } catch (e) { /* rơi xuống check window.pdfjsLib bên dưới để báo lỗi đúng nội dung */ }
   if (!window.pdfjsLib) throw new Error('Không tải được thư viện đọc PDF (pdf.js) — kiểm tra kết nối mạng hoặc trình chặn quảng cáo rồi thử lại.');
@@ -1191,15 +1262,10 @@ async function parsePDF(file) {
   const pdf = await pdfjsLib.getDocument({ data: buf, isEvalSupported: false }).promise;
   // PHẦN A2/A3: giữ text TỪNG TRANG riêng (không chỉ gộp vào 1 chuỗi `full`) — cần cho chunkText()
   // gán đúng số trang cho mỗi chunk (trước đây gộp hết vào `full` là mất luôn ranh giới trang).
-  const pages = [];
-  let full = '';
-  for (let p = 1; p <= pdf.numPages; p++) {
-    const page = await pdf.getPage(p);
-    const content = await page.getTextContent();
-    const pageText = content.items.map((it) => it.str).join(' ');
-    pages.push({ page: p, text: pageText });
-    full += pageText + '\n';
-  }
+  const lineSets = await extractPdfPageLines(pdf);
+  stripRepeatedPageLines(lineSets);
+  const pages = lineSets.map((s) => ({ page: s.page, text: s.lines.join(' ') }));
+  const full = pages.map((pg) => pg.text).join('\n') + '\n';
   const meaningfulLen = full.replace(/\s+/g, '').length;
   const isImageOnly = meaningfulLen < pdf.numPages * PDF_TEXT_MIN_CHARS_PER_PAGE;
   if (!isImageOnly) {
@@ -2932,6 +2998,11 @@ const RETRIEVAL_CHAR_BUDGET = 60000;        // ~18-20k token cho câu hỏi thư
 const SOURCE_COMPLETE_CHAR_BUDGET = 120000; // chế độ "toàn bộ tài liệu" được nới, vẫn có trần
 const PER_REQUIREMENT_EVIDENCE_CAP = 8;     // mỗi yêu cầu lấy tối đa ngần này evidence trước khi sang tầng 2
 const NEIGHBOR_RADIUS = 1;                  // tầng 3: lấy chunk liền trước/liền sau
+// TOKEN (tầng 2): điểm là IDF nên đuôi điểm thấp gần như chỉ là nhiễu. Giữ chunk có điểm >= 35% điểm cao nhất,
+// tối thiểu 12 chunk (để AI vẫn thấy ngữ cảnh rộng). Không khớp từ khóa nào: gửi 16 chunk đầu thay vì cả 40.
+const TIER2_REL_CUTOFF = 0.35;
+const TIER2_MIN = 12;
+const TIER2_NO_HIT_CAP = 16;
 
 function isFullSourceRequest(query) {
   return /(toàn bộ|tất cả|cả\s+(tài liệu|pdf|file)|hết\s+(tài liệu|pdf|file)|full\s+(source|document|pdf))/i.test(query || '');
@@ -3115,6 +3186,24 @@ function renderUrlSources() {
   });
 }
 
+// TỐC ĐỘ: chuỗi chuẩn hóa được cache theo OBJECT chunk (WeakMap: không bị lưu xuống IndexedDB, tự giải phóng cùng
+// chunk). Trước đây MỖI lượt hỏi chuẩn hóa lại TOÀN BỘ chunk (PDF dài = hàng nghìn chunk x 6 regex).
+const NORM_CACHE = new WeakMap();
+function normOfChunk(ch) {
+  let n = NORM_CACHE.get(ch);
+  if (!n || n.src !== ch.text) { n = { src: ch.text, norm: normalizeForMatch(ch.text) }; NORM_CACHE.set(ch, n); }
+  return n.norm;
+}
+// Điểm theo IDF (BM25-lite): từ có mặt ở mọi chunk ("bài", "tài liệu"...) gần như không đóng góp, từ hiếm đóng góp
+// nhiều -> top chunk thật sự liên quan thay vì hòa điểm theo thứ tự chèn. `score` tạm là mảng chỉ số từ khớp.
+function applyIdfScores(out, qWords) {
+  const N = out.length;
+  if (!N) return;
+  const df = new Array(qWords.length).fill(0);
+  out.forEach((c) => c.score.forEach((i) => { df[i] += 1; }));
+  const w = df.map((d) => Math.log(1 + (N - d + 0.5) / (d + 0.5)));
+  out.forEach((c) => { c.score = c.score.reduce((s, i) => s + w[i], 0); });
+}
 function collectAvailableEvidence(query) {
   const qWords = (normalizeForMatch(query).match(/[\p{L}\p{N}.]+/gu) || []).filter((w) => w.length > 2);
   const usableDocs = (state.docs || []).filter(isSourceUsableNow);
@@ -3124,9 +3213,9 @@ function collectAvailableEvidence(query) {
     (doc.chunks || []).forEach((ch) => {
       if (ch[SOURCE_PLACEHOLDER_FLAG]) return;                    // KHÔNG BAO GIỜ gửi placeholder cho AI
       if (ch.extractionStatus && ch.extractionStatus !== 'ok') return; // chunk lỗi -> loại
-      const norm = normalizeForMatch(ch.text);
-      let score = 0;
-      qWords.forEach((w) => { if (norm.includes(w)) score += 1; });
+      const norm = normOfChunk(ch);
+      const score = []; // tạm: chỉ số từ khớp; applyIdfScores() đổi thành số
+      qWords.forEach((w, i) => { if (norm.includes(w)) score.push(i); });
       out.push({
         doc: doc.name, id: ch.id, text: ch.text, garbled: !!ch.garbled, score,
         page: ch.page != null ? ch.page : null,
@@ -3145,9 +3234,9 @@ function collectAvailableEvidence(query) {
   // theo từ khoá, cùng đi qua sourceBudgetPlanner.js ở server theo `sourceId` riêng từng nguồn.
   (state.urlSources || []).forEach((s) => {
     (s.chunks || []).forEach((ch, i) => {
-      const norm = normalizeForMatch(ch.text);
-      let score = 0;
-      qWords.forEach((w) => { if (norm.includes(w)) score += 1; });
+      const norm = normOfChunk(ch);
+      const score = []; // tạm: chỉ số từ khớp; applyIdfScores() đổi thành số
+      qWords.forEach((w, i) => { if (norm.includes(w)) score.push(i); });
       // PHẦN BV (V6 — source provenance): locator đầy đủ cho CẢ YouTube (mốc mm:ss) LẪN Web
       // (heading của section), vì citation phải truy nguyên tới ĐÚNG ĐOẠN, không chỉ tới cả
       // video/trang. Locator vừa nhét vào đầu `text` (để model thấy ngay khi đọc evidence), vừa
@@ -3184,6 +3273,7 @@ function collectAvailableEvidence(query) {
       });
     });
   });
+  applyIdfScores(out, qWords);
   return out;
 }
 // Tên cũ giữ lại làm alias — vài chỗ (test cũ, code ngoài) có thể còn gọi collectReadyChunks(); hành
@@ -3274,12 +3364,13 @@ function retrieveContext(query, limit) {
   // ---------- TẦNG 3 (tính trước, chèn sau tầng 2): neighbor của evidence tầng 1 ----------
   const neighbors = [];
   const byKey = new Map(all.map((c) => [keyOf(c), c]));
+  const byIdx = new Map(all.filter((c) => c.chunkIndex != null).map((c) => [`${c.sourceId}#${c.chunkIndex}`, c])); // O(1) thay cho all.find
   tier1Keys.forEach((k) => {
     const c = byKey.get(k);
     if (!c || c.chunkIndex == null) return;
     for (let d = 1; d <= NEIGHBOR_RADIUS; d++) {
       [c.chunkIndex - d, c.chunkIndex + d].forEach((idx) => {
-        const n = all.find((x) => x.sourceId === c.sourceId && x.chunkIndex === idx);
+        const n = byIdx.get(`${c.sourceId}#${idx}`);
         if (n) neighbors.push(n);
       });
     }
@@ -3294,7 +3385,14 @@ function retrieveContext(query, limit) {
   const scored = all.filter((c) => c.score > 0).sort((a, b) => b.score - a.score);
   // Không có đoạn nào khớp từ khoá (rất dễ xảy ra với so khớp từ khoá đơn giản) -> vẫn đưa evidence
   // để AI tự đánh giá, thay vì trả [] khiến AI kết luận "không có nguồn".
-  const tier2 = scored.length ? scored : all;
+  let tier2;
+  if (scored.length) {
+    const top = scored[0].score;
+    const strong = scored.filter((c) => c.score >= top * TIER2_REL_CUTOFF).length;
+    tier2 = scored.slice(0, Math.max(TIER2_MIN, strong));
+  } else {
+    tier2 = all.slice(0, TIER2_NO_HIT_CAP);
+  }
   const cap = Number.isFinite(limit) && limit > DEFAULT_RETRIEVAL_CAP ? limit : DEFAULT_RETRIEVAL_CAP;
   const tier2Cap = Math.max(cap, picked.size + cap);
   tier2.forEach((c) => { if (picked.size < tier2Cap) add(c, 2, null); });

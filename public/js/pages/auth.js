@@ -26,7 +26,7 @@
     hint: $('pwHint'), toggle: $('pwToggle'), remember: $('apRemember'), rememberRow: $('rememberRow'), msg: $('apMsg'),
     submit: $('apSubmit'), title: $('apTitle'), sub: $('apSub'), tabs: $('apTabs'), tabLogin: $('tabLogin'), tabSignup: $('tabSignup'),
     forgot: $('forgotLink'), backLogin: $('backLogin'),
-    name: $('apName'), nameField: $('nameField'), oauth: $('oauthBlock'), google: $('googleBtn')
+    name: $('apName'), nameField: $('nameField'), oauth: $('oauthBlock'), google: $('googleBtn'), captcha: $('cfTurnstile')
   };
 
   var params = new URLSearchParams(location.search);
@@ -115,6 +115,39 @@
   // Nhấn Back từ Google (bfcache) quay lại: mở khóa nút.
   window.addEventListener('pageshow', function () { el.google.removeAttribute('aria-disabled'); });
 
+  // ------------------------------------------------------------------ Cloudflare Turnstile (captcha)
+  // Script tải động (không đặt thẻ <script> ngoại lai trong HTML; CSP cho phép script-src + frame-src challenges.cloudflare.com).
+  // Token dùng 1 LẦN: sau mỗi lần gửi luôn reset. Không tải được script (bị chặn/mất mạng): không chặn ở client — server mới
+  // là nơi quyết định (đã bật secret => từ chối kèm thông báo rõ ràng).
+  var TS_SITEKEY = el.captcha ? el.captcha.getAttribute('data-sitekey') : '';
+  var tsId = null, tsToken = '';
+  function tsReset() {
+    tsToken = '';
+    try { if (tsId !== null && window.turnstile) window.turnstile.reset(tsId); } catch (_) { /* widget đã bị gỡ */ }
+  }
+  function tsRender() {
+    if (tsId !== null || !window.turnstile || !TS_SITEKEY) return;
+    var lang = window.languageStore && window.languageStore.getUILanguage ? window.languageStore.getUILanguage() : 'vi';
+    tsId = window.turnstile.render(el.captcha, {
+      sitekey: TS_SITEKEY,
+      action: el.captcha.getAttribute('data-action') || 'auth',
+      theme: 'auto',
+      size: 'flexible',
+      language: lang === 'en' ? 'en' : 'vi',
+      callback: function (t) { tsToken = t; },
+      'expired-callback': function () { tsToken = ''; },
+      'timeout-callback': function () { tsToken = ''; },
+      'error-callback': function () { tsToken = ''; }
+    });
+  }
+  if (TS_SITEKEY) {
+    var tsScript = document.createElement('script');
+    tsScript.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    tsScript.async = true; tsScript.defer = true;
+    tsScript.onload = tsRender;
+    document.head.appendChild(tsScript);
+  }
+
   // ------------------------------------------------------------------ Akis phản ứng khi nhập
   el.email.addEventListener('focus', function () { if (busy) return; state('type-email'); say('ap.say.email', 3500); });
   el.email.addEventListener('input', function () { if (mk) mk.lookAt(-0.9 + Math.min(el.email.value.length, 28) / 28 * 1.8, 0.7); });
@@ -163,12 +196,14 @@
         if (pw !== pw2) return fail('ap.v.mismatch', el.pw2);
       }
     }
+    if (tsId !== null && !tsToken) return fail('ap.err.captcha_required', null);
+    var token = tsToken; tsReset();
     setBusy(true); showMsg(mode === 'login' ? '' : 'ap.pow'); state('working'); say('ap.say.working');
     var r;
     try {
-      if (mode === 'login') r = await C.login(email, pw, el.remember.checked);
-      else if (mode === 'signup') r = await C.signup(email, pw, pw2, el.remember.checked, el.name.value.trim());
-      else r = await C.forgot(email);
+      if (mode === 'login') r = await C.login(email, pw, el.remember.checked, token);
+      else if (mode === 'signup') r = await C.signup(email, pw, pw2, el.remember.checked, el.name.value.trim(), token);
+      else r = await C.forgot(email, token);
     } catch (err) {
       setBusy(false);
       return fail(err && err.json ? C.errorKey(err.json) : 'ap.err.network', null);
