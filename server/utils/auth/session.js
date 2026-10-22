@@ -103,7 +103,10 @@ function forgetToken(token) { if (token) verifyCache.delete(sha(token)); }
 const refreshInflight = new Map();
 
 function toUser(u) {
-  return { id: u.id, email: u.email || null, emailConfirmed: Boolean(u.email_confirmed_at || u.confirmed_at) };
+  // providers: ['email'] / ['google'] / ['email','google'] — giao diện dùng để biết tài khoản có mật khẩu hay không. null = không rõ.
+  const meta = u.app_metadata;
+  const providers = meta && Array.isArray(meta.providers) ? meta.providers.filter((p) => typeof p === 'string') : null;
+  return { id: u.id, email: u.email || null, emailConfirmed: Boolean(u.email_confirmed_at || u.confirmed_at), providers };
 }
 
 /**
@@ -165,7 +168,7 @@ const profileCache = new Map();
 async function getProfile(userId) {
   const hit = profileCache.get(userId);
   if (hit && hit.until > Date.now()) return hit.profile;
-  const rows = await sb.select('profiles', `id=eq.${encodeURIComponent(userId)}&select=id,email,display_name,avatar_url,role&limit=1`);
+  const rows = await sb.select('profiles', `id=eq.${encodeURIComponent(userId)}&select=id,email,display_name,avatar_url,role,bio,phone&limit=1`);
   const profile = rows[0] || null;
   if (profileCache.size >= 500) profileCache.delete(profileCache.keys().next().value);
   profileCache.set(userId, { profile, until: Date.now() + PROFILE_CACHE_TTL_MS });

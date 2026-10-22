@@ -48,8 +48,10 @@ const VISUAL_JS = ['puterVisualManager.js'];
 const UI_JS = ['puterAuthUI.js', 'authUI.js', 'visualViewer.js', 'mascotCompanion.js'];
 const TASK_JS = ['conversationTaskManager.js', 'backgroundTaskUI.js'];
 const CORE_CSS = ['styles.css'];
-// Linh vật Akis: ảnh gốc của người dùng nhúng dạng data URI (akisImage.js) + lớp điều khiển (mascot.js).
-const MASCOT_JS = ['akisImage.js', 'mascot.js'];
+// Linh vật Akis (vector có rig): hình akisRig.js · tư thế akisPoses.js · chuyển động GSAP akisMotion.js · lớp điều khiển mascot.js.
+// Thứ tự thẻ <script> trong HTML: gsap -> akisRig -> akisPoses -> akisMotion -> mascot. akisImage.js (ảnh raster cũ) đã BỎ khỏi
+// mọi trang nên KHÔNG còn nằm trong danh sách bắt buộc (nếu để lại, build dừng vì trang không còn thẻ tham chiếu nó).
+const MASCOT_JS = ['akisRig.js', 'akisPoses.js', 'akisMotion.js', 'mascot.js'];
 
 /** Mỗi trang: file HTML + danh sách [thư mục con của public/, [tên file]] mà trang đó PHẢI tham chiếu. */
 const PAGES = [

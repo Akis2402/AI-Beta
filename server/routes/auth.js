@@ -16,6 +16,7 @@ const session = require('../utils/auth/session');
 const sb = require('../utils/supabase/client');
 const quota = require('../utils/quota/quotaService');
 const pow = require('../utils/auth/pow');
+const turnstile = require('../utils/auth/turnstile');
 
 const router = express.Router();
 router.use(express.json({ limit: '4kb' }));
@@ -46,6 +47,17 @@ function ensureOrigin(req, res, next) {
 
 const NEUTRAL_SIGNUP = 'Nếu email hợp lệ, bạn sẽ nhận được thư xác nhận (nếu dự án bật xác nhận email). Hãy kiểm tra hộp thư rồi đăng nhập.';
 
+// Cloudflare Turnstile (captcha). Chỉ bắt buộc khi đã đặt TURNSTILE_SECRET_KEY (xem utils/auth/turnstile.js).
+// Token dùng 1 lần: client luôn reset widget sau mỗi request. Trả false (đã gửi lỗi) nếu không đạt.
+async function captchaGate(res, token) {
+  const r = await turnstile.verify(token);
+  if (r.ok) return true;
+  console.warn(`[auth] captcha_rejected ${r.code || ''}${r.unavailable ? ' (unavailable)' : ''}`);
+  if (r.unavailable) bad(res, 503, 'Không xác minh được bảo mật lúc này. Vui lòng thử lại sau.', 'captcha_unavailable');
+  else bad(res, 400, 'Xác minh bảo mật không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.', 'captcha_failed');
+  return false;
+}
+
 // Họ tên tùy chọn lúc đăng ký -> options.data.full_name -> trigger public.handle_new_user() -> profiles.display_name.
 // Chuẩn hóa giống PATCH /profile (1–60 ký tự, không ký tự điều khiển/zero-width). Rỗng = không gửi.
 function cleanFullName(raw) {
@@ -69,7 +81,7 @@ router.get('/session', async (req, res) => {
   try { profile = await session.getProfile(s.user.id); } catch (_) { /* profile lỗi không làm hỏng trạng thái đăng nhập */ }
   return res.json({
     status: 'authenticated', enforcement: true,
-    user: { id: s.user.id, email: s.user.email, displayName: (profile && profile.display_name) || null, avatarUrl: (profile && profile.avatar_url) || null, role: (profile && profile.role) || 'user' }
+    user: { id: s.user.id, email: s.user.email, displayName: (profile && profile.display_name) || null, avatarUrl: (profile && profile.avatar_url) || null, bio: (profile && profile.bio) || null, phone: (profile && profile.phone) || null, providers: Array.isArray(s.user.providers) ? s.user.providers : null, role: (profile && profile.role) || 'user' }
   });
 });
 
@@ -92,6 +104,7 @@ router.post('/signup', ensureConfigured, ensureOrigin, signupLimiter, authLimite
   }
   const fullName = cleanFullName(body.fullName);
   if (!fullName.ok) return bad(res, 400, 'Họ tên không hợp lệ (tối đa 60 ký tự).', 'invalid_display_name');
+  if (!(await captchaGate(res, body.turnstileToken))) return;
   // PoW SAU các kiểm tra rẻ: gõ sai email/mật khẩu không đốt challenge của người dùng thật.
   const powResult = await pow.verify(body.challenge, body.nonce);
   if (!powResult.ok) {
@@ -121,6 +134,7 @@ router.post('/login', ensureConfigured, ensureOrigin, authLimiter, async (req, r
   const e = session.validateEmail(body.email);
   const pw = String(body.password == null ? '' : body.password);
   if (!e.ok || !pw) return bad(res, 400, 'Vui lòng nhập email và mật khẩu hợp lệ.', 'invalid_credentials_format');
+  if (!(await captchaGate(res, body.turnstileToken))) return;
   try {
     const r = await sb.auth.signInWithPassword(e.value, pw);
     if (r.status >= 500) return bad(res, 503, 'Dịch vụ đăng nhập tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
@@ -261,6 +275,7 @@ router.post('/forgot', ensureConfigured, ensureOrigin, forgotLimiter, authLimite
   const body = req.body || {};
   const e = session.validateEmail(body.email);
   if (!e.ok) return bad(res, 400, e.message, 'invalid_email');
+  if (!(await captchaGate(res, body.turnstileToken))) return;
   const powResult = await pow.verify(body.challenge, body.nonce);
   if (!powResult.ok) return bad(res, 400, 'Xác minh chống lạm dụng không hợp lệ. Vui lòng thử lại.', powResult.code);
   try {
@@ -303,17 +318,37 @@ router.post('/reset', ensureConfigured, ensureOrigin, resetLimiter, async (req, 
 
 // ---- PATCH /api/auth/profile  (đổi tên hiển thị; chỉ cột display_name, KHÔNG bao giờ role/email) ----
 const BAD_NAME_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/;
+const BAD_BIO_CHARS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/; // cho phép xuống dòng (\n)
+const PHONE_RE = /^\+?[0-9 ().-]{6,20}$/;                                                                      // khớp CHECK profiles_phone_fmt
 router.patch('/profile', requireUser, async (req, res) => {
   noStore(res);
   if (!req.user) return bad(res, 400, 'Xác thực đang tắt.', 'auth_disabled');
-  const raw = req.body && req.body.displayName;
-  const name = typeof raw === 'string' ? raw.normalize('NFC').trim().replace(/\s+/g, ' ') : '';
-  if (!name || name.length > 60) return bad(res, 400, 'Tên hiển thị cần từ 1 đến 60 ký tự.', 'invalid_display_name');
-  if (BAD_NAME_CHARS.test(name)) return bad(res, 400, 'Tên hiển thị chứa ký tự không hợp lệ.', 'invalid_display_name');
+  const body = req.body || {};
+  const update = {};
+  if (body.displayName !== undefined) {
+    const raw = body.displayName;
+    const name = typeof raw === 'string' ? raw.normalize('NFC').trim().replace(/\s+/g, ' ') : '';
+    if (!name || name.length > 60) return bad(res, 400, 'Tên hiển thị cần từ 1 đến 60 ký tự.', 'invalid_display_name');
+    if (BAD_NAME_CHARS.test(name)) return bad(res, 400, 'Tên hiển thị chứa ký tự không hợp lệ.', 'invalid_display_name');
+    update.display_name = name;
+  }
+  if (body.bio !== undefined) {
+    if (body.bio !== null && typeof body.bio !== 'string') return bad(res, 400, 'Giới thiệu không hợp lệ.', 'invalid_bio');
+    const bio = String(body.bio || '').normalize('NFC').replace(/\r\n?/g, '\n').trim();
+    if (bio.length > 280 || BAD_BIO_CHARS.test(bio)) return bad(res, 400, 'Giới thiệu tối đa 280 ký tự, không chứa ký tự lạ.', 'invalid_bio');
+    update.bio = bio || null;
+  }
+  if (body.phone !== undefined) {
+    if (body.phone !== null && typeof body.phone !== 'string') return bad(res, 400, 'Số điện thoại không hợp lệ.', 'invalid_phone');
+    const phone = String(body.phone || '').trim();
+    if (phone && !PHONE_RE.test(phone)) return bad(res, 400, 'Số điện thoại không hợp lệ.', 'invalid_phone');
+    update.phone = phone || null;
+  }
+  if (!Object.keys(update).length) return bad(res, 400, 'Không có thông tin nào để lưu.', 'nothing_to_update');
   try {
-    const row = await sb.patch('profiles', `id=eq.${encodeURIComponent(req.user.id)}`, { display_name: name, updated_at: new Date().toISOString() });
+    const row = await sb.patch('profiles', `id=eq.${encodeURIComponent(req.user.id)}`, Object.assign({}, update, { updated_at: new Date().toISOString() }));
     session.forgetProfile(req.user.id);
-    return res.json({ ok: true, displayName: (row && row.display_name) || name });
+    return res.json({ ok: true, displayName: (row && row.display_name) || update.display_name || null, bio: row ? row.bio : (update.bio || null), phone: row ? row.phone : (update.phone || null) });
   } catch (err) {
     return bad(res, 502, 'Không lưu được tên hiển thị. Vui lòng thử lại.', 'profile_save_failed');
   }
@@ -332,6 +367,71 @@ router.get('/quota', requireUser, async (req, res) => {
   } catch (err) {
     return bad(res, 503, 'Không đọc được hạn mức sử dụng. Vui lòng thử lại sau.', 'quota_unavailable');
   }
+});
+
+// ---- GET /api/auth/usage  (lịch sử token của CHÍNH user, hiển thị trong Hồ sơ -> Sử dụng) ----
+const USAGE_HISTORY_LIMIT = 100;
+router.get('/usage', requireUser, async (req, res) => {
+  noStore(res);
+  if (!req.user) return res.json({ status: 'disabled', items: [] });
+  try {
+    const rows = await sb.select('ai_usage',
+      `user_id=eq.${encodeURIComponent(req.user.id)}&status=eq.settled&select=created_at,kind,provider,model,input_tokens,output_tokens,cached_tokens,total_tokens&order=created_at.desc&limit=${USAGE_HISTORY_LIMIT}`);
+    return res.json({
+      items: rows.map((r) => ({ at: r.created_at, kind: r.kind, provider: r.provider, model: r.model, input: r.input_tokens, output: r.output_tokens, cached: r.cached_tokens, total: r.total_tokens }))
+    });
+  } catch (err) {
+    return bad(res, 503, 'Không đọc được lịch sử sử dụng. Vui lòng thử lại sau.', 'usage_unavailable');
+  }
+});
+
+// ---- POST /api/auth/password  (đổi mật khẩu khi đang đăng nhập; PHẢI nhập đúng mật khẩu hiện tại) ----
+// Lỗi "mật khẩu hiện tại sai" trả 400 (KHÔNG 401) để giao diện không nhầm là phiên hết hạn.
+router.post('/password', ensureConfigured, ensureOrigin, authLimiter, requireUser, async (req, res) => {
+  noStore(res);
+  if (!req.user) return bad(res, 400, 'Xác thực đang tắt.', 'auth_disabled');
+  const body = req.body || {};
+  const providers = Array.isArray(req.user.providers) ? req.user.providers : null;
+  if (providers && !providers.includes('email')) {
+    return bad(res, 400, 'Tài khoản này đăng nhập bằng Google và chưa có mật khẩu. Dùng "Quên mật khẩu" để đặt mật khẩu.', 'no_password_account');
+  }
+  const current = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+  if (!current || !req.user.email) return bad(res, 400, 'Vui lòng nhập mật khẩu hiện tại.', 'invalid_current_password');
+  const p = session.validatePassword(body.newPassword, req.user.email);
+  if (!p.ok) return bad(res, 400, p.message, 'weak_password');
+  if (body.confirmPassword !== undefined && String(body.confirmPassword) !== String(body.newPassword)) {
+    return bad(res, 400, 'Mật khẩu xác nhận không khớp.', 'password_mismatch');
+  }
+  if (current === p.value) return bad(res, 400, 'Mật khẩu mới phải khác mật khẩu hiện tại.', 'same_password');
+  const at = session.parseCookies(req.headers.cookie)[session.AT];
+  if (!at) return bad(res, 401, 'Phiên đăng nhập đã hết hạn.', 'unauthenticated');
+  try {
+    const check = await sb.auth.signInWithPassword(req.user.email, current);
+    if (!check.ok) return bad(res, 400, 'Mật khẩu hiện tại không đúng.', 'invalid_current_password');
+    const r = await sb.auth.updatePassword(at, p.value);
+    if (!r.ok) {
+      const msg = String((r.data && (r.data.msg || r.data.message || r.data.error_description)) || '');
+      if (/same|different from the old/i.test(msg)) return bad(res, 400, 'Mật khẩu mới phải khác mật khẩu hiện tại.', 'same_password');
+      if (r.status === 422) return bad(res, 400, 'Mật khẩu mới chưa đủ mạnh hoặc bị từ chối.', 'weak_password');
+      return bad(res, 502, 'Không đổi được mật khẩu. Vui lòng thử lại.', 'password_change_failed');
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    return bad(res, 503, 'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
+  }
+});
+
+// ---- POST /api/auth/logout-all  (đăng xuất mọi thiết bị; thu hồi phía Supabase là best-effort) ----
+router.post('/logout-all', ensureOrigin, requireUser, async (req, res) => {
+  noStore(res);
+  const at = session.parseCookies(req.headers.cookie)[session.AT];
+  session.clearSessionCookies(req, res); // xoá cookie trước: dù GoTrue lỗi, trình duyệt này đã đăng xuất
+  let revoked = false;
+  if (at && getConfig().supabase.configured) {
+    session.forgetToken(at);
+    try { revoked = (await sb.auth.signOutAll(at)).ok === true; } catch (_) { revoked = false; }
+  }
+  return res.json({ ok: true, status: 'unauthenticated', revoked });
 });
 
 module.exports = router;

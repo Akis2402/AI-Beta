@@ -64,7 +64,10 @@ const helmetConfig = helmet({
       // NHẤT với chính sách "mọi thư viện tự host cùng-origin" ở trên — chấp nhận vì Puter yêu cầu
       // xác thực phiên người dùng (không thể tự host/proxy được) và ĐÂY LÀ FALLBACK, không phải
       // đường chính. unsafe-inline/unsafe-eval TUYỆT ĐỐI không thêm (PHẦN AX).
-      scriptSrc: ["'self'", 'https://js.puter.com'],
+      // Cloudflare Turnstile (captcha đăng nhập): theo tài liệu CF chỉ cần script-src + frame-src challenges.cloudflare.com
+      // (connect-src chỉ cần cho pre-clearance, không dùng ở đây). Ngoại lệ thứ 2 cùng Puter; vẫn KHÔNG 'unsafe-inline'.
+      // Phải giữ đồng bộ với vercel.json.
+      scriptSrc: ["'self'", 'https://js.puter.com', 'https://challenges.cloudflare.com'],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com'],
       imgSrc: ["'self'", 'data:', 'blob:'],
@@ -72,6 +75,7 @@ const helmetConfig = helmet({
       // pdf.worker.min.js giờ tự host tại /vendor/pdfjs/pdf.worker.min.js (cùng-origin) — 'self' +
       // blob: (Worker tạo qua Blob URL nội bộ của pdf.js) là đủ, không cần domain CDN nào nữa.
       workerSrc: ["'self'", 'blob:'],
+      frameSrc: ['https://challenges.cloudflare.com'],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
       frameAncestors: ["'none'"]

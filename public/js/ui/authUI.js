@@ -171,6 +171,66 @@
     'viewer.grid': 'Grid', 'viewer.axes': 'Axes'
   });
 
+  // ---- Hồ sơ (tab Hồ sơ / Cài đặt / Sử dụng / Bảo mật). Ghi đè 'auth.pill.aria' + 'auth.acct.title' vì pill không còn nói về token. ----
+  Object.assign(DICT.vi, {
+    'auth.pill.aria': 'Hồ sơ và cài đặt', 'auth.acct.title': 'Hồ sơ và cài đặt',
+    'prof.title': 'Hồ sơ và cài đặt', 'prof.title.guest': 'Cài đặt',
+    'prof.tab.profile': 'Hồ sơ', 'prof.tab.settings': 'Cài đặt', 'prof.tab.usage': 'Sử dụng', 'prof.tab.security': 'Bảo mật',
+    'prof.settings.missing': 'Không tải được phần cài đặt AI. Hãy tải lại trang.',
+    'prof.pref.title': 'Giao diện và nhắc nhở',
+    'prof.pref.motion': 'Giảm chuyển động', 'prof.pref.motionD': 'Tắt hiệu ứng chuyển động và hoạt ảnh để dễ nhìn hơn.',
+    'prof.pref.alert': 'Nhắc khi gần hết hạn mức', 'prof.pref.alertD': 'Hiện thông báo khi bạn đã dùng 80% hạn mức AI.',
+    'prof.alert.msg': 'Bạn đã dùng 80% hạn mức AI.', 'prof.alert.view': 'Xem chi tiết',
+    'prof.f.bio': 'Giới thiệu', 'prof.f.bioD': 'Tối đa 280 ký tự.', 'prof.f.phone': 'Số điện thoại', 'prof.f.phoneD': 'Không bắt buộc.', 'prof.f.email': 'Email',
+    'prof.save': 'Lưu thay đổi', 'prof.saved': 'Đã lưu hồ sơ.', 'prof.nochange': 'Chưa có thay đổi nào để lưu.',
+    'prof.usage.usedOf': 'Đã dùng {{used}} / {{limit}} token', 'prof.usage.loading': 'Đang tải…',
+    'prof.usage.today': 'Hôm nay', 'prof.usage.week': '7 ngày qua', 'prof.usage.requests': 'Lượt gần đây',
+    'prof.usage.chart': '7 ngày gần nhất', 'prof.usage.chartAria': 'Token dùng theo ngày: {{list}}', 'prof.usage.recent': 'Hoạt động gần đây',
+    'prof.usage.empty': 'Chưa có lượt dùng nào. Khi bạn hỏi AI, mức dùng sẽ hiện ở đây.', 'prof.usage.refresh': 'Làm mới',
+    'prof.usage.note': 'Khi dùng hết, tài khoản tạm khoá một lúc rồi tự mở lại.', 'prof.usage.inout': 'Vào {{i}} · Ra {{o}}',
+    'prof.usage.col.time': 'Thời gian', 'prof.usage.col.type': 'Loại', 'prof.usage.col.tokens': 'Token',
+    'prof.kind.chat': 'Hỏi đáp', 'prof.kind.vision': 'Đọc ảnh', 'prof.kind.image': 'Ảnh', 'prof.kind.generate': 'Tạo nội dung',
+    'prof.sec.pwTitle': 'Đổi mật khẩu', 'prof.sec.current': 'Mật khẩu hiện tại', 'prof.sec.new': 'Mật khẩu mới', 'prof.sec.confirm': 'Nhập lại mật khẩu mới',
+    'prof.sec.change': 'Đổi mật khẩu', 'prof.sec.changed': 'Đã đổi mật khẩu.',
+    'prof.sec.googleOnly': 'Tài khoản này đăng nhập bằng Google nên chưa có mật khẩu. Muốn đặt mật khẩu, hãy dùng "Quên mật khẩu" ở trang đăng nhập.',
+    'prof.sec.sessions': 'Phiên đăng nhập', 'prof.sec.logout': 'Đăng xuất', 'prof.sec.logoutAll': 'Đăng xuất mọi thiết bị',
+    'prof.sec.logoutAllConfirm': 'Đăng xuất khỏi tất cả thiết bị? Bạn sẽ cần đăng nhập lại ở mọi nơi.',
+    'prof.sec.logoutAllPartial': 'Đã đăng xuất trên thiết bị này. Chưa thu hồi được các thiết bị khác, hãy thử lại.',
+    'auth.err.invalid_bio': 'Giới thiệu tối đa 280 ký tự, không chứa ký tự lạ.', 'auth.err.invalid_phone': 'Số điện thoại không hợp lệ.',
+    'auth.err.nothing_to_update': 'Không có thông tin nào để lưu.', 'auth.err.invalid_current_password': 'Mật khẩu hiện tại không đúng.',
+    'auth.err.no_password_account': 'Tài khoản này đăng nhập bằng Google và chưa có mật khẩu.', 'auth.err.same_password': 'Mật khẩu mới phải khác mật khẩu hiện tại.',
+    'auth.err.password_change_failed': 'Không đổi được mật khẩu. Vui lòng thử lại.', 'auth.err.usage_unavailable': 'Không đọc được lịch sử sử dụng. Vui lòng thử lại sau.'
+  });
+  Object.assign(DICT.en, {
+    'auth.pill.aria': 'Profile and settings', 'auth.acct.title': 'Profile and settings',
+    'prof.title': 'Profile and settings', 'prof.title.guest': 'Settings',
+    'prof.tab.profile': 'Profile', 'prof.tab.settings': 'Settings', 'prof.tab.usage': 'Usage', 'prof.tab.security': 'Security',
+    'prof.settings.missing': 'Could not load the AI settings. Please reload the page.',
+    'prof.pref.title': 'Appearance and reminders',
+    'prof.pref.motion': 'Reduce motion', 'prof.pref.motionD': 'Turn off motion effects and animations to make things easier to see.',
+    'prof.pref.alert': 'Warn me near the limit', 'prof.pref.alertD': 'Show a notice when you have used 80% of your AI allowance.',
+    'prof.alert.msg': 'You have used 80% of your AI allowance.', 'prof.alert.view': 'View details',
+    'prof.f.bio': 'About you', 'prof.f.bioD': 'Up to 280 characters.', 'prof.f.phone': 'Phone number', 'prof.f.phoneD': 'Optional.', 'prof.f.email': 'Email',
+    'prof.save': 'Save changes', 'prof.saved': 'Profile saved.', 'prof.nochange': 'Nothing to save yet.',
+    'prof.usage.usedOf': 'Used {{used}} / {{limit}} tokens', 'prof.usage.loading': 'Loading…',
+    'prof.usage.today': 'Today', 'prof.usage.week': 'Last 7 days', 'prof.usage.requests': 'Recent requests',
+    'prof.usage.chart': 'Last 7 days', 'prof.usage.chartAria': 'Tokens used per day: {{list}}', 'prof.usage.recent': 'Recent activity',
+    'prof.usage.empty': 'No usage yet. When you ask the AI, your usage will show up here.', 'prof.usage.refresh': 'Refresh',
+    'prof.usage.note': 'When the allowance runs out, the account pauses for a while and then reopens automatically.', 'prof.usage.inout': 'In {{i}} · Out {{o}}',
+    'prof.usage.col.time': 'Time', 'prof.usage.col.type': 'Type', 'prof.usage.col.tokens': 'Tokens',
+    'prof.kind.chat': 'Chat', 'prof.kind.vision': 'Image reading', 'prof.kind.image': 'Image', 'prof.kind.generate': 'Generation',
+    'prof.sec.pwTitle': 'Change password', 'prof.sec.current': 'Current password', 'prof.sec.new': 'New password', 'prof.sec.confirm': 'Repeat new password',
+    'prof.sec.change': 'Change password', 'prof.sec.changed': 'Password changed.',
+    'prof.sec.googleOnly': 'This account signs in with Google, so it has no password yet. To set one, use "Forgot password" on the sign-in page.',
+    'prof.sec.sessions': 'Sessions', 'prof.sec.logout': 'Sign out', 'prof.sec.logoutAll': 'Sign out of all devices',
+    'prof.sec.logoutAllConfirm': 'Sign out of every device? You will need to sign in again everywhere.',
+    'prof.sec.logoutAllPartial': 'Signed out on this device. Other devices could not be revoked, please try again.',
+    'auth.err.invalid_bio': 'About you can be up to 280 characters, with no unusual characters.', 'auth.err.invalid_phone': 'Invalid phone number.',
+    'auth.err.nothing_to_update': 'There is nothing to save.', 'auth.err.invalid_current_password': 'The current password is incorrect.',
+    'auth.err.no_password_account': 'This account signs in with Google and has no password.', 'auth.err.same_password': 'The new password must be different from the current one.',
+    'auth.err.password_change_failed': 'Could not change the password. Please try again.', 'auth.err.usage_unavailable': 'Could not load your usage history. Please try again later.'
+  });
+
   /** Nạp bản dịch vào window.TRANSLATIONS (không ghi đè key đã có) để dùng chung cơ chế t() của dự án. */
   function mergeDict() {
     var all = window.TRANSLATIONS = window.TRANSLATIONS || {};
@@ -341,13 +401,52 @@
     '.tg-asset{display:grid;grid-template-columns:64px 1fr;gap:10px;padding:10px 0;border-top:1px solid var(--tg-line)}.tg-asset img{width:64px;height:64px;object-fit:contain;background:repeating-conic-gradient(#0001 0 25%,#0000 0 50%) 0/16px 16px;border-radius:8px}',
     '.tg-asset .tg-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.tg-asset .tg-btn{min-height:40px;padding:0 12px;font-size:13px}.tg-asset small{color:var(--tg-muted)}',
     '.tg-authimg{display:block;max-width:100%;max-height:120px;margin:0 auto 12px;object-fit:contain}',
-    '@media (prefers-reduced-motion:reduce){.tg-bar>i{transition:none}}'
+    '@media (prefers-reduced-motion:reduce){.tg-bar>i{transition:none}}',
+    // ---- Hồ sơ: tab Hồ sơ / Cài đặt / Sử dụng / Bảo mật ----
+    '.tg-pill[data-initial]>span[aria-hidden]{display:none}',
+    '.tg-pill[data-initial]::before{content:attr(data-initial);display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--tg-primary);color:var(--tg-primary-fg);font:700 13px/1 Inter,system-ui,sans-serif}',
+    '.tg-prof{width:min(580px,100%);padding:18px 18px 14px}',
+    '.tg-prof-head{display:flex;align-items:center;gap:12px;margin:0 48px 10px 0;min-height:44px}',
+    '.tg-av{flex:none;display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:50%;background:var(--tg-primary);color:var(--tg-primary-fg);font-weight:700;font-size:18px}',
+    '.tg-who{min-width:0}.tg-who h2{margin:0;font-size:18px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.tg-tabs{display:flex;gap:2px;border-bottom:1px solid var(--tg-line);margin:0 0 14px;overflow-x:auto}',
+    '.tg-tab{flex:none;min-height:44px;padding:0 14px;border:0;border-bottom:2px solid transparent;background:none;color:var(--tg-muted);font:600 14px/1 Inter,system-ui,sans-serif;cursor:pointer}',
+    '.tg-tab[aria-selected="true"]{color:var(--tg-fg);border-bottom-color:var(--tg-primary)}',
+    '.tg-tab:focus-visible,.tg-pill:focus-visible,.tg-sw-in:focus-visible+.tg-sw-k{outline:2px solid var(--tg-primary);outline-offset:2px}',
+    '.tg-panel[hidden]{display:none}.tg-panel:focus{outline:none}',
+    '.tg-f{margin:0 0 12px}.tg-f label{display:block;margin:0 0 4px;font-size:13px;font-weight:600}.tg-f small{display:block;margin-top:4px;color:var(--tg-muted);font-size:12px}',
+    '.tg-ta{min-height:84px;padding:10px 12px;resize:vertical;line-height:1.4}',
+    '.tg-count{float:right}',
+    '.tg-in[readonly]{opacity:.7}',
+    '.tg-set{margin:0 0 14px;padding-bottom:6px}.tg-set h3,.tg-use h3,.tg-sec h3{margin:0 0 8px;font-size:14px}',
+    '.tg-sw{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:6px 0;cursor:pointer}',
+    '.tg-sw-t{display:flex;flex-direction:column;gap:2px}.tg-sw-t small{color:var(--tg-muted);font-size:12px}',
+    '.tg-sw-in{position:absolute;opacity:0;width:1px;height:1px}',
+    '.tg-sw-k{flex:none;position:relative;width:44px;height:26px;border-radius:99px;background:var(--tg-line);transition:background .2s}',
+    '.tg-sw-k::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .2s}',
+    '.tg-sw-in:checked+.tg-sw-k{background:var(--tg-primary)}.tg-sw-in:checked+.tg-sw-k::after{transform:translateX(18px)}',
+    '.tg-panel .set-section{padding-left:0;padding-right:0}',
+    '.tg-use-top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}.tg-use-n{font-size:20px}.tg-use-pct{font-weight:700;color:var(--tg-muted)}',
+    '.tg-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}',
+    '.tg-stat{padding:10px;border:1px solid var(--tg-line);border-radius:12px}.tg-stat b{display:block;font-size:18px}.tg-stat span{color:var(--tg-muted);font-size:12px}',
+    '.tg-chart{display:flex;align-items:flex-end;gap:6px;height:128px;margin:6px 0 14px}',
+    '.tg-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;height:100%;min-width:0}',
+    '.tg-cv{font-size:11px;color:var(--tg-muted);height:14px}.tg-cl{font-size:11px;color:var(--tg-muted)}',
+    '.tg-cb{flex:1;width:100%;display:flex;align-items:flex-end;border-radius:6px 6px 0 0}.tg-cb>i{display:block;width:100%;border-radius:6px 6px 0 0;background:var(--tg-primary);min-height:2px;transition:height .3s}',
+    '.tg-tbl{width:100%;border-collapse:collapse;font-size:13px}.tg-tbl th,.tg-tbl td{padding:8px 6px;text-align:left;border-bottom:1px solid var(--tg-line)}.tg-tbl th{color:var(--tg-muted);font-weight:600}.tg-tbl td.num,.tg-tbl th.num{text-align:right;font-variant-numeric:tabular-nums}',
+    '.tg-tblwrap{overflow-x:auto}',
+    '.tg-sec section{margin:0 0 18px}',
+    '.tg-toast{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:2147482000;display:flex;align-items:center;gap:12px;max-width:min(92vw,460px);padding:12px 14px;border-radius:12px;background:var(--tg-warn-bg);color:var(--tg-warn-fg);box-shadow:var(--tg-shadow);font-size:14px}',
+    '.tg-toast[hidden]{display:none}.tg-toast button{flex:none;min-height:36px;padding:0 12px;border:1px solid currentColor;border-radius:8px;background:transparent;color:inherit;font:600 13px/1 Inter,system-ui,sans-serif;cursor:pointer}',
+    'html.tg-reduce-motion *,html.tg-reduce-motion *::before,html.tg-reduce-motion *::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}',
+    '@media (max-width:480px){.tg-stats{grid-template-columns:1fr 1fr 1fr}.tg-prof{padding:16px 14px 12px}}',
+    '@media (prefers-reduced-motion:reduce){.tg-sw-k,.tg-sw-k::after,.tg-cb>i{transition:none}}'
   ].join('\n');
 
   // ---------------------------------------------------------------- state / render
   function setStatus(status, user) {
     S.status = status; S.user = user || null;
-    renderPill(); renderAccount();
+    renderPill(); renderAccount(true);
     if (status !== 'authenticated') { S.quota = null; S.cooldownEndsAt = 0; renderBanner(); }
   }
 
@@ -360,6 +459,7 @@
   function renderPill() {
     if (!els.pill) return;
     var t = els.pill.querySelector('.tg-pill-t');
+    els.pill.removeAttribute('data-initial');
     if (S.status === 'disabled' || S.status === 'unconfigured') { els.pill.hidden = S.status === 'disabled'; t.textContent = tx('auth.pill.unconfigured'); els.pill.dataset.state = 'warn'; return; }
     els.pill.hidden = false;
     if (S.status === 'loading') { t.textContent = '…'; els.pill.dataset.state = ''; return; }
@@ -369,9 +469,10 @@
     var cd = S.cooldownEndsAt > Date.now();
     els.pill.dataset.state = cd ? 'cooldown' : '';
     if (cd) t.textContent = tx('auth.pill.wait', { time: mmss((S.cooldownEndsAt - Date.now()) / 1000) });
-    else if (qs) t.textContent = fmtInt(qs.used) + ' / ' + fmtInt(qs.limit);
-    else t.textContent = S.user && S.user.email ? S.user.email.split('@')[0] : tx('auth.pill.account');
-    els.pill.setAttribute('aria-label', tx('auth.pill.aria') + (qs ? tx('auth.pill.ariaUsed', { used: fmtInt(qs.used), limit: fmtInt(qs.limit) }) : ''));
+    // SỐ TOKEN KHÔNG hiện ở đây nữa: chỉ xem được trong Hồ sơ -> Sử dụng (và banner khi bị khoá tạm thời).
+    else t.textContent = displayLabel();
+    els.pill.setAttribute('data-initial', initialOf());
+    els.pill.setAttribute('aria-label', tx('auth.pill.aria'));
   }
 
   function renderBanner() {
@@ -387,43 +488,14 @@
     els.bannerAfter.textContent = tx('auth.cooldown.after');
   }
 
-  function renderAccount() {
+  // Cập nhật hộp thoại Hồ sơ. full=true: dựng lại tab + panel (mở hộp thoại, đổi trạng thái đăng nhập). full=false (mỗi lần quota
+  // thay đổi): CHỈ cập nhật số liệu tại chỗ ở tab Sử dụng — không xóa chữ người dùng đang gõ ở tab khác.
+  function renderAccount(full) {
     if (!els.account || els.account.hidden) return;
-    var body = els.accountBody; body.textContent = '';
-    if (S.status !== 'authenticated') { body.appendChild(h('p', { class: 'tg-sub', text: tx('auth.acct.notSignedIn') })); return; }
-    var u = S.user || {};
-    body.appendChild(h('p', { class: 'tg-sub' }, tx('auth.acct.signedInAs'), h('b', { text: u.email || '' }), u.role === 'admin' ? tx('auth.acct.admin') : ''));
-    // Tên hiển thị (S.nameDraft giữ chữ đang gõ khi hộp thoại bị dựng lại do số token cập nhật)
-    var nameIn = h('input', { class: 'tg-in', type: 'text', maxlength: '60', value: S.nameDraft !== undefined ? S.nameDraft : (u.displayName || ''), 'aria-label': tx('auth.acct.name'), placeholder: tx('auth.acct.name'), style: 'min-height:40px;font-size:14px', oninput: function () { S.nameDraft = nameIn.value; } });
-    var nameMsg = h('div', { class: 'tg-msg', role: 'status', 'aria-live': 'polite' });
-    var nameBtn = h('button', { class: 'tg-btn', type: 'button', style: 'min-height:40px', text: tx('auth.acct.nameSave'), onclick: function () {
-      var v = nameIn.value.trim();
-      if (!v) { nameMsg.textContent = tx('auth.err.invalid_display_name'); nameMsg.className = 'tg-msg err'; return; }
-      nameBtn.disabled = true;
-      api('PATCH', '/api/auth/profile', { displayName: v }).then(function (r) {
-        nameBtn.disabled = false;
-        if (!r.ok) { nameMsg.textContent = errText(r.json); nameMsg.className = 'tg-msg err'; return; }
-        if (S.user) S.user.displayName = r.json.displayName; S.nameDraft = undefined;
-        nameMsg.textContent = tx('auth.acct.nameSaved'); nameMsg.className = 'tg-msg ok';
-      }).catch(function () { nameBtn.disabled = false; nameMsg.textContent = tx('auth.err.network'); nameMsg.className = 'tg-msg err'; });
-    } });
-    body.appendChild(h('div', { class: 'tg-row', style: 'margin:0 0 4px' }, nameIn, nameBtn)); body.appendChild(nameMsg);
-    var qs = quotaSummary();
-    if (qs) {
-      var pct = qs.limit ? Math.min(100, Math.round((qs.used + qs.reserved) / qs.limit * 100)) : 0;
-      var cd = S.cooldownEndsAt > Date.now();
-      var bar = h('div', { class: 'tg-bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': String(qs.limit), 'aria-valuenow': String(qs.used), 'aria-label': tx('auth.acct.barLabel'), 'data-hot': pct >= 80 ? '1' : '', 'data-full': pct >= 100 ? '1' : '' }, h('i', { style: 'width:' + pct + '%' }));
-      body.appendChild(h('div', { text: tx('auth.acct.used', { used: fmtInt(qs.used), limit: fmtInt(qs.limit) }) }));
-      body.appendChild(bar);
-      body.appendChild(h('div', { class: 'tg-sub', text: cd ? tx('auth.acct.locked') : tx('auth.acct.remaining', { n: fmtInt(Math.max(0, qs.limit - qs.used - qs.reserved)) }) }));
-      if (cd) {
-        body.appendChild(h('p', { class: 'tg-msg err' }, tx('auth.cooldown.before'), h('b', { id: 'tgAcctTime', 'aria-hidden': 'true', text: mmss((S.cooldownEndsAt - Date.now()) / 1000) }), tx('auth.cooldown.after')));
-      }
-    }
-    var acts = h('div', { class: 'tg-row', style: 'margin-top:12px;flex-wrap:wrap' });
-    if (u.role === 'admin') acts.appendChild(h('button', { class: 'tg-btn', type: 'button', onclick: openAssets, text: tx('auth.acct.assets') }));
-    acts.appendChild(h('button', { class: 'tg-btn danger', type: 'button', onclick: doLogout, text: tx('auth.acct.logout') }));
-    body.appendChild(acts);
+    renderProfHead();
+    if (S.status !== 'authenticated' && prof.tab !== 'settings') prof.tab = 'settings';
+    if (full === true) { renderTabs(); showPanel(); return; }
+    if (prof.tab === 'usage') updateUsageSummary();
   }
 
   // Cập nhật 1 giây/lần chỉ phần hiển thị. Thông báo cho screen reader thưa (mỗi phút + khi kết thúc).
@@ -452,7 +524,7 @@
     S.quota = q;
     var ra = Number(q.retryAfterSeconds) || 0;
     S.cooldownEndsAt = q.status === 'cooldown' && ra > 0 ? Date.now() + ra * 1000 : 0; // đếm theo GIÂY còn lại do server báo (không tin đồng hồ máy)
-    renderPill(); renderBanner(); renderAccount();
+    renderPill(); renderBanner(); renderAccount(); checkQuotaAlert(q);
   }
   function refreshQuota() {
     if (S.status !== 'authenticated') return Promise.resolve();
@@ -558,6 +630,12 @@
   }
   function setMsg(text, kind) { els.authEls.msg.textContent = text || ''; els.authEls.msg.className = 'tg-msg' + (kind ? ' ' + kind : ''); }
   function openAuth(mode, message) {
+    // Đăng nhập/đăng ký/quên mật khẩu chạy ở trang /auth (Cloudflare Turnstile + Google + PoW). Hộp thoại cũ bên dưới (buildAuth
+    // /switchMode/submit) KHÔNG còn được gọi: nó không gửi token captcha nên sẽ bị server từ chối khi đã bật Turnstile.
+    var m = mode === 'signup' || mode === 'forgot' ? mode : 'login';
+    location.assign('/auth?mode=' + m + '&next=' + encodeURIComponent('/index.html'));
+  }
+  function openAuthLegacyModal(mode, message) {
     if (!els.auth) buildAuth();
     lastFocus = document.activeElement;
     switchMode(mode || 'login');
@@ -628,20 +706,333 @@
     api('POST', '/api/auth/logout').finally(function () { closeAccount(); setStatus('unauthenticated', null); });
   }
 
-  // ---------------------------------------------------------------- account dialog
+  // ---------------------------------------------------------------- Hồ sơ: Hồ sơ · Cài đặt · Sử dụng · Bảo mật
+  // SỐ TOKEN chỉ hiện ở tab "Sử dụng". Cài đặt AI cũ (#settingsModal trong index.html) được CHUYỂN NGUYÊN DOM vào tab "Cài đặt"
+  // (giữ nguyên id + listener do app.js gắn) — không nhân đôi logic cài đặt.
+  var PROF_TABS = ['profile', 'settings', 'usage', 'security'];
+  var prof = { tab: 'profile', usage: { state: 'idle', items: [], error: '' }, usageNodes: null, alerted: false, toastTimer: 0 };
+  var PREF_KEY = 'tg_prefs_v1';
+  function readPrefs() { try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch (e) { return {}; } }
+  function writePref(k, v) { try { var p = readPrefs(); p[k] = v; localStorage.setItem(PREF_KEY, JSON.stringify(p)); } catch (e) { /* trình duyệt chặn storage: bỏ qua */ } }
+  function applyPrefs() { document.documentElement.classList.toggle('tg-reduce-motion', readPrefs().reduceMotion === true); }
+
+  function displayLabel() { var u = S.user || {}; return u.displayName || (u.email ? u.email.split('@')[0] : '') || tx('auth.pill.account'); }
+  function initialOf() { var a = Array.from(displayLabel()); return a.length ? a[0].toUpperCase() : '?'; }
+  function pm(el, kind, text) { el.textContent = text || ''; el.className = 'tg-msg' + (kind ? ' ' + kind : ''); }
+  function tgField(id, labelKey, control, hintKey) { return h('div', { class: 'tg-f' }, h('label', { for: id, text: tx(labelKey) }), control, hintKey ? h('small', { text: tx(hintKey) }) : null); }
+
+  function showToast(msg, actionLabel, fn) {
+    if (!els.toast) { els.toast = h('div', { class: 'tg-toast', role: 'status', hidden: true }); document.body.appendChild(els.toast); }
+    els.toast.textContent = '';
+    els.toast.appendChild(h('span', { text: msg }));
+    if (actionLabel) els.toast.appendChild(h('button', { type: 'button', text: actionLabel, onclick: function () { els.toast.hidden = true; fn && fn(); } }));
+    els.toast.hidden = false;
+    clearTimeout(prof.toastTimer); prof.toastTimer = setTimeout(function () { els.toast.hidden = true; }, 9000);
+  }
+  // Nhắc 1 lần khi dùng ≥ 80% hạn mức (tuỳ chọn trong Cài đặt). ≥ 100% đã có banner khoá tạm thời nên không nhắc thêm.
+  function checkQuotaAlert(q) {
+    if (!q || q.status === 'disabled' || readPrefs().quotaAlert === false) return;
+    var qs = quotaSummary();
+    if (!qs || !qs.limit) return;
+    var pct = (qs.used + qs.reserved) / qs.limit * 100;
+    if (pct < 80) { prof.alerted = false; return; }
+    if (prof.alerted || pct >= 100) return;
+    prof.alerted = true;
+    showToast(tx('prof.alert.msg'), tx('prof.alert.view'), function () { openAccount('usage'); });
+  }
+
+  // ---- cài đặt: chuyển DOM #settingsModal -> tab Cài đặt (và trả về khi gỡ hộp thoại) ----
+  function settingSections() {
+    var modal = document.getElementById('settingsModal');
+    return modal ? Array.prototype.filter.call(modal.children, function (c) { return c.classList && c.classList.contains('set-section'); }) : [];
+  }
+  function mountSettings(panel) {
+    panel.appendChild(buildPrefsSection());
+    var secs = settingSections();
+    if (!secs.length) panel.appendChild(h('p', { class: 'tg-sub', text: tx('prof.settings.missing') }));
+    secs.forEach(function (s) { panel.appendChild(s); });
+  }
+  function unmountSettings() {
+    var modal = document.getElementById('settingsModal');
+    var panel = els.profPanels && els.profPanels.settings;
+    if (!modal || !panel) return;
+    Array.prototype.filter.call(panel.children, function (c) { return c.classList && c.classList.contains('set-section'); }).forEach(function (s) { modal.appendChild(s); });
+  }
+  function buildPrefsSection() {
+    var prefs = readPrefs();
+    function sw(id, labelKey, descKey, checked, onchange) {
+      var inp = h('input', { type: 'checkbox', id: id, class: 'tg-sw-in', onchange: function () { onchange(inp.checked); } });
+      inp.checked = !!checked;
+      return h('label', { class: 'tg-sw', for: id }, h('span', { class: 'tg-sw-t' }, h('b', { text: tx(labelKey) }), h('small', { text: tx(descKey) })), inp, h('span', { class: 'tg-sw-k', 'aria-hidden': 'true' }));
+    }
+    return h('section', { class: 'tg-set' },
+      h('h3', { text: tx('prof.pref.title') }),
+      sw('tgPrefMotion', 'prof.pref.motion', 'prof.pref.motionD', prefs.reduceMotion === true, function (v) { writePref('reduceMotion', v); applyPrefs(); }),
+      sw('tgPrefAlert', 'prof.pref.alert', 'prof.pref.alertD', prefs.quotaAlert !== false, function (v) { writePref('quotaAlert', v); if (v) prof.alerted = false; })
+    );
+  }
+  // Nút Cài đặt cũ (thanh bên + thanh trên) mở Hồ sơ -> Cài đặt. app.js còn gọi trực tiếp openSettings() (vd. puterAuthUI) nên
+  // theo dõi lớp .show của #settingsOverlay: vừa hiện => đóng bằng closeSettings() của app rồi mở tab Cài đặt.
+  function installSettingsRedirect() {
+    document.addEventListener('click', function (e) {
+      var b = e.target && e.target.closest ? e.target.closest('#settingsBtnTop,#settingsBtnSide') : null;
+      if (!b) return;
+      e.preventDefault(); e.stopPropagation();
+      openAccount('settings');
+    }, true);
+    var so = document.getElementById('settingsOverlay');
+    if (so && window.MutationObserver) {
+      new MutationObserver(function () {
+        if (!so.classList.contains('show')) return;
+        try { if (typeof window.closeSettings === 'function') window.closeSettings(); } catch (e) { /* ignore */ }
+        so.classList.remove('show');
+        openAccount('settings');
+      }).observe(so, { attributes: true, attributeFilter: ['class'] });
+    }
+  }
+
+  // ---- khung hộp thoại + tab ----
   function buildAccount() {
-    var body = h('div'); var close = h('button', { class: 'tg-x', type: 'button', 'aria-label': tx('auth.close'), onclick: closeAccount, text: '✕' });
-    var card = h('div', { class: 'tg-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'tgAcctTitle' }, close, h('h2', { id: 'tgAcctTitle', text: tx('auth.acct.title') }), body);
+    var close = h('button', { class: 'tg-x', type: 'button', 'aria-label': tx('auth.close'), onclick: closeAccount, text: '✕' });
+    els.profHead = h('div', { class: 'tg-prof-head' });
+    els.profTabs = h('div', { class: 'tg-tabs', role: 'tablist', 'aria-label': tx('prof.title'), onkeydown: onTabKey });
+    els.profPanels = {};
+    var panels = h('div', { class: 'tg-panels' });
+    PROF_TABS.forEach(function (k) {
+      var p = h('div', { class: 'tg-panel', role: 'tabpanel', id: 'tgPanel-' + k, 'aria-labelledby': 'tgTab-' + k, hidden: true, tabindex: '-1' });
+      els.profPanels[k] = p; panels.appendChild(p);
+    });
+    var card = h('div', { class: 'tg-card tg-prof', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'tgAcctTitle' }, close, els.profHead, els.profTabs, panels);
     var ov = h('div', { class: 'tg-overlay', hidden: true, onmousedown: function (e) { if (e.target === ov) closeAccount(); }, onkeydown: trapKeys }, card);
-    els.account = ov; els.accountBody = body; document.body.appendChild(ov);
+    els.account = ov; document.body.appendChild(ov);
+    mountSettings(els.profPanels.settings);
   }
-  function openAccount() {
-    if (S.status !== 'authenticated') { if (S.status === 'unavailable') { loadSession(); return; } openAuth('login'); return; }
+  function renderProfHead() {
+    var head = els.profHead; if (!head) return;
+    head.textContent = '';
+    if (S.status === 'authenticated') {
+      var u = S.user || {};
+      head.appendChild(h('span', { class: 'tg-av', 'aria-hidden': 'true', text: initialOf() }));
+      head.appendChild(h('div', { class: 'tg-who' }, h('h2', { id: 'tgAcctTitle', text: displayLabel() }), h('div', { class: 'tg-sub', text: (u.email || '') + (u.role === 'admin' ? tx('auth.acct.admin') : '') })));
+    } else {
+      head.appendChild(h('div', { class: 'tg-who' }, h('h2', { id: 'tgAcctTitle', text: tx('prof.title.guest') }),
+        S.status === 'unauthenticated' ? h('button', { class: 'tg-btn', type: 'button', style: 'margin-top:8px', text: tx('auth.pill.login'), onclick: function () { closeAccount(); openAuth('login'); } }) : null));
+    }
+  }
+  function renderTabs() {
+    var tabs = els.profTabs; if (!tabs) return;
+    tabs.textContent = '';
+    var list = S.status === 'authenticated' ? PROF_TABS : ['settings'];
+    tabs.hidden = list.length < 2;
+    list.forEach(function (k) {
+      var sel = prof.tab === k;
+      tabs.appendChild(h('button', { class: 'tg-tab', type: 'button', role: 'tab', id: 'tgTab-' + k, 'aria-selected': sel ? 'true' : 'false', 'aria-controls': 'tgPanel-' + k, tabindex: sel ? '0' : '-1', 'data-k': k, onclick: function () { selectTab(k); }, text: tx('prof.tab.' + k) }));
+    });
+  }
+  function showPanel() {
+    PROF_TABS.forEach(function (k) { els.profPanels[k].hidden = k !== prof.tab; });
+    if (prof.tab === 'profile') renderProfilePanel();
+    else if (prof.tab === 'usage') { renderUsagePanel(); loadUsage(); }
+    else if (prof.tab === 'security') renderSecurityPanel();
+  }
+  function selectTab(k) {
+    prof.tab = k; renderTabs(); showPanel();
+    var b = els.profTabs.querySelector('[aria-selected="true"]'); if (b) b.focus();
+  }
+  function onTabKey(e) {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].indexOf(e.key) < 0) return;
+    var btns = Array.prototype.slice.call(els.profTabs.querySelectorAll('[role="tab"]'));
+    var i = btns.indexOf(document.activeElement); if (i < 0) return;
+    e.preventDefault();
+    var n = e.key === 'Home' ? 0 : e.key === 'End' ? btns.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + btns.length) % btns.length;
+    selectTab(btns[n].getAttribute('data-k'));
+  }
+
+  // ---- tab Hồ sơ ----
+  function renderProfilePanel() {
+    var p = els.profPanels.profile; p.textContent = '';
+    var u = S.user || {};
+    var name = h('input', { class: 'tg-in', id: 'tgfName', type: 'text', maxlength: '60', autocomplete: 'name', value: u.displayName || '' });
+    var bio = h('textarea', { class: 'tg-in tg-ta', id: 'tgfBio', maxlength: '280', rows: '3', text: u.bio || '' });
+    var cnt = h('small', { class: 'tg-count', 'aria-hidden': 'true', text: bio.value.length + '/280' });
+    bio.addEventListener('input', function () { cnt.textContent = bio.value.length + '/280'; });
+    var phone = h('input', { class: 'tg-in', id: 'tgfPhone', type: 'tel', maxlength: '20', autocomplete: 'tel', inputmode: 'tel', value: u.phone || '' });
+    var email = h('input', { class: 'tg-in', id: 'tgfEmail', type: 'email', readonly: true, value: u.email || '' });
+    var msg = h('div', { class: 'tg-msg', role: 'status', 'aria-live': 'polite' });
+    var save = h('button', { class: 'tg-btn primary', type: 'button', text: tx('prof.save'), onclick: function () {
+      var patch = {};
+      var n = name.value.trim(); if (n !== (u.displayName || '')) patch.displayName = n;
+      var b = bio.value.trim(); if (b !== (u.bio || '')) patch.bio = b;
+      var ph = phone.value.trim(); if (ph !== (u.phone || '')) patch.phone = ph;
+      if (!Object.keys(patch).length) { pm(msg, '', tx('prof.nochange')); return; }
+      if ('displayName' in patch && !n) { pm(msg, 'err', tx('auth.err.invalid_display_name')); name.focus(); return; }
+      save.disabled = true;
+      api('PATCH', '/api/auth/profile', patch).then(function (r) {
+        save.disabled = false;
+        if (r.status === 401) { handleUnauthorized(r.json); return; }
+        if (!r.ok) { pm(msg, 'err', errText(r.json)); return; }
+        if (S.user) { S.user.displayName = r.json.displayName; S.user.bio = r.json.bio; S.user.phone = r.json.phone; u = S.user; }
+        renderPill(); renderProfHead(); pm(msg, 'ok', tx('prof.saved'));
+      }).catch(function () { save.disabled = false; pm(msg, 'err', tx('auth.err.network')); });
+    } });
+    p.appendChild(tgField('tgfName', 'auth.acct.name', name));
+    p.appendChild(tgField('tgfBio', 'prof.f.bio', h('div', null, bio, cnt), 'prof.f.bioD'));
+    p.appendChild(tgField('tgfPhone', 'prof.f.phone', phone, 'prof.f.phoneD'));
+    p.appendChild(tgField('tgfEmail', 'prof.f.email', email));
+    p.appendChild(msg); p.appendChild(save);
+    if (u.role === 'admin') p.appendChild(h('div', { class: 'tg-row', style: 'margin-top:12px' }, h('button', { class: 'tg-btn', type: 'button', onclick: openAssets, text: tx('auth.acct.assets') })));
+  }
+
+  // ---- tab Sử dụng ----
+  function pfCompact(n) { n = Number(n) || 0; return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k' : String(n); }
+  function pfDayKey(d) { return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
+  function renderUsagePanel() {
+    var p = els.profPanels.usage; p.textContent = '';
+    var n = prof.usageNodes = {};
+    n.used = h('b', { class: 'tg-use-n' }); n.pct = h('span', { class: 'tg-use-pct' });
+    n.fill = h('i');
+    n.bar = h('div', { class: 'tg-bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-label': tx('auth.acct.barLabel') }, n.fill);
+    n.sub = h('div', { class: 'tg-sub' });
+    n.cd = h('p', { class: 'tg-msg err', hidden: true }, tx('auth.cooldown.before'), h('b', { id: 'tgAcctTime', 'aria-hidden': 'true', text: '00:00' }), tx('auth.cooldown.after'));
+    n.stats = h('div', { class: 'tg-stats' });
+    n.chart = h('div', { class: 'tg-chart', role: 'img' });
+    n.list = h('div');
+    var refresh = h('button', { class: 'tg-btn', type: 'button', text: tx('prof.usage.refresh'), onclick: function () { refreshQuota(); loadUsage(); } });
+    p.appendChild(h('section', { class: 'tg-use' },
+      h('div', { class: 'tg-use-top' }, n.used, n.pct), n.bar, n.sub, n.cd,
+      n.stats,
+      h('h3', { text: tx('prof.usage.chart') }), n.chart,
+      h('h3', { text: tx('prof.usage.recent') }), n.list,
+      h('p', { class: 'tg-sub', text: tx('prof.usage.note') }),
+      refresh));
+    updateUsageSummary(); renderUsageHistory();
+  }
+  function updateUsageSummary() {
+    var n = prof.usageNodes; if (!n) return;
+    var qs = quotaSummary();
+    if (!qs) { n.used.textContent = '…'; n.pct.textContent = ''; n.sub.textContent = tx('prof.usage.loading'); return; }
+    var spent = qs.used + qs.reserved;
+    var pct = qs.limit ? Math.min(100, Math.round(spent / qs.limit * 100)) : 0;
+    var cd = S.cooldownEndsAt > Date.now();
+    n.used.textContent = tx('prof.usage.usedOf', { used: fmtInt(qs.used), limit: fmtInt(qs.limit) });
+    n.pct.textContent = pct + '%';
+    n.fill.style.width = pct + '%';
+    n.bar.setAttribute('aria-valuemax', String(qs.limit)); n.bar.setAttribute('aria-valuenow', String(qs.used));
+    n.bar.setAttribute('data-hot', pct >= 80 ? '1' : ''); n.bar.setAttribute('data-full', pct >= 100 ? '1' : '');
+    n.sub.textContent = cd ? tx('auth.acct.locked') : tx('auth.acct.remaining', { n: fmtInt(Math.max(0, qs.limit - spent)) });
+    n.cd.hidden = !cd;
+    if (cd) { var t = document.getElementById('tgAcctTime'); if (t) t.textContent = mmss((S.cooldownEndsAt - Date.now()) / 1000); }
+  }
+  function loadUsage() {
+    if (S.status !== 'authenticated') return;
+    prof.usage.state = 'loading'; renderUsageHistory();
+    api('GET', '/api/auth/usage').then(function (r) {
+      if (r.status === 401) { handleUnauthorized(r.json); return; }
+      if (!r.ok) { prof.usage.state = 'error'; prof.usage.error = errText(r.json); }
+      else { prof.usage.state = 'ready'; prof.usage.items = Array.isArray(r.json.items) ? r.json.items : []; }
+      renderUsageHistory();
+    }).catch(function () { prof.usage.state = 'error'; prof.usage.error = tx('auth.err.network'); renderUsageHistory(); });
+  }
+  function renderUsageHistory() {
+    var n = prof.usageNodes; if (!n) return;
+    var u = prof.usage;
+    n.stats.textContent = ''; n.chart.textContent = ''; n.list.textContent = '';
+    if (u.state === 'loading' && !u.items.length) { n.list.appendChild(h('p', { class: 'tg-sub', text: tx('prof.usage.loading') })); return; }
+    if (u.state === 'error') { n.list.appendChild(h('p', { class: 'tg-msg err', text: u.error })); return; }
+    var items = u.items;
+    var now = new Date(), days = [], map = {};
+    for (var i = 6; i >= 0; i--) { var d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i); var o = { d: d, total: 0 }; days.push(o); map[pfDayKey(d)] = o; }
+    var week = 0;
+    items.forEach(function (it) {
+      var t = new Date(it.at); if (isNaN(t)) return;
+      var o = map[pfDayKey(t)]; var v = Number(it.total) || 0;
+      if (o) { o.total += v; week += v; }
+    });
+    [[days[6].total, 'prof.usage.today'], [week, 'prof.usage.week'], [items.length, 'prof.usage.requests']].forEach(function (s) {
+      n.stats.appendChild(h('div', { class: 'tg-stat' }, h('b', { text: fmtInt(s[0]) }), h('span', { text: tx(s[1]) })));
+    });
+    var max = Math.max.apply(null, days.map(function (o) { return o.total; }).concat(1));
+    var labels = [];
+    days.forEach(function (o) {
+      var wd = o.d.toLocaleDateString(numLocale(), { weekday: 'short' });
+      var bar = h('i'); bar.style.height = Math.max(o.total ? 6 : 2, Math.round(o.total / max * 100)) + '%';
+      n.chart.appendChild(h('div', { class: 'tg-col', 'aria-hidden': 'true' }, h('span', { class: 'tg-cv', text: o.total ? pfCompact(o.total) : '' }), h('span', { class: 'tg-cb' }, bar), h('span', { class: 'tg-cl', text: wd })));
+      labels.push(wd + ' ' + fmtInt(o.total));
+    });
+    n.chart.setAttribute('aria-label', tx('prof.usage.chartAria', { list: labels.join(', ') }));
+    if (!items.length) { n.list.appendChild(h('p', { class: 'tg-sub', text: tx('prof.usage.empty') })); return; }
+    var tbody = h('tbody');
+    items.slice(0, 10).forEach(function (it) {
+      var t = new Date(it.at);
+      var kindKey = 'prof.kind.' + it.kind; var kind = tx(kindKey); if (kind === kindKey) kind = it.kind || '—';
+      tbody.appendChild(h('tr', null,
+        h('td', { text: isNaN(t) ? '' : t.toLocaleString(numLocale(), { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) }),
+        h('td', { text: kind }),
+        h('td', { class: 'num', title: tx('prof.usage.inout', { i: fmtInt(it.input), o: fmtInt(it.output) }), text: fmtInt(it.total) })));
+    });
+    n.list.appendChild(h('div', { class: 'tg-tblwrap' }, h('table', { class: 'tg-tbl' },
+      h('thead', null, h('tr', null, h('th', { scope: 'col', text: tx('prof.usage.col.time') }), h('th', { scope: 'col', text: tx('prof.usage.col.type') }), h('th', { scope: 'col', class: 'num', text: tx('prof.usage.col.tokens') }))), tbody)));
+  }
+
+  // ---- tab Bảo mật ----
+  function renderSecurityPanel() {
+    var p = els.profPanels.security; p.textContent = '';
+    var u = S.user || {};
+    var hasPw = !Array.isArray(u.providers) || u.providers.indexOf('email') >= 0;
+    var pw = h('section', null, h('h3', { text: tx('prof.sec.pwTitle') }));
+    if (!hasPw) pw.appendChild(h('p', { class: 'tg-sub', text: tx('prof.sec.googleOnly') }));
+    else {
+      var cur = h('input', { class: 'tg-in', id: 'tgpCur', type: 'password', autocomplete: 'current-password', maxlength: '128' });
+      var nw = h('input', { class: 'tg-in', id: 'tgpNew', type: 'password', autocomplete: 'new-password', maxlength: '128' });
+      var cf = h('input', { class: 'tg-in', id: 'tgpCf', type: 'password', autocomplete: 'new-password', maxlength: '128' });
+      var msg = h('div', { class: 'tg-msg', role: 'status', 'aria-live': 'polite' });
+      var btn = h('button', { class: 'tg-btn primary', type: 'button', text: tx('prof.sec.change'), onclick: function () {
+        if (!cur.value) { pm(msg, 'err', tx('auth.err.invalid_current_password')); cur.focus(); return; }
+        if (nw.value !== cf.value) { pm(msg, 'err', tx('auth.err.password_mismatch')); cf.focus(); return; }
+        btn.disabled = true;
+        api('POST', '/api/auth/password', { currentPassword: cur.value, newPassword: nw.value, confirmPassword: cf.value }).then(function (r) {
+          btn.disabled = false;
+          if (r.status === 401) { handleUnauthorized(r.json); return; }
+          if (!r.ok) { pm(msg, 'err', errText(r.json)); return; }
+          cur.value = ''; nw.value = ''; cf.value = ''; pm(msg, 'ok', tx('prof.sec.changed'));
+        }).catch(function () { btn.disabled = false; pm(msg, 'err', tx('auth.err.network')); });
+      } });
+      cf.addEventListener('keydown', function (e) { if (e.key === 'Enter') btn.click(); });
+      pw.appendChild(tgField('tgpCur', 'prof.sec.current', cur));
+      pw.appendChild(tgField('tgpNew', 'prof.sec.new', nw, 'auth.err.weak_password'));
+      pw.appendChild(tgField('tgpCf', 'prof.sec.confirm', cf));
+      pw.appendChild(msg); pw.appendChild(btn);
+    }
+    var sess = h('section', null, h('h3', { text: tx('prof.sec.sessions') }),
+      h('div', { class: 'tg-row', style: 'flex-wrap:wrap' },
+        h('button', { class: 'tg-btn danger', type: 'button', text: tx('prof.sec.logout'), onclick: doLogout }),
+        h('button', { class: 'tg-btn danger', type: 'button', text: tx('prof.sec.logoutAll'), onclick: doLogoutAll })));
+    p.appendChild(h('div', { class: 'tg-sec' }, pw, sess));
+  }
+  function doLogoutAll() {
+    if (!window.confirm(tx('prof.sec.logoutAllConfirm'))) return;
+    api('POST', '/api/auth/logout-all', {}).then(function (r) {
+      if (r.status === 401) { handleUnauthorized(r.json); return; }
+      var partial = r.ok && r.json && r.json.revoked === false;
+      closeAccount(); setStatus('unauthenticated', null);
+      if (partial) announce(tx('prof.sec.logoutAllPartial'));
+    }).catch(function () { announce(tx('auth.err.network')); });
+  }
+
+  // ---- mở/đóng ----
+  // tab: 'profile' | 'settings' | 'usage' | 'security'. Khách (chưa đăng nhập / tắt xác thực) chỉ mở được tab Cài đặt.
+  function openAccount(tab) {
+    var want = typeof tab === 'string' && PROF_TABS.indexOf(tab) >= 0 ? tab : 'profile';
+    var authed = S.status === 'authenticated';
+    if (!authed && want !== 'settings') { if (S.status === 'unavailable') { loadSession(); return; } openAuth('login'); return; }
     if (!els.account) buildAccount();
-    lastFocus = document.activeElement; els.account.hidden = false; renderAccount(); refreshQuota();
-    setTimeout(function () { var b = els.account.querySelector('.tg-x'); b && b.focus(); }, 0);
+    prof.tab = authed ? want : 'settings';
+    lastFocus = document.activeElement; els.account.hidden = false;
+    renderAccount(true);
+    if (authed) refreshQuota();
+    setTimeout(function () { var b = els.profTabs.querySelector('[aria-selected="true"]') || els.account.querySelector('.tg-x'); if (b) b.focus(); }, 0);
   }
-  function closeAccount() { S.nameDraft = undefined; if (els.account) els.account.hidden = true; if (lastFocus && lastFocus.focus) try { lastFocus.focus(); } catch (e) {} }
+  function closeAccount() { prof.usageNodes = null; if (els.account) els.account.hidden = true; if (lastFocus && lastFocus.focus) try { lastFocus.focus(); } catch (e) {} }
 
   // ---------------------------------------------------------------- assets (apply + admin)
   function captureOriginalIcons() {
@@ -747,9 +1138,12 @@
 
   // ---------------------------------------------------------------- đổi ngôn ngữ: dựng lại hộp thoại, cập nhật chữ cố định
   function onLanguageChange() {
+    var wasOpen = !!(els.account && !els.account.hidden);
+    unmountSettings(); // trả các mục cài đặt về #settingsModal trước khi gỡ hộp thoại (nếu không sẽ mất DOM cài đặt)
     ['auth', 'account', 'assets', 'reset'].forEach(function (k) { if (els[k]) { if (els[k].parentNode) els[k].parentNode.removeChild(els[k]); els[k] = null; } });
     renderBannerStatic(); renderPill(); renderBanner();
     if (pendingReset) openReset();
+    if (wasOpen) openAccount(prof.tab);
   }
 
   // ---------------------------------------------------------------- đặt mật khẩu từ link email
@@ -810,6 +1204,7 @@
 
   function init() {
     mergeDict();
+    applyPrefs(); installSettingsRedirect();
     var st = document.createElement('style'); st.textContent = CSS; document.head.appendChild(st);
     els.live = h('div', { class: 'tg-sr', 'aria-live': 'polite', role: 'status' });
     els.bannerTime = h('b', { text: '00:00' });

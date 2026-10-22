@@ -87,7 +87,7 @@ function loadConfig(env = process.env) {
       redirectUrl: readUrl(env, 'AUTH_REDIRECT_URL')
     }),
     quota: Object.freeze({
-      tokenLimit: readInt(env, 'AI_TOKEN_LIMIT', 100000, { min: 1000 }),
+      tokenLimit: readInt(env, 'AI_TOKEN_LIMIT', 50000, { min: 1000 }),
       imageTokenCost: readInt(env, 'AI_IMAGE_TOKEN_COST', 4000, { min: 100, max: 200000 }),
       cooldownMinutes: readInt(env, 'AI_COOLDOWN_MINUTES', 35, { min: 30, max: 40 }),
       maxConcurrent: readInt(env, 'AI_MAX_CONCURRENT', 2, { min: 1, max: 20 }),

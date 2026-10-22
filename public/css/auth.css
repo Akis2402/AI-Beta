@@ -37,6 +37,8 @@ h1 { font-size: clamp(1.6rem, 3.6vw, 2.1rem); line-height: 1.15; font-weight: 80
 .or { display: flex; align-items: center; gap: 12px; margin: 18px 0 4px; color: var(--muted); font-size: .9rem; }
 .or::before, .or::after { content: ''; flex: 1; height: 1px; background: var(--line); }
 @media (prefers-reduced-motion: reduce) { .btn-google { transition: none; } }
+/* Cloudflare Turnstile: widget 'flexible' co theo ô form; giữ chỗ để không nhảy layout khi widget tải xong */
+.turnstile { min-height: 65px; margin: 12px 0 4px; }
 
 @media (max-width: 860px) {
   .auth-wrap { grid-template-columns: 1fr; min-height: 0; padding-top: 16px; }
