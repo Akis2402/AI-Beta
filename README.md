@@ -1,6 +1,6 @@
 # Trợ Giải — AI học tập (Full-stack)
 
-Ứng dụng giải bài tập bằng AI, có trích nguồn từ tài liệu (PDF/Word/TXT), đọc ảnh đề bài, vẽ đồ thị/hình học, và xuất flashcard / đề cương ôn tập cho bạn.
+Ứng dụng giải bài tập bằng AI, có trích nguồn từ tài liệu (PDF/Word/TXT), đọc ảnh đề bài, vẽ đồ thị/hình học, và xuất flashcard / đề cương ôn tập.
 
 Kiến trúc **tách frontend – backend** đúng chuẩn web thực tế:
 
