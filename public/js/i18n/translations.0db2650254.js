@@ -871,6 +871,9 @@ window.TRANSLATIONS = {
     ['ap.err.oauth_failed', 'Đăng nhập bằng Google không thành công. Vui lòng thử lại.', 'Google sign-in did not work. Please try again.'],
     ['ap.err.oauth_cancelled', 'Bạn đã hủy đăng nhập bằng Google.', 'You cancelled the Google sign-in.'],
     ['ap.say.google', 'Đang sang Google, hẹn gặp lại!', 'Heading to Google, see you soon!'],
+    ['ap.err.captcha_required', 'Vui lòng hoàn tất bước xác minh bảo mật.', 'Please complete the security check.'],
+    ['ap.err.captcha_failed', 'Xác minh bảo mật không thành công. Hãy thử lại; nếu vẫn lỗi, tải lại trang hoặc tắt trình chặn quảng cáo.', 'The security check failed. Try again; if it persists, reload the page or disable your ad blocker.'],
+    ['ap.err.captcha_unavailable', 'Không xác minh được bảo mật lúc này. Vui lòng thử lại sau.', 'The security check is unavailable right now. Please try again later.'],
 
     ['ak.aria', 'Akis, bạn đồng hành', 'Akis, your study buddy'],
     ['ak.hide', 'Thu nhỏ Akis', 'Minimise Akis'],

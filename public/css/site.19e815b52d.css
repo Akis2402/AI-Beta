@@ -1,0 +1,87 @@
+/* =====================================================================================
+   site.css — token + thành phần dùng chung cho landing.html và auth.html.
+   Màu thương hiệu lấy từ Akis (xanh indigo #4772FF, nền #04061A). Có bản sáng theo hệ thống.
+   ===================================================================================== */
+:root {
+  color-scheme: dark light;
+  --bg: #04061A; --bg2: #0A1030; --surface: #0F1740; --surface2: #16205A; --line: rgba(143, 165, 255, .24);
+  --text: #EEF1FF; --muted: #AEB9EA; --primary: #7DAEFB; --btn: #3E5DF3; --btn-hi: #2F4BD8; --btn-ink: #fff;
+  --accent: #FDDEAF; --ok: #6EE7A0; --err: #FF9AA8; --focus: #FDDEAF; --glow: rgba(71, 114, 255, .38);
+  --font: 'Be Vietnam Pro', system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-hand: 'Itim', 'Be Vietnam Pro', system-ui, sans-serif;
+  --r: 14px; --r-lg: 24px; --shadow: 0 20px 50px rgba(0, 4, 25, .5);
+  --spring: cubic-bezier(.34, 1.56, .64, 1); --ease: cubic-bezier(.2, .7, .2, 1);
+  --p: 0;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #F4F6FF; --bg2: #E8EDFF; --surface: #fff; --surface2: #EEF1FF; --line: rgba(35, 60, 170, .2);
+    --text: #0F1536; --muted: #4A5590; --primary: #3E5DF3; --accent: #9A5A00; --ok: #11713A; --err: #B4233A;
+    --focus: #3E5DF3; --glow: rgba(71, 114, 255, .22); --shadow: 0 18px 40px rgba(40, 60, 160, .18);
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 76px; -webkit-text-size-adjust: 100%; }
+body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 400 1rem/1.6 var(--font); overflow-x: hidden; }
+h1, h2, h3, p { margin: 0; }
+img, svg { max-width: 100%; }
+a { color: var(--primary); }
+[hidden] { display: none !important; }
+.container { width: min(1120px, 100% - 40px); margin-inline: auto; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 6px; }
+.skip { position: fixed; left: 12px; top: -80px; z-index: 100; background: var(--btn); color: var(--btn-ink); padding: 10px 16px; border-radius: 10px; text-decoration: none; font-weight: 600; }
+.skip:focus { top: max(12px, env(safe-area-inset-top)); }
+
+/* ---- nút ---- */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 10px 22px; border-radius: 999px;
+  border: 1px solid transparent; background: var(--btn); color: var(--btn-ink); font: 600 1rem/1.2 var(--font); text-decoration: none; cursor: pointer;
+  transition: transform .18s var(--spring), background .15s, box-shadow .2s; box-shadow: 0 8px 24px var(--glow); }
+.btn:hover { background: var(--btn-hi); transform: translateY(-2px); }
+.btn:active { transform: translateY(0) scale(.98); }
+.btn[disabled] { opacity: .65; cursor: progress; transform: none; }
+.btn-ghost { background: transparent; color: var(--text); border-color: var(--line); box-shadow: none; }
+.btn-ghost:hover { background: var(--surface2); }
+.btn-lg { min-height: 52px; padding: 12px 30px; font-size: 1.05rem; }
+
+/* ---- thanh trên ---- */
+.topbar { position: sticky; top: 0; z-index: 50; padding-top: env(safe-area-inset-top); background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
+.bar { display: flex; align-items: center; gap: 12px; min-height: 64px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font: 700 1.15rem/1 var(--font); margin-right: auto; }
+.brand-mark { width: 34px; height: 34px; border-radius: 10px; }
+.navlinks { display: flex; align-items: center; gap: 8px; }
+.navlinks > a:not(.btn) { color: var(--muted); text-decoration: none; padding: 10px 12px; border-radius: 10px; font-weight: 500; }
+.navlinks > a:not(.btn):hover { color: var(--text); background: var(--surface2); }
+.lang-btn { min-height: 44px; min-width: 44px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--text); font: 600 .9rem var(--font); cursor: pointer; }
+.lang-btn:hover { background: var(--surface2); }
+.progress { position: fixed; left: 0; right: 0; top: 0; height: 3px; z-index: 60; background: linear-gradient(90deg, #7DAEFB, #4772FF, #FDDEAF); transform-origin: 0 50%; transform: scaleX(var(--p)); pointer-events: none; }
+
+/* ---- form ---- */
+.field { display: grid; gap: 6px; margin-bottom: 16px; }
+.field > label, .lbl { font-weight: 600; font-size: .95rem; }
+.input { width: 100%; min-height: 48px; padding: 10px 14px; border-radius: var(--r); border: 1.5px solid var(--line); background: var(--surface2); color: var(--text); font: 400 1rem var(--font); }
+.input::placeholder { color: var(--muted); opacity: .8; }
+.input:hover { border-color: var(--primary); }
+.input:focus-visible { outline-offset: 1px; border-color: var(--primary); }
+.input[aria-invalid="true"] { border-color: var(--err); }
+.hint { color: var(--muted); font-size: .85rem; }
+.msg { min-height: 24px; margin: 4px 0 14px; font-size: .95rem; line-height: 1.45; }
+.msg.err { color: var(--err); } .msg.ok { color: var(--ok); }
+.check { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
+.check input { width: 20px; height: 20px; accent-color: var(--btn); }
+
+/* ---- hiệu ứng hiện dần khi cuộn (chỉ khi JS chạy) ---- */
+.js .rv { opacity: 0; transform: translateY(20px); transition: opacity .6s var(--ease), transform .6s var(--ease); }
+.js .rv.in { opacity: 1; transform: none; }
+.js .rv.d1 { transition-delay: .08s; } .js .rv.d2 { transition-delay: .16s; } .js .rv.d3 { transition-delay: .24s; }
+
+@media (max-width: 720px) {
+  .navlinks > a:not(.btn) { display: none; }
+  .bar { gap: 8px; }
+  .btn { padding: 10px 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .js .rv { opacity: 1; transform: none; }
+}

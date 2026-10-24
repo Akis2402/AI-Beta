@@ -19,7 +19,9 @@ const pdfLib = new Function(slice('const PDF_TEXT_CONCURRENCY', 'async function 
 const chunkLib = new Function(slice('const CONTROL_OR_PUA_RE', 'const PDF_TEXT_MIN_CHARS_PER_PAGE').replace(/\/\/ FIX: PDF[\s\S]*$/, '') + '; return { chunkText };')();
 const scoreLib = new Function(slice('const NORM_CACHE', 'function collectAvailableEvidence') + '; function normalizeForMatch(s){return String(s).toLowerCase();} return { applyIdfScores, normOfChunk };')();
 
-const mkPage = (n, header, footer, bodyLines) => ({ page: n, lines: [header, ...Array.from({ length: bodyLines }, (_, i) => `noi dung dong ${i} trang ${n}`), footer] });
+const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
+// Dòng thân KHÔNG được lặp theo khuôn (chỉ khác chữ số) giữa các trang, nếu không đó chính là header theo định nghĩa.
+const mkPage = (n, header, footer, bodyLines) => ({ page: n, lines: [header, ...Array.from({ length: bodyLines }, (_, i) => `noi dung ${LETTERS[i]} trang ${LETTERS[n % 26]}${LETTERS[(n * 7) % 26]}`), footer] });
 
 (async () => {
   console.log('\n== stripRepeatedPageLines: bỏ header/footer lặp, giữ nội dung ==');
@@ -28,7 +30,7 @@ const mkPage = (n, header, footer, bodyLines) => ({ page: n, lines: [header, ...
   const all = sets.map((s) => s.lines.join('|')).join('\n');
   ok(!/Chân trời sáng tạo/.test(all), 'header lặp bị bỏ');
   ok(!/Trang \d+/.test(all), 'footer "Trang N" (số đổi mỗi trang) bị bỏ');
-  ok(sets.every((s) => s.lines.length === 6 && /noi dung dong 5 trang/.test(s.lines.join('|'))), 'nội dung giữ nguyên 100% (6 dòng/trang)');
+  ok(sets.every((s) => s.lines.length === 6 && /noi dung f trang/.test(s.lines.join('|'))), 'nội dung giữ nguyên 100% (6 dòng/trang)');
 
   console.log('\n== stripRepeatedPageLines: KHÔNG làm mất nội dung ==');
   sets = Array.from({ length: 10 }, (_, i) => mkPage(i + 1, `Bài ${i + 1}`, `Trang ${i + 1}`, 6));
@@ -40,9 +42,10 @@ const mkPage = (n, header, footer, bodyLines) => ({ page: n, lines: [header, ...
   sets = Array.from({ length: 4 }, (_, i) => mkPage(i + 1, 'H', 'F', 6));
   pdfLib.stripRepeatedPageLines(sets);
   ok(sets.every((s) => s.lines[0] === 'H'), 'tài liệu < 5 trang không bị bỏ dòng nào');
-  sets = Array.from({ length: 10 }, (_, i) => mkPage(i + 1, 'Giải', 'Kết luận', 6)); sets[0].lines[0] = 'Mở đầu';
+  // Dòng ngắn giống hệt nhau ở MỌI trang nhưng nằm GIỮA trang (vd. "Giải") là nội dung thật, không bao giờ bị bóc.
+  sets = Array.from({ length: 10 }, (_, i) => ({ page: i + 1, lines: [`A ${LETTERS[i]}`, `B ${LETTERS[(i + 3) % 26]}`, 'mot', 'Giải', 'hai', 'ba', `C ${LETTERS[(i + 5) % 26]}`, `D ${LETTERS[(i + 7) % 26]}`] }));
   pdfLib.stripRepeatedPageLines(sets);
-  ok(sets.slice(1).every((s) => s.lines.length === 6 || s.lines.length === 6), 'dòng lặp ngắn vẫn chỉ bị bóc ở 2 dòng đầu/2 dòng cuối, không động vào thân trang');
+  ok(sets.every((s) => s.lines.length === 8 && s.lines[3] === 'Giải' && s.lines[2] === 'mot'), 'dòng lặp ở GIỮA trang ("Giải") không bị bóc; chỉ xét 2 dòng đầu/2 dòng cuối');
 
   console.log('\n== extractPdfPageLines: song song nhưng đúng thứ tự, an toàn ==');
   let inFlight = 0, maxInFlight = 0, cleaned = 0;
