@@ -29,11 +29,14 @@ const ITEMS = (() => {
 async function boot({ status = 'authenticated', quota } = {}) {
   const calls = [];
   const langHandlers = [];
-  const vc = new VirtualConsole(); vc.on('jsdomError', () => { /* navigation not implemented: bỏ qua */ });
+  const vc = new VirtualConsole();
+  const navs = []; // jsdom không điều hướng thật; mỗi lần code gọi location.assign() nó báo lỗi "Not implemented: navigation" -> đếm lại
+  vc.on('jsdomError', (e) => { if (/navigation/i.test(String((e && e.message) || ''))) navs.push(e.message); });
   const dom = new JSDOM(HTML, { url: 'http://localhost/index.html', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc });
   const win = dom.window;
   const q = quota || { status: 'active', tokensUsed: 40500, tokensReserved: 0, tokenLimit: 50000, retryAfterSeconds: 0 };
   let pwReply = { ok: true, status: 200, body: { ok: true } };
+  let logoutReply = { status: 200, body: { ok: true, status: 'unauthenticated' } };
   win.confirm = () => true;
   win.languageStore = { getUILanguage: () => 'vi', subscribe: (fn) => { langHandlers.push(fn); } };
   win.fetch = async (url, opts = {}) => {
@@ -47,13 +50,14 @@ async function boot({ status = 'authenticated', quota } = {}) {
     if (u.includes('/api/auth/profile')) return res(200, { ok: true, displayName: body.displayName !== undefined ? body.displayName : USER.displayName, bio: body.bio !== undefined ? body.bio : USER.bio, phone: body.phone !== undefined ? body.phone : USER.phone });
     if (u.includes('/api/auth/password')) return res(pwReply.status, pwReply.body);
     if (u.includes('/api/auth/logout-all')) return res(200, { ok: true, status: 'unauthenticated', revoked: true });
+    if (u.includes('/api/auth/logout')) return res(logoutReply.status, logoutReply.body);
     if (u.includes('/api/assets')) return res(200, { keys: [], assets: {} });
     return res(404, {});
   };
   win.eval(SRC);
   await new Promise((r) => (win.document.readyState === 'complete' ? r() : win.addEventListener('load', r)));
   await sleep(80);
-  return { win, doc: win.document, calls, langHandlers, setPw: (r) => { pwReply = r; } };
+  return { win, doc: win.document, calls, navs, langHandlers, setPw: (r) => { pwReply = r; }, setLogout: (r) => { logoutReply = r; } };
 }
 const $ = (doc, sel) => doc.querySelector(sel);
 const tabs = (doc) => Array.from(doc.querySelectorAll('.tg-tab')).map((b) => b.getAttribute('data-k'));
@@ -98,8 +102,9 @@ const setVal = (win, el, v) => { el.value = v; el.dispatchEvent(new win.Event('i
   // đóng rồi mở lại bằng nút thanh bên
   $(t.doc, '.tg-x').click();
   ok($(t.doc, '.tg-prof').parentElement.hidden === true, 'đóng hộp thoại');
-  $(t.doc, '#settingsBtnSide').click(); await sleep(20);
-  ok($(t.doc, '.tg-prof').parentElement.hidden === false && t.doc.querySelectorAll('#tgPanel-settings .set-section').length === nSections, 'nút thanh bên cũng mở Hồ sơ -> Cài đặt, mục cài đặt không bị mất');
+  ok(!t.doc.getElementById('settingsBtnSide'), 'đã xoá nút "Cài đặt AI" ở thanh bên (cài đặt nằm trong Hồ sơ)');
+  $(t.doc, '#settingsBtnTop').click(); await sleep(20);
+  ok($(t.doc, '.tg-prof').parentElement.hidden === false && t.doc.querySelectorAll('#tgPanel-settings .set-section').length === nSections, 'mở lại lần 2 bằng nút trên: mục cài đặt không bị mất');
 
   // app.js gọi thẳng openSettings(): mô phỏng bằng cách bật lớp .show
   $(t.doc, '.tg-x').click();
@@ -128,9 +133,17 @@ const setVal = (win, el, v) => { el.value = v; el.dispatchEvent(new win.Event('i
   ok(/Hỏi đáp/.test(usage.textContent) && /Đọc ảnh/.test(usage.textContent), 'tên loại tiếng Việt (Hỏi đáp / Đọc ảnh)');
   ok(!!$(t.doc, '#tgPanel-usage [role="img"][aria-label]'), 'biểu đồ có mô tả cho trình đọc màn hình');
 
+  ok(!!$(t.doc, '#tgPanel-usage .tg-col.is-today'), 'cột "hôm nay" được nhấn mạnh');
+  ok(t.doc.querySelectorAll('.tg-tab svg').length === 4, 'mỗi tab có icon SVG (không emoji)');
+  ok(t.doc.querySelectorAll('#tgPanel-usage .tg-stat-i svg').length === 3, '3 thẻ thống kê có icon');
+  const dashOff = parseFloat($(t.doc, '#tgPanel-usage .tg-ring-fg').style.strokeDashoffset);
+  ok(Math.abs(dashOff - 264 * (1 - 0.81)) < 1.5 && $(t.doc, '#tgPanel-usage .tg-ringwrap').getAttribute('data-hot') === '1', 'vòng tròn biểu diễn 81% và đổi màu cảnh báo');
+  ok($(t.doc, '.tg-chip').textContent === 'Thành viên', 'header có huy hiệu vai trò (Thành viên)');
+
   console.log('\n== Tab Hồ sơ ==');
   $(t.doc, '#tgTab-profile').click(); await sleep(20);
   ok($(t.doc, '#tgfName').value === 'An Nguyễn' && $(t.doc, '#tgfBio').value === 'Lớp 11' && $(t.doc, '#tgfPhone').value === '0912 345 678' && $(t.doc, '#tgfEmail').readOnly, 'điền sẵn tên, giới thiệu, số điện thoại; email chỉ đọc');
+  ok(!!$(t.doc, '#tgPanel-profile .tg-foot .tg-btn.primary') && !!$(t.doc, '#tgPanel-profile .tg-grid #tgfName') && !!$(t.doc, '#tgPanel-profile .tg-grid #tgfPhone'), 'bố cục mới: tên + số điện thoại trên một hàng, thanh Lưu cố định ở đáy');
   t.calls.length = 0;
   $(t.doc, '#tgPanel-profile .tg-btn.primary').click(); await sleep(10);
   ok(t.calls.length === 0 && /Chưa có thay đổi/.test($(t.doc, '#tgPanel-profile .tg-msg').textContent), 'không đổi gì => không gọi server');
@@ -163,6 +176,24 @@ const setVal = (win, el, v) => { el.value = v; el.dispatchEvent(new win.Event('i
   Array.from(t.doc.querySelectorAll('#tgPanel-security .tg-btn.danger'))[1].click(); await sleep(30);
   ok(t.calls.some((c) => c.url.includes('/api/auth/logout-all') && c.method === 'POST'), '"Đăng xuất mọi thiết bị" gọi /api/auth/logout-all');
   ok($(t.doc, '.tg-prof').parentElement.hidden === true && /Đăng nhập/.test($(t.doc, '.tg-pill').textContent), 'sau đó đóng hộp thoại và pill về "Đăng nhập"');
+  ok(t.navs.length >= 1, 'đăng xuất mọi thiết bị => chuyển sang trang đăng nhập');
+
+  console.log('\n== Đăng xuất: bắt buộc sang trang đăng nhập ==');
+  const lo = await boot();
+  $(lo.doc, '.tg-pill').click(); await sleep(20);
+  $(lo.doc, '#tgTab-security').click(); await sleep(20);
+  lo.navs.length = 0; lo.calls.length = 0;
+  Array.from(lo.doc.querySelectorAll('#tgPanel-security .tg-btn.danger'))[0].click(); await sleep(50);
+  ok(lo.calls.some((c) => /\/api\/auth\/logout$/.test(c.url) && c.method === 'POST'), '"Đăng xuất" gọi POST /api/auth/logout');
+  ok(lo.navs.length >= 1, 'đăng xuất xong => chuyển sang /auth (không ở lại trang chính)');
+  ok(/Đăng nhập/.test($(lo.doc, '.tg-pill').textContent), 'pill về trạng thái chưa đăng nhập');
+  const lf = await boot(); lf.setLogout({ status: 500, body: {} });
+  $(lf.doc, '.tg-pill').click(); await sleep(20);
+  $(lf.doc, '#tgTab-security').click(); await sleep(20);
+  lf.navs.length = 0;
+  Array.from(lf.doc.querySelectorAll('#tgPanel-security .tg-btn.danger'))[0].click(); await sleep(50);
+  ok(lf.navs.length === 0, 'server lỗi khi logout => KHÔNG chuyển trang (tránh /auth đẩy ngược vào app vì còn phiên)');
+  ok(/An Nguyễn/.test($(lf.doc, '.tg-pill').textContent), 'vẫn giữ trạng thái đã đăng nhập để thử lại');
 
   console.log('\n== Tài khoản Google (chưa có mật khẩu) ==');
   const g = await boot();

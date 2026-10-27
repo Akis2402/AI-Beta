@@ -181,7 +181,7 @@
     'prof.pref.motion': 'Giảm chuyển động', 'prof.pref.motionD': 'Tắt hiệu ứng chuyển động và hoạt ảnh để dễ nhìn hơn.',
     'prof.pref.alert': 'Nhắc khi gần hết hạn mức', 'prof.pref.alertD': 'Hiện thông báo khi bạn đã dùng 80% hạn mức AI.',
     'prof.alert.msg': 'Bạn đã dùng 80% hạn mức AI.', 'prof.alert.view': 'Xem chi tiết',
-    'prof.f.bio': 'Giới thiệu', 'prof.f.bioD': 'Tối đa 280 ký tự.', 'prof.f.phone': 'Số điện thoại', 'prof.f.phoneD': 'Không bắt buộc.', 'prof.f.email': 'Email',
+    'prof.f.bio': 'Giới thiệu', 'prof.f.bioD': 'Tối đa 280 ký tự.', 'prof.f.phone': 'Số điện thoại', 'prof.f.phoneD': 'Không bắt buộc.', 'prof.f.email': 'Email', 'prof.f.emailD': 'Email dùng để đăng nhập nên không đổi được ở đây.', 'prof.role.user': 'Thành viên', 'prof.role.admin': 'Quản trị viên',
     'prof.save': 'Lưu thay đổi', 'prof.saved': 'Đã lưu hồ sơ.', 'prof.nochange': 'Chưa có thay đổi nào để lưu.',
     'prof.usage.usedOf': 'Đã dùng {{used}} / {{limit}} token', 'prof.usage.loading': 'Đang tải…',
     'prof.usage.today': 'Hôm nay', 'prof.usage.week': '7 ngày qua', 'prof.usage.requests': 'Lượt gần đây',
@@ -210,7 +210,7 @@
     'prof.pref.motion': 'Reduce motion', 'prof.pref.motionD': 'Turn off motion effects and animations to make things easier to see.',
     'prof.pref.alert': 'Warn me near the limit', 'prof.pref.alertD': 'Show a notice when you have used 80% of your AI allowance.',
     'prof.alert.msg': 'You have used 80% of your AI allowance.', 'prof.alert.view': 'View details',
-    'prof.f.bio': 'About you', 'prof.f.bioD': 'Up to 280 characters.', 'prof.f.phone': 'Phone number', 'prof.f.phoneD': 'Optional.', 'prof.f.email': 'Email',
+    'prof.f.bio': 'About you', 'prof.f.bioD': 'Up to 280 characters.', 'prof.f.phone': 'Phone number', 'prof.f.phoneD': 'Optional.', 'prof.f.email': 'Email', 'prof.f.emailD': 'Your email is used to sign in, so it cannot be changed here.', 'prof.role.user': 'Member', 'prof.role.admin': 'Administrator',
     'prof.save': 'Save changes', 'prof.saved': 'Profile saved.', 'prof.nochange': 'Nothing to save yet.',
     'prof.usage.usedOf': 'Used {{used}} / {{limit}} tokens', 'prof.usage.loading': 'Loading…',
     'prof.usage.today': 'Today', 'prof.usage.week': 'Last 7 days', 'prof.usage.requests': 'Recent requests',
@@ -405,41 +405,62 @@
     // ---- Hồ sơ: tab Hồ sơ / Cài đặt / Sử dụng / Bảo mật ----
     '.tg-pill[data-initial]>span[aria-hidden]{display:none}',
     '.tg-pill[data-initial]::before{content:attr(data-initial);display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--tg-primary);color:var(--tg-primary-fg);font:700 13px/1 Inter,system-ui,sans-serif}',
-    '.tg-prof{width:min(580px,100%);padding:18px 18px 14px}',
-    '.tg-prof-head{display:flex;align-items:center;gap:12px;margin:0 48px 10px 0;min-height:44px}',
-    '.tg-av{flex:none;display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:50%;background:var(--tg-primary);color:var(--tg-primary-fg);font-weight:700;font-size:18px}',
-    '.tg-who{min-width:0}.tg-who h2{margin:0;font-size:18px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.tg-tabs{display:flex;gap:2px;border-bottom:1px solid var(--tg-line);margin:0 0 14px;overflow-x:auto}',
-    '.tg-tab{flex:none;min-height:44px;padding:0 14px;border:0;border-bottom:2px solid transparent;background:none;color:var(--tg-muted);font:600 14px/1 Inter,system-ui,sans-serif;cursor:pointer}',
-    '.tg-tab[aria-selected="true"]{color:var(--tg-fg);border-bottom-color:var(--tg-primary)}',
-    '.tg-tab:focus-visible,.tg-pill:focus-visible,.tg-sw-in:focus-visible+.tg-sw-k{outline:2px solid var(--tg-primary);outline-offset:2px}',
+    // ---- Hồ sơ v2: header gradient, tab dạng viên thuốc có icon, ô nhập lưới, thanh Lưu cố định, vòng % sử dụng ----
+    '.tg-prof{--pf-s1:rgba(127,127,127,.09);--pf-s2:rgba(127,127,127,.15);--pf-bd:rgba(127,127,127,.28);width:min(640px,100%);max-height:min(800px,calc(100dvh - 24px));padding:0;display:flex;flex-direction:column;overflow:hidden;border-radius:22px}',
+    '@supports (color:color-mix(in srgb,red,blue)){.tg-prof{--pf-s1:color-mix(in srgb,var(--tg-fg) 5%,transparent);--pf-s2:color-mix(in srgb,var(--tg-fg) 10%,transparent);--pf-bd:color-mix(in srgb,var(--tg-fg) 18%,transparent)}}',
+    '.tg-prof .tg-x{top:14px;right:14px;z-index:2}',
+    '.tg-prof-head{display:flex;align-items:center;gap:16px;padding:22px 64px 18px 22px;background:linear-gradient(135deg,rgba(91,140,255,.22),transparent 72%);flex:none}',
+    '.tg-av{flex:none;display:inline-flex;align-items:center;justify-content:center;width:60px;height:60px;border-radius:50%;background:linear-gradient(145deg,var(--tg-primary),#7c8cff);color:var(--tg-primary-fg);font-weight:800;font-size:24px;box-shadow:0 0 0 3px var(--tg-bg),0 0 0 5px var(--pf-bd)}',
+    '.tg-who{min-width:0;display:flex;flex-direction:column;gap:3px}.tg-who h2{margin:0;font-size:21px;font-weight:800;line-height:1.2;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.tg-who .tg-sub{margin:0;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.tg-chip{align-self:flex-start;display:inline-flex;align-items:center;min-height:22px;padding:0 10px;border-radius:99px;background:var(--pf-s2);color:var(--tg-fg);font-size:12px;font-weight:700;letter-spacing:.02em}',
+    '.tg-tabs{flex:none;display:flex;gap:4px;margin:0 22px 4px;padding:4px;border-radius:16px;background:var(--pf-s1);border:1px solid var(--pf-bd);overflow-x:auto;scrollbar-width:none}',
+    '.tg-tab{flex:1 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:0 16px;border:0;border-radius:12px;background:transparent;color:var(--tg-muted);font:600 15px/1 Inter,system-ui,sans-serif;cursor:pointer;transition:background .2s,color .2s}',
+    '.tg-tab:hover{background:var(--pf-s2);color:var(--tg-fg)}',
+    '.tg-tab[aria-selected="true"]{background:var(--tg-primary);color:var(--tg-primary-fg);box-shadow:0 2px 10px rgba(0,0,0,.25)}',
+    '.tg-tab:focus-visible,.tg-pill:focus-visible,.tg-sw-in:focus-visible+.tg-sw-k{outline:2px solid var(--tg-fg);outline-offset:2px}',
+    '.tg-panels{flex:1;min-height:0;overflow-y:auto;padding:18px 22px 22px;overscroll-behavior:contain}',
     '.tg-panel[hidden]{display:none}.tg-panel:focus{outline:none}',
-    '.tg-f{margin:0 0 12px}.tg-f label{display:block;margin:0 0 4px;font-size:13px;font-weight:600}.tg-f small{display:block;margin-top:4px;color:var(--tg-muted);font-size:12px}',
-    '.tg-ta{min-height:84px;padding:10px 12px;resize:vertical;line-height:1.4}',
-    '.tg-count{float:right}',
-    '.tg-in[readonly]{opacity:.7}',
-    '.tg-set{margin:0 0 14px;padding-bottom:6px}.tg-set h3,.tg-use h3,.tg-sec h3{margin:0 0 8px;font-size:14px}',
-    '.tg-sw{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px;padding:6px 0;cursor:pointer}',
-    '.tg-sw-t{display:flex;flex-direction:column;gap:2px}.tg-sw-t small{color:var(--tg-muted);font-size:12px}',
+    '.tg-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}',
+    '.tg-f{margin:0 0 16px}.tg-f label{display:block;margin:0 0 6px;font-size:14px;font-weight:700}.tg-f small{display:block;margin-top:6px;color:var(--tg-muted);font-size:13px;line-height:1.4}',
+    '.tg-prof .tg-in{width:100%;min-height:48px;padding:0 14px;border-radius:12px;border:1px solid var(--pf-bd);background:var(--pf-s1);color:var(--tg-fg);font-size:16px;transition:border-color .2s,box-shadow .2s}',
+    '.tg-prof .tg-in:hover{border-color:var(--tg-muted)}',
+    '.tg-prof .tg-in:focus{outline:none;border-color:var(--tg-primary);box-shadow:0 0 0 3px rgba(91,140,255,.35)}',
+    '.tg-ta{min-height:96px;padding:12px 14px;resize:vertical;line-height:1.5}',
+    '.tg-count{float:right;margin-top:6px;font-variant-numeric:tabular-nums}',
+    '.tg-prof .tg-in[readonly]{background:transparent;border-style:dashed;color:var(--tg-muted);cursor:not-allowed}',
+    '.tg-foot{position:sticky;bottom:-22px;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:14px;margin:18px -22px -22px;padding:14px 22px;background:var(--tg-bg);border-top:1px solid var(--pf-bd)}',
+    '.tg-foot .tg-msg{flex:1;margin:0;min-height:0}.tg-foot .tg-btn{flex:none;min-width:150px}',
+    '.tg-prof .tg-btn{min-height:46px;border-radius:12px;font-weight:700;transition:transform .15s,filter .15s}.tg-prof .tg-btn:hover:not(:disabled){filter:brightness(1.08)}.tg-prof .tg-btn:active:not(:disabled){transform:translateY(1px)}',
+    '.tg-set,.tg-sec section,.tg-panel .set-section{margin:0 0 14px;padding:16px;border:1px solid var(--pf-bd);border-radius:16px;background:var(--pf-s1)}',
+    '.tg-set h3,.tg-use h3,.tg-sec h3{margin:0 0 10px;font-size:15px;font-weight:800}',
+    '.tg-sw{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:56px;padding:8px 0;cursor:pointer}.tg-sw+.tg-sw{border-top:1px solid var(--pf-bd)}',
+    '.tg-sw-t{display:flex;flex-direction:column;gap:3px}.tg-sw-t b{font-size:15px}.tg-sw-t small{color:var(--tg-muted);font-size:13px;line-height:1.4}',
     '.tg-sw-in{position:absolute;opacity:0;width:1px;height:1px}',
-    '.tg-sw-k{flex:none;position:relative;width:44px;height:26px;border-radius:99px;background:var(--tg-line);transition:background .2s}',
-    '.tg-sw-k::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .2s}',
-    '.tg-sw-in:checked+.tg-sw-k{background:var(--tg-primary)}.tg-sw-in:checked+.tg-sw-k::after{transform:translateX(18px)}',
-    '.tg-panel .set-section{padding-left:0;padding-right:0}',
-    '.tg-use-top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}.tg-use-n{font-size:20px}.tg-use-pct{font-weight:700;color:var(--tg-muted)}',
-    '.tg-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}',
-    '.tg-stat{padding:10px;border:1px solid var(--tg-line);border-radius:12px}.tg-stat b{display:block;font-size:18px}.tg-stat span{color:var(--tg-muted);font-size:12px}',
-    '.tg-chart{display:flex;align-items:flex-end;gap:6px;height:128px;margin:6px 0 14px}',
-    '.tg-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;height:100%;min-width:0}',
-    '.tg-cv{font-size:11px;color:var(--tg-muted);height:14px}.tg-cl{font-size:11px;color:var(--tg-muted)}',
-    '.tg-cb{flex:1;width:100%;display:flex;align-items:flex-end;border-radius:6px 6px 0 0}.tg-cb>i{display:block;width:100%;border-radius:6px 6px 0 0;background:var(--tg-primary);min-height:2px;transition:height .3s}',
-    '.tg-tbl{width:100%;border-collapse:collapse;font-size:13px}.tg-tbl th,.tg-tbl td{padding:8px 6px;text-align:left;border-bottom:1px solid var(--tg-line)}.tg-tbl th{color:var(--tg-muted);font-weight:600}.tg-tbl td.num,.tg-tbl th.num{text-align:right;font-variant-numeric:tabular-nums}',
-    '.tg-tblwrap{overflow-x:auto}',
-    '.tg-sec section{margin:0 0 18px}',
+    '.tg-sw-k{flex:none;position:relative;width:48px;height:28px;border-radius:99px;background:var(--pf-bd);transition:background .2s}',
+    '.tg-sw-k::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.35);transition:transform .2s}',
+    '.tg-sw-in:checked+.tg-sw-k{background:var(--tg-primary)}.tg-sw-in:checked+.tg-sw-k::after{transform:translateX(20px)}',
+    '.tg-use-top{display:flex;align-items:center;gap:18px;margin:0 0 14px;padding:16px;border:1px solid var(--pf-bd);border-radius:18px;background:linear-gradient(135deg,rgba(91,140,255,.14),transparent 75%)}',
+    '.tg-ringwrap{position:relative;flex:none;width:96px;height:96px}.tg-ring{width:100%;height:100%;transform:rotate(-90deg)}',
+    '.tg-ring circle{fill:none;stroke-width:9;stroke-linecap:round}.tg-ring-bg{stroke:var(--pf-s2)}.tg-ring-fg{stroke:var(--tg-primary);stroke-dasharray:264;stroke-dashoffset:264;transition:stroke-dashoffset .5s}',
+    '.tg-ringwrap[data-hot="1"] .tg-ring-fg{stroke:#d97706}.tg-ringwrap[data-full="1"] .tg-ring-fg{stroke:var(--tg-danger)}',
+    '.tg-use-pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;font-variant-numeric:tabular-nums}',
+    '.tg-use-txt{min-width:0;display:flex;flex-direction:column;gap:4px}.tg-use-n{font-size:20px;font-weight:800;line-height:1.25}.tg-use-txt .tg-sub{margin:0}',
+    '.tg-use .tg-bar{margin:0 0 14px}',
+    '.tg-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 0 18px}',
+    '.tg-stat{display:flex;flex-direction:column;gap:2px;padding:14px;border:1px solid var(--pf-bd);border-radius:16px;background:var(--pf-s1)}',
+    '.tg-stat-i{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin-bottom:6px;border-radius:10px;background:var(--pf-s2);color:var(--tg-primary)}',
+    '.tg-stat b{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1}.tg-stat span:last-child{color:var(--tg-muted);font-size:13px}',
+    '.tg-chart{display:flex;align-items:flex-end;gap:8px;height:150px;margin:6px 0 18px;padding:14px 12px 10px;border:1px solid var(--pf-bd);border-radius:16px;background:var(--pf-s1)}',
+    '.tg-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%;min-width:0}',
+    '.tg-cv{font-size:11px;color:var(--tg-muted);height:14px;font-variant-numeric:tabular-nums}.tg-cl{font-size:12px;color:var(--tg-muted)}.tg-col.is-today .tg-cl{color:var(--tg-fg);font-weight:800}',
+    '.tg-cb{flex:1;width:100%;display:flex;align-items:flex-end}.tg-cb>i{display:block;width:100%;border-radius:8px 8px 3px 3px;background:linear-gradient(180deg,var(--tg-primary),rgba(91,140,255,.35));min-height:3px;transition:height .35s}',
+    '.tg-tblwrap{overflow-x:auto;border:1px solid var(--pf-bd);border-radius:16px}',
+    '.tg-tbl{width:100%;border-collapse:collapse;font-size:14px}.tg-tbl th,.tg-tbl td{padding:12px 14px;text-align:left}.tg-tbl tbody tr+tr td{border-top:1px solid var(--pf-bd)}.tg-tbl th{background:var(--pf-s1);color:var(--tg-muted);font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}.tg-tbl td.num,.tg-tbl th.num{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}',
+    '@media (max-width:560px){.tg-prof{max-height:100dvh;border-radius:22px 22px 0 0}.tg-grid{grid-template-columns:1fr}.tg-prof-head{padding:18px 56px 14px 16px}.tg-tabs{margin:0 14px 4px}.tg-panels{padding:16px 16px 20px}.tg-foot{margin:16px -16px -20px;padding:12px 16px;bottom:-20px}.tg-tab{padding:0 12px}.tg-tab span{display:none}.tg-tab[aria-selected="true"] span{display:inline}.tg-stats{grid-template-columns:1fr}.tg-use-top{padding:14px}.tg-ringwrap{width:84px;height:84px}}',
     '.tg-toast{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:2147482000;display:flex;align-items:center;gap:12px;max-width:min(92vw,460px);padding:12px 14px;border-radius:12px;background:var(--tg-warn-bg);color:var(--tg-warn-fg);box-shadow:var(--tg-shadow);font-size:14px}',
     '.tg-toast[hidden]{display:none}.tg-toast button{flex:none;min-height:36px;padding:0 12px;border:1px solid currentColor;border-radius:8px;background:transparent;color:inherit;font:600 13px/1 Inter,system-ui,sans-serif;cursor:pointer}',
     'html.tg-reduce-motion *,html.tg-reduce-motion *::before,html.tg-reduce-motion *::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}',
-    '@media (max-width:480px){.tg-stats{grid-template-columns:1fr 1fr 1fr}.tg-prof{padding:16px 14px 12px}}',
     '@media (prefers-reduced-motion:reduce){.tg-sw-k,.tg-sw-k::after,.tg-cb>i{transition:none}}'
   ].join('\n');
 
@@ -701,9 +722,16 @@
         setMsg(err && err.json ? errText(err.json) : tx('auth.err.network'), 'err');
       });
   }
+  // Đăng xuất PHẢI đưa người dùng về trang đăng nhập (/auth), không ở lại trang chính. Chỉ chuyển trang khi server đã xoá phiên:
+  // nếu logout lỗi mạng mà vẫn chuyển thì /auth thấy còn phiên và đẩy ngược vào /index.html ("đăng xuất không được").
   function doLogout() {
     setStatus('signing_out', S.user); renderPill();
-    api('POST', '/api/auth/logout').finally(function () { closeAccount(); setStatus('unauthenticated', null); });
+    api('POST', '/api/auth/logout').then(function (r) {
+      if (!r.ok && r.status !== 401) throw new Error('logout_failed');
+      closeAccount(); setStatus('unauthenticated', null); openAuth('login');
+    }).catch(function () {
+      setStatus('authenticated', S.user); renderPill(); announce(tx('auth.err.network'));
+    });
   }
 
   // ---------------------------------------------------------------- Hồ sơ: Hồ sơ · Cài đặt · Sử dụng · Bảo mật
@@ -716,6 +744,27 @@
   function writePref(k, v) { try { var p = readPrefs(); p[k] = v; localStorage.setItem(PREF_KEY, JSON.stringify(p)); } catch (e) { /* trình duyệt chặn storage: bỏ qua */ } }
   function applyPrefs() { document.documentElement.classList.toggle('tg-reduce-motion', readPrefs().reduceMotion === true); }
 
+  // Icon nét (SVG, không emoji) dựng bằng DOM — giữ CSP sạch, không innerHTML.
+  var ICON_PATHS = {
+    user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
+    sliders: 'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6',
+    chart: 'M3 3v18h18M7 15l4-4 3 3 5-6',
+    shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
+    sun: 'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4',
+    calendar: 'M3 5h18v16H3zM3 10h18M8 3v4M16 3v4',
+    list: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01'
+  };
+  var TAB_ICON = { profile: 'user', settings: 'sliders', usage: 'chart', security: 'shield' };
+  function tgIcon(name) {
+    var NS = 'http://www.w3.org/2000/svg';
+    var s = document.createElementNS(NS, 'svg');
+    s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('width', '18'); s.setAttribute('height', '18');
+    s.setAttribute('fill', 'none'); s.setAttribute('stroke', 'currentColor'); s.setAttribute('stroke-width', '1.8');
+    s.setAttribute('stroke-linecap', 'round'); s.setAttribute('stroke-linejoin', 'round');
+    s.setAttribute('aria-hidden', 'true'); s.setAttribute('focusable', 'false');
+    var p = document.createElementNS(NS, 'path'); p.setAttribute('d', ICON_PATHS[name] || ''); s.appendChild(p);
+    return s;
+  }
   function displayLabel() { var u = S.user || {}; return u.displayName || (u.email ? u.email.split('@')[0] : '') || tx('auth.pill.account'); }
   function initialOf() { var a = Array.from(displayLabel()); return a.length ? a[0].toUpperCase() : '?'; }
   function pm(el, kind, text) { el.textContent = text || ''; el.className = 'tg-msg' + (kind ? ' ' + kind : ''); }
@@ -775,7 +824,7 @@
   // theo dõi lớp .show của #settingsOverlay: vừa hiện => đóng bằng closeSettings() của app rồi mở tab Cài đặt.
   function installSettingsRedirect() {
     document.addEventListener('click', function (e) {
-      var b = e.target && e.target.closest ? e.target.closest('#settingsBtnTop,#settingsBtnSide') : null;
+      var b = e.target && e.target.closest ? e.target.closest('#settingsBtnTop') : null;
       if (!b) return;
       e.preventDefault(); e.stopPropagation();
       openAccount('settings');
@@ -813,7 +862,7 @@
     if (S.status === 'authenticated') {
       var u = S.user || {};
       head.appendChild(h('span', { class: 'tg-av', 'aria-hidden': 'true', text: initialOf() }));
-      head.appendChild(h('div', { class: 'tg-who' }, h('h2', { id: 'tgAcctTitle', text: displayLabel() }), h('div', { class: 'tg-sub', text: (u.email || '') + (u.role === 'admin' ? tx('auth.acct.admin') : '') })));
+      head.appendChild(h('div', { class: 'tg-who' }, h('h2', { id: 'tgAcctTitle', text: displayLabel() }), h('div', { class: 'tg-sub', text: u.email || '' }), h('span', { class: 'tg-chip', text: tx(u.role === 'admin' ? 'prof.role.admin' : 'prof.role.user') })));
     } else {
       head.appendChild(h('div', { class: 'tg-who' }, h('h2', { id: 'tgAcctTitle', text: tx('prof.title.guest') }),
         S.status === 'unauthenticated' ? h('button', { class: 'tg-btn', type: 'button', style: 'margin-top:8px', text: tx('auth.pill.login'), onclick: function () { closeAccount(); openAuth('login'); } }) : null));
@@ -826,7 +875,7 @@
     tabs.hidden = list.length < 2;
     list.forEach(function (k) {
       var sel = prof.tab === k;
-      tabs.appendChild(h('button', { class: 'tg-tab', type: 'button', role: 'tab', id: 'tgTab-' + k, 'aria-selected': sel ? 'true' : 'false', 'aria-controls': 'tgPanel-' + k, tabindex: sel ? '0' : '-1', 'data-k': k, onclick: function () { selectTab(k); }, text: tx('prof.tab.' + k) }));
+      tabs.appendChild(h('button', { class: 'tg-tab', type: 'button', role: 'tab', id: 'tgTab-' + k, 'aria-selected': sel ? 'true' : 'false', 'aria-controls': 'tgPanel-' + k, tabindex: sel ? '0' : '-1', 'data-k': k, onclick: function () { selectTab(k); } }, tgIcon(TAB_ICON[k]), h('span', { text: tx('prof.tab.' + k) })));
     });
   }
   function showPanel() {
@@ -875,12 +924,11 @@
         renderPill(); renderProfHead(); pm(msg, 'ok', tx('prof.saved'));
       }).catch(function () { save.disabled = false; pm(msg, 'err', tx('auth.err.network')); });
     } });
-    p.appendChild(tgField('tgfName', 'auth.acct.name', name));
+    p.appendChild(h('div', { class: 'tg-grid' }, tgField('tgfName', 'auth.acct.name', name), tgField('tgfPhone', 'prof.f.phone', phone, 'prof.f.phoneD')));
     p.appendChild(tgField('tgfBio', 'prof.f.bio', h('div', null, bio, cnt), 'prof.f.bioD'));
-    p.appendChild(tgField('tgfPhone', 'prof.f.phone', phone, 'prof.f.phoneD'));
-    p.appendChild(tgField('tgfEmail', 'prof.f.email', email));
-    p.appendChild(msg); p.appendChild(save);
-    if (u.role === 'admin') p.appendChild(h('div', { class: 'tg-row', style: 'margin-top:12px' }, h('button', { class: 'tg-btn', type: 'button', onclick: openAssets, text: tx('auth.acct.assets') })));
+    p.appendChild(tgField('tgfEmail', 'prof.f.email', email, 'prof.f.emailD'));
+    if (u.role === 'admin') p.appendChild(h('div', { class: 'tg-row', style: 'margin:0 0 6px' }, h('button', { class: 'tg-btn', type: 'button', onclick: openAssets, text: tx('auth.acct.assets') })));
+    p.appendChild(h('div', { class: 'tg-foot' }, msg, save));
   }
 
   // ---- tab Sử dụng ----
@@ -890,6 +938,13 @@
     var p = els.profPanels.usage; p.textContent = '';
     var n = prof.usageNodes = {};
     n.used = h('b', { class: 'tg-use-n' }); n.pct = h('span', { class: 'tg-use-pct' });
+    var NS = 'http://www.w3.org/2000/svg';
+    var ring = document.createElementNS(NS, 'svg'); ring.setAttribute('viewBox', '0 0 100 100'); ring.setAttribute('class', 'tg-ring'); ring.setAttribute('aria-hidden', 'true');
+    ['tg-ring-bg', 'tg-ring-fg'].forEach(function (c) {
+      var ci = document.createElementNS(NS, 'circle'); ci.setAttribute('cx', '50'); ci.setAttribute('cy', '50'); ci.setAttribute('r', '42'); ci.setAttribute('class', c);
+      ring.appendChild(ci); if (c === 'tg-ring-fg') n.ringFg = ci;
+    });
+    n.ringWrap = h('div', { class: 'tg-ringwrap' }, ring, n.pct);
     n.fill = h('i');
     n.bar = h('div', { class: 'tg-bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-label': tx('auth.acct.barLabel') }, n.fill);
     n.sub = h('div', { class: 'tg-sub' });
@@ -899,7 +954,7 @@
     n.list = h('div');
     var refresh = h('button', { class: 'tg-btn', type: 'button', text: tx('prof.usage.refresh'), onclick: function () { refreshQuota(); loadUsage(); } });
     p.appendChild(h('section', { class: 'tg-use' },
-      h('div', { class: 'tg-use-top' }, n.used, n.pct), n.bar, n.sub, n.cd,
+      h('div', { class: 'tg-use-top' }, n.ringWrap, h('div', { class: 'tg-use-txt' }, n.used, n.sub)), n.bar, n.cd,
       n.stats,
       h('h3', { text: tx('prof.usage.chart') }), n.chart,
       h('h3', { text: tx('prof.usage.recent') }), n.list,
@@ -917,6 +972,8 @@
     n.used.textContent = tx('prof.usage.usedOf', { used: fmtInt(qs.used), limit: fmtInt(qs.limit) });
     n.pct.textContent = pct + '%';
     n.fill.style.width = pct + '%';
+    n.ringFg.style.strokeDashoffset = String(264 * (1 - pct / 100));
+    n.ringWrap.setAttribute('data-hot', pct >= 80 ? '1' : ''); n.ringWrap.setAttribute('data-full', pct >= 100 ? '1' : '');
     n.bar.setAttribute('aria-valuemax', String(qs.limit)); n.bar.setAttribute('aria-valuenow', String(qs.used));
     n.bar.setAttribute('data-hot', pct >= 80 ? '1' : ''); n.bar.setAttribute('data-full', pct >= 100 ? '1' : '');
     n.sub.textContent = cd ? tx('auth.acct.locked') : tx('auth.acct.remaining', { n: fmtInt(Math.max(0, qs.limit - spent)) });
@@ -948,15 +1005,15 @@
       var o = map[pfDayKey(t)]; var v = Number(it.total) || 0;
       if (o) { o.total += v; week += v; }
     });
-    [[days[6].total, 'prof.usage.today'], [week, 'prof.usage.week'], [items.length, 'prof.usage.requests']].forEach(function (s) {
-      n.stats.appendChild(h('div', { class: 'tg-stat' }, h('b', { text: fmtInt(s[0]) }), h('span', { text: tx(s[1]) })));
+    [[days[6].total, 'prof.usage.today', 'sun'], [week, 'prof.usage.week', 'calendar'], [items.length, 'prof.usage.requests', 'list']].forEach(function (s) {
+      n.stats.appendChild(h('div', { class: 'tg-stat' }, h('span', { class: 'tg-stat-i' }, tgIcon(s[2])), h('b', { text: fmtInt(s[0]) }), h('span', { text: tx(s[1]) })));
     });
     var max = Math.max.apply(null, days.map(function (o) { return o.total; }).concat(1));
     var labels = [];
     days.forEach(function (o) {
       var wd = o.d.toLocaleDateString(numLocale(), { weekday: 'short' });
       var bar = h('i'); bar.style.height = Math.max(o.total ? 6 : 2, Math.round(o.total / max * 100)) + '%';
-      n.chart.appendChild(h('div', { class: 'tg-col', 'aria-hidden': 'true' }, h('span', { class: 'tg-cv', text: o.total ? pfCompact(o.total) : '' }), h('span', { class: 'tg-cb' }, bar), h('span', { class: 'tg-cl', text: wd })));
+      n.chart.appendChild(h('div', { class: 'tg-col' + (o === days[6] ? ' is-today' : ''), 'aria-hidden': 'true' }, h('span', { class: 'tg-cv', text: o.total ? pfCompact(o.total) : '' }), h('span', { class: 'tg-cb' }, bar), h('span', { class: 'tg-cl', text: wd })));
       labels.push(wd + ' ' + fmtInt(o.total));
     });
     n.chart.setAttribute('aria-label', tx('prof.usage.chartAria', { list: labels.join(', ') }));
@@ -1014,7 +1071,7 @@
     api('POST', '/api/auth/logout-all', {}).then(function (r) {
       if (r.status === 401) { handleUnauthorized(r.json); return; }
       var partial = r.ok && r.json && r.json.revoked === false;
-      closeAccount(); setStatus('unauthenticated', null);
+      closeAccount(); setStatus('unauthenticated', null); openAuth('login');
       if (partial) announce(tx('prof.sec.logoutAllPartial'));
     }).catch(function () { announce(tx('auth.err.network')); });
   }

@@ -153,6 +153,13 @@
       if (turnstileToken) body.turnstileToken = turnstileToken;
       return api('POST', '/api/auth/forgot', body);
     },
+    /** Gửi lại email xác nhận đăng ký (server gọi supabase.auth.resend type=signup). */
+    resend: async function (email, turnstileToken) {
+      var pow = await getPow();
+      var body = { email: email, challenge: pow.challenge, nonce: pow.nonce };
+      if (turnstileToken) body.turnstileToken = turnstileToken;
+      return api('POST', '/api/auth/resend', body);
+    },
     isEmail: isEmail, isStrongPassword: isStrongPassword, errorKey: errorKey, safeNext: safeNext,
     _sha256: sha256Js, _leadingZeroBits: leadingZeroBits, _solvePow: solvePow
   };

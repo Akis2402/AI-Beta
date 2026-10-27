@@ -121,9 +121,36 @@ router.post('/signup', ensureConfigured, ensureOrigin, signupLimiter, authLimite
       return res.json({ ok: true, status: 'authenticated', message: 'Đăng ký thành công.' });
     }
     // Email đã tồn tại / cần xác nhận / lỗi nghiệp vụ khác: cùng một câu trả lời trung tính.
+    // Đăng ký lại cùng email (vd. tài khoản trước đó chưa xác nhận/đã xoá rồi đăng ký lại): nếu GoTrue KHÔNG báo đã gửi thư
+    // (không có confirmation_sent_at) thì tự gửi lại — tương đương supabase.auth.resend({ type: 'signup', email }). Best-effort:
+    // bị giới hạn tần suất/lỗi mạng KHÔNG đổi phản hồi trung tính (không lộ email đã tồn tại hay chưa).
+    if (r.ok && r.data && !(r.data.confirmation_sent_at || (r.data.user && r.data.user.confirmation_sent_at))) {
+      try { await sb.auth.resendSignup(e.value); } catch (_) { /* best-effort */ }
+    }
     return res.json({ ok: true, status: 'confirmation_pending', message: NEUTRAL_SIGNUP });
   } catch (err) {
     return bad(res, 503, 'Dịch vụ đăng ký tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
+  }
+});
+
+// ---- POST /api/auth/resend  (gửi lại email xác nhận đăng ký = supabase.auth.resend({ type: 'signup', email })) ----
+// Phản hồi LUÔN trung tính (không lộ email có tồn tại/đã xác nhận hay chưa); cùng lớp chống lạm dụng như đăng ký (captcha + PoW + rate limit).
+const NEUTRAL_RESEND = 'Nếu email này đang chờ xác nhận, một thư xác nhận mới đã được gửi. Hãy kiểm tra cả mục Spam.';
+router.post('/resend', ensureConfigured, ensureOrigin, signupLimiter, authLimiter, async (req, res) => {
+  noStore(res);
+  const body = req.body || {};
+  const e = session.validateEmail(body.email);
+  if (!e.ok) return bad(res, 400, e.message, 'invalid_email');
+  if (!(await captchaGate(res, body.turnstileToken))) return;
+  const powResult = await pow.verify(body.challenge, body.nonce);
+  if (!powResult.ok) return bad(res, 400, 'Xác minh chống lạm dụng không hợp lệ. Vui lòng thử lại.', powResult.code);
+  try {
+    const r = await sb.auth.resendSignup(e.value);
+    if (r.status >= 500) return bad(res, 503, 'Dịch vụ gửi thư tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
+    if (r.status === 429) return bad(res, 429, 'Bạn vừa yêu cầu gửi thư. Vui lòng đợi khoảng 1 phút rồi thử lại.', 'resend_rate_limited');
+    return res.json({ ok: true, message: NEUTRAL_RESEND });
+  } catch (err) {
+    return bad(res, 503, 'Dịch vụ gửi thư tạm thời không khả dụng. Vui lòng thử lại sau.', 'auth_unavailable');
   }
 });
 

@@ -26,7 +26,7 @@
     hint: $('pwHint'), toggle: $('pwToggle'), remember: $('apRemember'), rememberRow: $('rememberRow'), msg: $('apMsg'),
     submit: $('apSubmit'), title: $('apTitle'), sub: $('apSub'), tabs: $('apTabs'), tabLogin: $('tabLogin'), tabSignup: $('tabSignup'),
     forgot: $('forgotLink'), backLogin: $('backLogin'),
-    name: $('apName'), nameField: $('nameField'), oauth: $('oauthBlock'), google: $('googleBtn'), captcha: $('cfTurnstile')
+    name: $('apName'), nameField: $('nameField'), oauth: $('oauthBlock'), google: $('googleBtn'), captcha: $('cfTurnstile'), resendBox: $('resendBox'), resendBtn: $('resendBtn')
   };
 
   var params = new URLSearchParams(location.search);
@@ -76,6 +76,7 @@
     el.pwField.hidden = forgot; el.pw.required = !forgot;
     el.pw2Field.hidden = !signup; el.hint.hidden = !signup;
     el.nameField.hidden = !signup; el.oauth.hidden = forgot;
+    el.resendBox.hidden = true;
     el.rememberRow.hidden = forgot;
     el.pw.autocomplete = signup ? 'new-password' : 'current-password';
     el.forgot.hidden = mode !== 'login'; el.backLogin.hidden = !forgot;
@@ -212,14 +213,48 @@
     var j = r.json || {};
     if (r.ok) {
       if (mode === 'forgot') { showMsg('ap.ok.forgot', 'ok'); state('success'); say('ap.say.pending', 4000); settle(2200); return; }
-      if (mode === 'signup' && j.status !== 'authenticated') { showMsg('ap.ok.pending', 'ok'); state('success'); say('ap.say.pending', 5000); settle(2400); return; }
+      if (mode === 'signup' && j.status !== 'authenticated') { showMsg('ap.ok.pending', 'ok'); state('success'); say('ap.say.pending', 5000); showResend(email); settle(2400); return; }
       return enterApp('ap.ok.enter');
     }
     var key = j.code ? C.errorKey(j) : (r.status === 429 ? 'ap.err.auth_rate_limited' : 'ap.err.generic');
     var field = /password|credentials/.test(String(j.code || '')) ? el.pw : (/email/.test(String(j.code || '')) ? el.email : null);
+    if (j.code === 'email_not_confirmed') showResend(email);
     fail(key, field);
   }
   el.form.addEventListener('submit', function (e) { e.preventDefault(); if (!busy) submit(); });
+
+  // ------------------------------------------------------------------ Gửi lại email xác minh (supabase.auth.resend type=signup)
+  // Hiện sau khi đăng ký, hoặc khi đăng nhập báo "email chưa xác nhận". Có đếm ngược 60 giây (GoTrue giới hạn 1 thư/60s).
+  var resendEmail = '', resendTimer = 0;
+  function startResendCooldown(sec) {
+    clearInterval(resendTimer);
+    var left = sec;
+    el.resendBtn.disabled = true;
+    function paint() { el.resendBtn.textContent = tr('ap.resend') + ' (' + left + 's)'; }
+    paint();
+    resendTimer = setInterval(function () {
+      left -= 1;
+      if (left <= 0) { clearInterval(resendTimer); el.resendBtn.disabled = false; el.resendBtn.textContent = tr('ap.resend'); } else paint();
+    }, 1000);
+  }
+  function showResend(email) { resendEmail = email; el.resendBox.hidden = false; startResendCooldown(60); }
+  el.resendBtn.addEventListener('click', async function () {
+    if (!resendEmail || busy) return;
+    if (tsId !== null && !tsToken) return fail('ap.err.captcha_required', null);
+    var token = tsToken; tsReset();
+    setBusy(true); showMsg('ap.pow');
+    try {
+      var r = await C.resend(resendEmail, token);
+      setBusy(false);
+      if (r.ok) { showMsg('ap.ok.resent', 'ok'); state('success'); say('ap.say.pending', 4000); startResendCooldown(60); return; }
+      var j = r.json || {};
+      if (j.code === 'resend_rate_limited') startResendCooldown(60);
+      fail(j.code ? C.errorKey(j) : 'ap.err.generic', null);
+    } catch (err) {
+      setBusy(false);
+      fail(err && err.json ? C.errorKey(err.json) : 'ap.err.network', null);
+    }
+  });
 
   // ------------------------------------------------------------------ ngôn ngữ
   var langBtn = $('langBtn');

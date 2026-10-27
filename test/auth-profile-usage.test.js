@@ -2,12 +2,17 @@
 // ---------- Hồ sơ mở rộng + lịch sử Usage + đổi mật khẩu + đăng xuất mọi thiết bị + hạn mức mặc định 50.000 ----------
 // Dùng route THẬT server/routes/auth.js (requireUser thật). Supabase được GIẢ LẬP bằng cách thay global.fetch.
 // Chạy: node test/auth-profile-usage.test.js
+// Đặt GIÁ TRỊ TƯỜNG MINH (kể cả chuỗi rỗng = "dùng mặc định") thay vì `delete`: nếu runner/`.env` nạp dotenv thì dotenv KHÔNG ghi đè
+// biến đã tồn tại, nên test không phụ thuộc vào .env của từng máy (vd. AI_TOKEN_LIMIT=100000 cũ hoặc AUTH_ENFORCEMENT=off).
+process.env.NODE_ENV = 'test';
+process.env.AUTH_ENFORCEMENT = 'on';
 process.env.SUPABASE_URL = 'https://proj.supabase.co';
 process.env.SUPABASE_ANON_KEY = 'anon';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'svc';
 process.env.RATE_LIMIT_AUTH = '1000';
-delete process.env.AI_TOKEN_LIMIT;
-delete process.env.TURNSTILE_SECRET_KEY;
+process.env.AI_TOKEN_LIMIT = '';
+process.env.AUTH_REDIRECT_URL = '';
+process.env.TURNSTILE_SECRET_KEY = '';
 
 const http = require('http');
 const express = require('express');
