@@ -22,12 +22,13 @@
  */
 export const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
-  "script-src 'self' https://js.puter.com",
+  "script-src 'self' https://js.puter.com https://challenges.cloudflare.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data: blob:",
   "connect-src 'self' https://api.puter.com wss://api.puter.com https://js.puter.com",
   "worker-src 'self' blob:",
+  "frame-src https://challenges.cloudflare.com",
   "object-src 'none'",
   "base-uri 'self'",
   "frame-ancestors 'none'"

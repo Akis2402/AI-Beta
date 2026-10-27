@@ -121,6 +121,12 @@ const auth = {
     return { ok: res.ok, status: res.status };
   },
   /** Gửi email đặt lại mật khẩu. GoTrue trả 200 cả khi email không tồn tại (không lộ tài khoản). */
+  /** Gửi lại email xác nhận đăng ký. Tương đương supabase.auth.resend({ type: 'signup', email }): POST /auth/v1/resend {email, type} (xác minh với @supabase/auth-js 2.118.0). */
+  async resendSignup(email) {
+    const cfg = getConfig().supabase;
+    const res = await call('POST', '/auth/v1/resend', { apiKey: cfg.anonKey, body: { email, type: 'signup' } });
+    return { ok: res.ok, status: res.status, data: await readJson(res) };
+  },
   async recover(email, redirectTo) {
     const cfg = getConfig().supabase;
     const q = redirectTo ? `?redirect_to=${encodeURIComponent(redirectTo)}` : '';

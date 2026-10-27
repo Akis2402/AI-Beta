@@ -575,7 +575,6 @@ if (el('flashcardTopBtn')) el('flashcardTopBtn').innerHTML = ICONS.cards;
 if (el('recommendTopBtn')) el('recommendTopBtn').innerHTML = ICONS.outline;
 if (el('attachBtn')) el('attachBtn').innerHTML = ICONS.camera;
 if (el('micBtn')) el('micBtn').innerHTML = ICONS.microphone;
-if (el('settingsGearIcon')) el('settingsGearIcon').innerHTML = ICONS.settings;
 document.querySelectorAll('.think-opt .ic').forEach((s) => { s.innerHTML = ICONS[s.dataset.icon]; });
 // PREMIUM PASS: nạp icon SVG cho các chỗ trước đây dùng emoji làm icon chính (mục 5/18/29 brief nâng cấp UI) —
 // chỉ thay icon thuần trang trí, KHÔNG đụng emoji nào tham gia parse nội dung AI (vd 🌐 trong extractWebSourceNote).
@@ -905,7 +904,6 @@ function createDialog(opts) {
 const settingsDialog = createDialog({ root: el('settingsOverlay'), openClass: 'show', modal: true, backdrop: true, fallbackOpener: () => el('settingsBtnTop') });
 function openSettings(e) { settingsDialog.open(e && e.currentTarget); }
 function closeSettings() { settingsDialog.close(); }
-el('settingsBtnSide').onclick = openSettings;
 el('settingsBtnTop').onclick = openSettings;
 el('settingsCloseBtn').onclick = closeSettings;
 

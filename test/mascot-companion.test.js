@@ -32,7 +32,9 @@ function load(status, store) {
   w.t = (k, vars) => { let s = (TR.vi[k] || k); Object.keys(vars || {}).forEach((x) => { s = s.replace('{{' + x + '}}', vars[x]); }); return s; };
   w.languageStore = { subscribe() {}, getUILanguage: () => 'vi' };
   w.TGAuth = { getState: () => ({ status }) };
-  w.eval(read('js/mascot/akisImage.js'));
+  w.eval(read('js/mascot/akisRig.js'));
+  w.eval(read('js/mascot/akisPoses.js'));
+  w.eval(read('js/mascot/akisMotion.js'));
   w.eval(read('js/mascot/mascot.js'));
   w.eval(read('js/ui/mascotCompanion.js'));
   return { w, d: w.document, calls };
@@ -50,7 +52,7 @@ function load(status, store) {
   ok(!!host, 'status=authenticated -> dựng #tgAkis');
   const btn = host.querySelector('button.tg-akis-btn');
   ok(btn && btn.getAttribute('aria-label') === TR.vi['ak.hide'] && btn.getAttribute('aria-expanded') === 'true', 'nút Akis có aria-label + aria-expanded');
-  ok(btn.querySelector('img.ak-img') && btn.querySelector('img').getAttribute('src') === s.w.AKIS_IMG, 'widget dùng đúng ảnh Akis gốc');
+  ok(btn.querySelector('svg') && !btn.querySelector('img'), 'widget dùng rig SVG vector của Akis (không còn ảnh raster)');
   await sleep(1100);
   const dlg = host.querySelector('.tg-akis-tour');
   ok(dlg && dlg.getAttribute('role') === 'dialog' && !!dlg.getAttribute('aria-label'), 'tour mở sau ~1 giây, role=dialog + aria-label');
